@@ -1,0 +1,18 @@
+[package]
+name = "vortex"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio-uring = { version = "0.3.0", features = ["bytes"]}
+# Focus is not on this encoding
+serde_bencode = "0.2.3"
+serde = "1.0"
+serde_derive = "1.0"
+serde_bytes = "0.11"
+magnet-url = "2.0"
+rand = "0.8.5"
+bytes = "1.1"
+sha1 = "0.10.1"
