@@ -15,6 +15,18 @@ impl NodeId {
             *most_significant >>= 1;
         }
     }
+
+    // a bit odd to return another node id here
+    pub fn distance(&self, other: &NodeId) -> NodeId {
+        // Almost optimal asm generated but can be improved
+        let mut dist = [0; 20];
+        self.0
+            .iter()
+            .zip(other.0.iter())
+            .zip(dist.iter_mut())
+            .for_each(|((a, b), res)| *res = a ^ b);
+        NodeId(dist)
+    }
 }
 
 impl From<&[u8]> for NodeId {
@@ -102,6 +114,7 @@ impl Bucket {
 #[derive(Debug)]
 pub struct RoutingTable {
     buckets: Vec<Bucket>,
+    // TODO: Perhaps worth passing this along with insert_node and not keep it here
     own_id: NodeId,
 }
 
@@ -118,7 +131,7 @@ impl RoutingTable {
     }
 
     pub fn insert_node(&mut self, node: Node) -> bool {
-        // naive
+        // TODO: naive
         for bucket in self.buckets.iter_mut() {
             if bucket.covers(&node.id) {
                 if let Some(empty_spot) = bucket.empty_spot() {
