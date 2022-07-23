@@ -1,93 +1,18 @@
 use bytes::{BufMut, Bytes};
 use magnet_url::Magnet;
 use rand::prelude::*;
+use routing_table::RoutingTable;
 use serde_bytes::ByteBuf;
-use serde_derive::Deserialize;
+use serde_derive::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use tokio_uring::net::UdpSocket;
+use trust_dns_resolver::{
+    config::{ResolverConfig, ResolverOpts},
+    Resolver,
+};
 
-#[derive(Debug, Deserialize)]
-struct Node(String, i64);
+mod routing_table;
 
-#[derive(Debug, Deserialize)]
-struct File {
-    path: Vec<String>,
-    length: i64,
-    #[serde(default)]
-    md5sum: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Info {
-    name: String,
-    pieces: ByteBuf,
-    #[serde(rename = "piece length")]
-    piece_length: i64,
-    #[serde(default)]
-    md5sum: Option<String>,
-    #[serde(default)]
-    length: Option<i64>,
-    #[serde(default)]
-    files: Option<Vec<File>>,
-    #[serde(default)]
-    private: Option<u8>,
-    #[serde(default)]
-    path: Option<Vec<String>>,
-    #[serde(default)]
-    #[serde(rename = "root hash")]
-    root_hash: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Torrent {
-    info: Info,
-    #[serde(default)]
-    announce: Option<String>,
-    #[serde(default)]
-    nodes: Option<Vec<Node>>,
-    #[serde(default)]
-    encoding: Option<String>,
-    #[serde(default)]
-    httpseeds: Option<Vec<String>>,
-    #[serde(default)]
-    #[serde(rename = "announce-list")]
-    announce_list: Option<Vec<Vec<String>>>,
-    #[serde(default)]
-    #[serde(rename = "creation date")]
-    creation_date: Option<i64>,
-    #[serde(rename = "comment")]
-    comment: Option<String>,
-    #[serde(default)]
-    #[serde(rename = "created by")]
-    created_by: Option<String>,
-}
-
-fn render_torrent(torrent: &Torrent) {
-    println!("name:\t\t{}", torrent.info.name);
-    println!("announce:\t{:?}", torrent.announce);
-    println!("nodes:\t\t{:?}", torrent.nodes);
-    if let Some(al) = &torrent.announce_list {
-        for a in al {
-            println!("announce list:\t{}", a[0]);
-        }
-    }
-    println!("httpseeds:\t{:?}", torrent.httpseeds);
-    println!("creation date:\t{:?}", torrent.creation_date);
-    println!("comment:\t{:?}", torrent.comment);
-    println!("created by:\t{:?}", torrent.created_by);
-    println!("encoding:\t{:?}", torrent.encoding);
-    println!("piece length:\t{:?}", torrent.info.piece_length);
-    println!("private:\t{:?}", torrent.info.private);
-    println!("root hash:\t{:?}", torrent.info.root_hash);
-    println!("md5sum:\t\t{:?}", torrent.info.md5sum);
-    println!("path:\t\t{:?}", torrent.info.path);
-    if let Some(files) = &torrent.info.files {
-        for f in files {
-            println!("file path:\t{:?}", f.path);
-            println!("file length:\t{}", f.length);
-            println!("file md5sum:\t{:?}", f.md5sum);
-        }
-    }
-}
 // https://www.bittorrent.org/beps/bep_0015.html
 struct TrackerPacket {
     protocol_id: i64,
@@ -168,54 +93,137 @@ impl AnnounceRequest {
     }
 }
 
-fn generate_node_id() -> [u8; 20] {
+fn generate_node_id() -> Bytes {
     let id = rand::random::<[u8; 20]>();
     let mut hasher = Sha1::new();
     hasher.update(id);
-    hasher.finalize().into()
+    Bytes::copy_from_slice(hasher.finalize().as_slice())
+    /*.into_iter()
+    .take(10)
+    .map(|byte| format!("{byte:02x}"))
+    .collect()*/
+}
+
+// Bootstrap nodes
+//dht.transmissionbt.com 6881
+//router.bittorrent.com  6881
+//router.bitcomet.com    6881
+//dht.aelitis.com        6881
+//bootstrap.jami.net     4222
+
+const BOOTSTRAP: &str = "router.bittorrent.com";
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum Query {
+    Ping {
+        id: Bytes,
+    },
+    FindNode {
+        id: Bytes,
+        target: Bytes,
+    },
+    GetPeers {
+        id: Bytes,
+        info_hash: Bytes,
+    },
+    AnnouncePeer {
+        id: Bytes,
+        implied_port: bool,
+        info_hash: Bytes,
+        port: u16,
+        token: Bytes,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Response {
+    // For both ping and announce peer
+    QueriedNodeId {
+        id: Bytes,
+    },
+    FindNode {
+        id: Bytes,
+        nodes: String,
+    },
+    GetPeers {
+        id: Bytes,
+        token: Bytes,
+        values: Option<Vec<String>>,
+        nodes: Option<String>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct KrpcReq {
+    t: String,
+    y: char,
+    q: String,
+    a: Query,
+}
+
+#[derive(Debug, Deserialize)]
+struct KrpcRes {
+    t: String,
+    // TODO errors
+    y: String,
+    r: Response,
 }
 
 fn main() {
-    /*let test: Torrent = serde_bencode::de::from_bytes(include_bytes!("../test.torrent")).unwrap();
-    render_torrent(&test);
+    let node_id = generate_node_id();
+    // Do this async
+    let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default()).unwrap();
+    let ip = resolver.lookup_ip(BOOTSTRAP).unwrap();
+    let ip = ip.iter().next().unwrap();
 
-    let connect = TrackerPacket::new(0);
+    //let mut routing_table = RoutingTable::new();
 
     tokio_uring::start(async move {
-        let socket = tokio_uring::net::UdpSocket::bind("0.0.0.0:1337".parse().unwrap())
+        let socket = UdpSocket::bind("0.0.0.0:1337".parse().unwrap())
             .await
             .unwrap();
+        let msg = serde_bencode::ser::to_bytes(&KrpcReq {
+            t: "ta".to_owned(),
+            y: 'q',
+            q: "ping".to_owned(),
+            a: Query::Ping {
+                id: node_id.clone(),
+            },
+        })
+        .unwrap();
 
-        let tracker_addr = test
-            .announce_list
-            .unwrap()
-            .iter()
-            .find(|announce| announce[0].starts_with("udp"))
-            .unwrap()[0]
-            .clone();
-        dbg!(&tracker_addr);
-
-        let addr_v2 = "93.158.213.92:1337".parse().unwrap();
-        let trans_id = connect.transaction_id;
-        socket.send_to(connect.to_bytes(), addr_v2).await;
-        let buf = vec![0; 16];
-        while let (Ok((size, recv_addr)), bytes) = socket.recv_from(buf.clone()).await {
-            if recv_addr == addr_v2 {
-                println!("Got data!");
-                if size == 0 {
-                    continue;
-                }
-                let bytes: Bytes = dbg!(bytes.into());
-                let response = TrackerResponse::from(bytes);
-                assert!(response.transaction_id == trans_id);
-                println!("connected!");
-                dbg!(response);
+        dbg!(serde_bencode::ser::to_string(&KrpcReq {
+            t: "ta".to_string(),
+            y: 'q',
+            q: "ping".to_string(),
+            a: Query::Ping {
+                id: "abcdefghij0123456789".as_bytes().into(),
             }
+        })
+        .unwrap());
+
+        let (res, _) = socket
+            .send_to(msg, format!("{ip}:6881").parse().unwrap())
+            .await;
+        res.unwrap();
+
+        println!("sent!");
+        let buf = vec![0; 256];
+        let (response, buf) = socket.recv_from(buf).await;
+        println!("recv");
+        let (recv, _addr) = response.unwrap();
+        let resp: KrpcRes = serde_bencode::de::from_bytes(&buf[..recv]).unwrap();
+        dbg!(&resp);
+
+        assert!(resp.t == "ta".to_string());
+        if let Response::QueriedNodeId { id } = resp.r {
+        } else {
+            panic!("Incorrect response");
         }
-    });*/
 
-    let magent_url = Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
-    let node_id = generate_node_id();
-
-    dbg!(magent_url);
+        let magent_url =
+            Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
+    });
 }
