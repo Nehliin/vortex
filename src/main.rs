@@ -4,7 +4,7 @@ use bytes::{BufMut, Bytes};
 use krpc::{KrpcService, Response};
 use magnet_url::Magnet;
 use rand::prelude::*;
-use routing_table::{Node, NodeId, RoutingTable, ID_ZERO};
+use routing_table::{Node, NodeId, RoutingTable, ID_MAX, ID_ZERO};
 use sha1::{Digest, Sha1};
 use trust_dns_resolver::{
     config::{ResolverConfig, ResolverOpts},
@@ -127,12 +127,16 @@ fn main() {
     let ip = resolver.lookup_ip(BOOTSTRAP).unwrap();
     let ip = ip.iter().next().unwrap();
 
+    let should_bootstrap;
     let mut routing_table;
     if let Some(table) = load_table(Path::new("routing_table.json")) {
+        println!("Loading table!");
         routing_table = table;
+        should_bootstrap = false;
     } else {
         let node_id = generate_node_id();
         routing_table = RoutingTable::new(node_id);
+        should_bootstrap = true;
     }
 
     tokio_uring::start(async move {
@@ -140,21 +144,49 @@ fn main() {
             .await
             .unwrap();
 
-        let mut node = Node {
-            id: ID_ZERO,
-            host: ip.to_string(),
-            port: 6881,
-        };
+        if should_bootstrap {
+            let mut node = Node {
+                id: ID_ZERO,
+                host: ip.to_string(),
+                port: 6881,
+            };
 
-        let response = service.ping(&node).await.unwrap();
+            let response = service.ping(&node).await.unwrap();
 
-        if let Response::QueriedNodeId { id } = response {
-            node.id = id.into();
-            dbg!(&node);
-            routing_table.insert_node(node);
-            save_table(Path::new("routing_table.json"), &routing_table).unwrap();
+            if let Response::QueriedNodeId { id } = response {
+                node.id = id.into();
+                dbg!(&node);
+                routing_table.insert_node(node);
+                save_table(Path::new("routing_table.json"), &routing_table).unwrap();
+            } else {
+                panic!("unexpected response");
+            }
+        }
+
+        // Find closest nodes
+        let own_id = routing_table.own_id;
+        let mut current_queryed = routing_table
+            .buckets
+            .iter()
+            .map(|bucket| &bucket.nodes)
+            .flatten()
+            .min_by_key(|node| {
+                own_id.distance(&node.as_ref().map(|node| node.id).unwrap_or(ID_MAX))
+            })
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let mut current_min = current_queryed.id;
+
+        let response = service
+            .find_nodes(&own_id, &current_min, current_queryed)
+            .await
+            .unwrap();
+
+        if let Response::FindNode { id: _, nodes } = dbg!(response) {
+            println!("Nodes: {nodes:?}");
         } else {
-            panic!("unexpected response");
+            panic!("unexpected find_node response");
         }
     });
 }

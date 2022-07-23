@@ -81,7 +81,7 @@ pub struct Node {
 pub struct Bucket {
     min: NodeId,
     max: NodeId,
-    nodes: [Option<Node>; 8],
+    pub nodes: [Option<Node>; 8],
 }
 
 impl Bucket {
@@ -126,9 +126,9 @@ impl Bucket {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RoutingTable {
-    buckets: Vec<Bucket>,
+    pub buckets: Vec<Bucket>,
     // TODO: Perhaps worth passing this along with insert_node and not keep it here
-    own_id: NodeId,
+    pub own_id: NodeId,
 }
 
 impl RoutingTable {

@@ -4,7 +4,7 @@ use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
 use tokio_uring::net::UdpSocket;
 
-use crate::routing_table::Node;
+use crate::routing_table::{Node, NodeId};
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -33,18 +33,18 @@ pub enum Query {
 #[serde(untagged)]
 pub enum Response {
     // For both ping and announce peer
-    QueriedNodeId {
-        id: Bytes,
-    },
     FindNode {
         id: Bytes,
-        nodes: String,
+        nodes: Bytes,
     },
     GetPeers {
         id: Bytes,
         token: Bytes,
         values: Option<Vec<String>>,
         nodes: Option<String>,
+    },
+    QueriedNodeId {
+        id: Bytes,
     },
 }
 
@@ -92,6 +92,32 @@ impl KrpcService {
         Ok(Self { socket })
     }
 
+    async fn send_req(&self, node: &Node, req: KrpcReq) -> Result<Response, Error> {
+        let encoded = serde_bencode::ser::to_bytes(&req).unwrap();
+
+        let node_addr = format!("{}:{}", node.host, node.port).parse().unwrap();
+        let (res, _) = self.socket.send_to(encoded, node_addr).await;
+        res.unwrap();
+
+        let buf = vec![0; 4096];
+        let (response, buf) = self.socket.recv_from(buf).await;
+        let (recv, addr) = response.unwrap();
+        assert!(
+            addr == node_addr,
+            "Didn't receive response from right node FIXME"
+        );
+        println!("received: {recv}");
+        let resp: KrpcRes = serde_bencode::de::from_bytes(&buf[..recv]).unwrap();
+        assert!(resp.t == req.t, "Recived unrelated response");
+
+        if resp.y == "r" {
+            Ok(resp.r.unwrap())
+        } else if resp.y == "e" {
+            Err(resp.e.unwrap())
+        } else {
+            panic!("received unexpected response")
+        }
+    }
     // TODO optimize and rework error handling
     pub async fn ping(&self, node: &Node) -> Result<Response, Error> {
         const QUERY: &str = "ping";
@@ -107,31 +133,29 @@ impl KrpcService {
             },
         };
 
-        let encoded = serde_bencode::ser::to_bytes(&req).unwrap();
+        self.send_req(node, req).await
+    }
 
-        let node_addr = format!("{}:{}", node.host, node.port).parse().unwrap();
-        let (res, _) = self.socket.send_to(encoded, node_addr).await;
-        res.unwrap();
+    pub async fn find_nodes(
+        &self,
+        querying_node: &NodeId,
+        target: &NodeId,
+        queried_node: &Node,
+    ) -> Result<Response, Error> {
+        const QUERY: &str = "find_node";
+        // handle transaction_ids in a saner way so that
+        // multiple queries can be sent simultaneously per node
+        let transaction_id: u16 = rand::random();
+        let req = KrpcReq {
+            t: transaction_id.to_string(),
+            y: 'q',
+            q: QUERY,
+            a: Query::FindNode {
+                id: querying_node.to_bytes(),
+                target: target.to_bytes(),
+            },
+        };
 
-        let buf = vec![0; 256];
-        let (response, buf) = self.socket.recv_from(buf).await;
-        let (recv, addr) = response.unwrap();
-        assert!(
-            addr == node_addr,
-            "Didn't receive response from right node FIXME"
-        );
-        let resp: KrpcRes = serde_bencode::de::from_bytes(&buf[..recv]).unwrap();
-        assert!(
-            resp.t == transaction_id.to_string(),
-            "Recived unrelated response"
-        );
-
-        if resp.y == "r" {
-            Ok(resp.r.unwrap())
-        } else if resp.y == "e" {
-            Err(resp.e.unwrap())
-        } else {
-            panic!("received unexpected response")
-        }
+        self.send_req(queried_node, req).await
     }
 }
