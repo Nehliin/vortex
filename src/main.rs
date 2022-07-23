@@ -1,16 +1,17 @@
+use std::path::Path;
+
 use bytes::{BufMut, Bytes};
+use krpc::{KrpcService, Response};
 use magnet_url::Magnet;
 use rand::prelude::*;
-use routing_table::RoutingTable;
-use serde_bytes::ByteBuf;
-use serde_derive::{Deserialize, Serialize};
+use routing_table::{Node, NodeId, RoutingTable, ID_ZERO};
 use sha1::{Digest, Sha1};
-use tokio_uring::net::UdpSocket;
 use trust_dns_resolver::{
     config::{ResolverConfig, ResolverOpts},
     Resolver,
 };
 
+mod krpc;
 mod routing_table;
 
 // https://www.bittorrent.org/beps/bep_0015.html
@@ -93,15 +94,11 @@ impl AnnounceRequest {
     }
 }
 
-fn generate_node_id() -> Bytes {
+fn generate_node_id() -> NodeId {
     let id = rand::random::<[u8; 20]>();
     let mut hasher = Sha1::new();
     hasher.update(id);
-    Bytes::copy_from_slice(hasher.finalize().as_slice())
-    /*.into_iter()
-    .take(10)
-    .map(|byte| format!("{byte:02x}"))
-    .collect()*/
+    NodeId::from(hasher.finalize().as_slice())
 }
 
 // Bootstrap nodes
@@ -113,117 +110,51 @@ fn generate_node_id() -> Bytes {
 
 const BOOTSTRAP: &str = "router.bittorrent.com";
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum Query {
-    Ping {
-        id: Bytes,
-    },
-    FindNode {
-        id: Bytes,
-        target: Bytes,
-    },
-    GetPeers {
-        id: Bytes,
-        info_hash: Bytes,
-    },
-    AnnouncePeer {
-        id: Bytes,
-        implied_port: bool,
-        info_hash: Bytes,
-        port: u16,
-        token: Bytes,
-    },
+fn load_table(path: &Path) -> Option<RoutingTable> {
+    serde_json::from_reader(std::fs::File::open(path).ok()?).ok()?
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum Response {
-    // For both ping and announce peer
-    QueriedNodeId {
-        id: Bytes,
-    },
-    FindNode {
-        id: Bytes,
-        nodes: String,
-    },
-    GetPeers {
-        id: Bytes,
-        token: Bytes,
-        values: Option<Vec<String>>,
-        nodes: Option<String>,
-    },
-}
-
-#[derive(Debug, Serialize)]
-struct KrpcReq {
-    t: String,
-    y: char,
-    q: String,
-    a: Query,
-}
-
-#[derive(Debug, Deserialize)]
-struct KrpcRes {
-    t: String,
-    // TODO errors
-    y: String,
-    r: Response,
+fn save_table(path: &Path, table: &RoutingTable) -> anyhow::Result<()> {
+    let table_json = serde_json::to_string(&table)?;
+    std::fs::write(path, table_json)?;
+    Ok(())
 }
 
 fn main() {
-    let node_id = generate_node_id();
+    // let magent_url = Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
     // Do this async
     let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default()).unwrap();
     let ip = resolver.lookup_ip(BOOTSTRAP).unwrap();
     let ip = ip.iter().next().unwrap();
 
-    //let mut routing_table = RoutingTable::new();
+    let mut routing_table;
+    if let Some(table) = load_table(Path::new("routing_table.json")) {
+        routing_table = table;
+    } else {
+        let node_id = generate_node_id();
+        routing_table = RoutingTable::new(node_id);
+    }
 
     tokio_uring::start(async move {
-        let socket = UdpSocket::bind("0.0.0.0:1337".parse().unwrap())
+        let service = KrpcService::new("0.0.0.0:1337".parse().unwrap())
             .await
             .unwrap();
-        let msg = serde_bencode::ser::to_bytes(&KrpcReq {
-            t: "ta".to_owned(),
-            y: 'q',
-            q: "ping".to_owned(),
-            a: Query::Ping {
-                id: node_id.clone(),
-            },
-        })
-        .unwrap();
 
-        dbg!(serde_bencode::ser::to_string(&KrpcReq {
-            t: "ta".to_string(),
-            y: 'q',
-            q: "ping".to_string(),
-            a: Query::Ping {
-                id: "abcdefghij0123456789".as_bytes().into(),
-            }
-        })
-        .unwrap());
+        let mut node = Node {
+            id: ID_ZERO,
+            host: ip.to_string(),
+            port: 6881,
+        };
 
-        let (res, _) = socket
-            .send_to(msg, format!("{ip}:6881").parse().unwrap())
-            .await;
-        res.unwrap();
+        let response = service.ping(&node).await.unwrap();
 
-        println!("sent!");
-        let buf = vec![0; 256];
-        let (response, buf) = socket.recv_from(buf).await;
-        println!("recv");
-        let (recv, _addr) = response.unwrap();
-        let resp: KrpcRes = serde_bencode::de::from_bytes(&buf[..recv]).unwrap();
-        dbg!(&resp);
-
-        assert!(resp.t == "ta".to_string());
-        if let Response::QueriedNodeId { id } = resp.r {
+        if let Response::QueriedNodeId { id } = response {
+            node.id = id.into();
+            dbg!(&node);
+            routing_table.insert_node(node);
+            save_table(Path::new("routing_table.json"), &routing_table).unwrap();
         } else {
-            panic!("Incorrect response");
+            panic!("unexpected response");
         }
-
-        let magent_url =
-            Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
     });
 }

@@ -1,8 +1,11 @@
 use std::ops::Deref;
 
+use bytes::Bytes;
+use serde_derive::{Deserialize, Serialize};
+
 // BE endian large nums that
 // can use lexographical order
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Deserialize, Serialize)]
 pub struct NodeId([u8; 20]);
 
 pub const ID_ZERO: NodeId = NodeId([0; 20]);
@@ -26,6 +29,16 @@ impl NodeId {
             .zip(dist.iter_mut())
             .for_each(|((a, b), res)| *res = a ^ b);
         NodeId(dist)
+    }
+
+    pub fn to_bytes(self) -> Bytes {
+        Bytes::copy_from_slice(&self.0)
+    }
+}
+
+impl From<Bytes> for NodeId {
+    fn from(bytes: Bytes) -> Self {
+        bytes[..].into()
     }
 }
 
@@ -55,16 +68,16 @@ impl core::fmt::Debug for NodeId {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Node {
-    // always 20 long
-    id: NodeId,
-    host: String,
-    port: u16,
+    pub id: NodeId,
+    // socket addr?
+    pub host: String,
+    pub port: u16,
 }
 
 // TODO implement PartialEq manually to only check min,max
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Bucket {
     min: NodeId,
     max: NodeId,
@@ -111,7 +124,7 @@ impl Bucket {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RoutingTable {
     buckets: Vec<Bucket>,
     // TODO: Perhaps worth passing this along with insert_node and not keep it here
