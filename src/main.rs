@@ -157,47 +157,49 @@ fn main() {
             let response = service.ping(&node).await.unwrap();
             node.id = response.id;
             routing_table.insert_node(node);
-        }
 
-        // Find closest nodes
-        // 1. look in bootstrap for self
-        // 2. recursivly look for the closest node to self in the resposne
-        let own_id = routing_table.own_id;
-        let mut prev_min = ID_MAX;
-        loop {
-            println!("Scanning");
-            let next_to_query = routing_table
-                .buckets
-                .iter()
-                .flat_map(|bucket| &bucket.nodes)
-                .min_by_key(|node| {
-                    if let Some(node) = node {
-                        own_id.distance(&node.id)
-                    } else {
-                        ID_MAX
-                    }
-                })
-                .unwrap()
-                .as_ref()
-                .unwrap();
-
-            let distance = own_id.distance(&next_to_query.id);
-            if distance < prev_min {
-                let response = service
-                    .find_nodes(&own_id, &own_id, next_to_query)
-                    .await
+            // Find closest nodes
+            // 1. look in bootstrap for self
+            // 2. recursivly look for the closest node to self in the resposne
+            let own_id = routing_table.own_id;
+            let mut prev_min = ID_MAX;
+            loop {
+                println!("Scanning");
+                let next_to_query = routing_table
+                    .buckets
+                    .iter()
+                    .flat_map(|bucket| &bucket.nodes)
+                    .min_by_key(|node| {
+                        if let Some(node) = node {
+                            own_id.distance(&node.id)
+                        } else {
+                            ID_MAX
+                        }
+                    })
+                    .unwrap()
+                    .as_ref()
                     .unwrap();
-                for node in response.nodes.into_iter() {
-                    if routing_table.insert_node(node) {
-                        println!("Inserted node");
+
+                let distance = own_id.distance(&next_to_query.id);
+                if distance < prev_min {
+                    let response = service
+                        .find_nodes(&own_id, &own_id, next_to_query)
+                        .await
+                        .unwrap();
+                    for node in response.nodes.into_iter() {
+                        if routing_table.insert_node(node) {
+                            println!("Inserted node");
+                        }
                     }
+                    prev_min = distance;
+                } else {
+                    print!("Saving table");
+                    save_table(Path::new("routing_table.json"), &routing_table).unwrap();
+                    break;
                 }
-                prev_min = distance;
-            } else {
-                print!("Saving table");
-                save_table(Path::new("routing_table.json"), &routing_table).unwrap();
-                break;
             }
         }
+
+
     });
 }
