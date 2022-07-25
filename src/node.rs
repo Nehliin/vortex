@@ -17,9 +17,15 @@ pub const ID_MAX: NodeId = NodeId([0xFF; 20]);
 impl NodeId {
     // TODO: don't change in place?
     pub fn halve(&mut self) {
-        if let Some(most_significant) = self.0.iter_mut().find(|byte| **byte != 0) {
-            *most_significant >>= 1;
-        }
+        let mut carry = false;
+        self.0.iter_mut().for_each(|byte| {
+            let mut new_byte = *byte >> 1;
+            if carry {
+                new_byte |= 0b1000_0000;
+            }
+            carry = *byte & 0b0000_0001 != 0;
+            *byte = new_byte;
+        });
     }
 
     // a bit odd to return another node id here
@@ -42,6 +48,7 @@ impl NodeId {
 impl Add for &NodeId {
     type Output = NodeId;
 
+    // TODO optimize with arch intrinsics by first converting to u32
     fn add(self, rhs: Self) -> Self::Output {
         let mut carry = false;
         let mut result = [0; 20];
@@ -68,6 +75,7 @@ impl Add for &NodeId {
 impl Sub for &NodeId {
     type Output = NodeId;
 
+    // TODO optimize with arch intrinsics by first converting to u32
     fn sub(self, rhs: Self) -> Self::Output {
         let mut carry = false;
         let mut result = [0; 20];

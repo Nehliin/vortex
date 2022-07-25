@@ -156,9 +156,7 @@ fn main() {
 
             let response = service.ping(&node).await.unwrap();
             node.id = response.id;
-            dbg!(&node);
             routing_table.insert_node(node);
-            save_table(Path::new("routing_table.json"), &routing_table).unwrap();
         }
 
         // Find closest nodes
@@ -167,7 +165,7 @@ fn main() {
         let own_id = routing_table.own_id;
         let mut prev_min = ID_MAX;
         loop {
-            dbg!(&routing_table.buckets);
+            println!("Scanning");
             let next_to_query = routing_table
                 .buckets
                 .iter()

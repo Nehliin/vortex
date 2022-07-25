@@ -175,7 +175,7 @@ impl KrpcService {
         const QUERY: &str = "find_node";
         // handle transaction_ids in a saner way so that
         // multiple queries can be sent simultaneously per node
-        let transaction_id: u16 = rand::random();
+        let transaction_id: u16 = dbg!(rand::random());
         let req = KrpcReq {
             t: transaction_id.to_string(),
             y: 'q',

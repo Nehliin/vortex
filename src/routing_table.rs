@@ -24,7 +24,6 @@ impl Bucket {
     fn split(&mut self) -> Bucket {
         let old_max = self.max;
         // modify max limit by finding midpoint
-
         self.max = crate::node::midpoint(&self.min, &self.max);
         // max should never be 0
         if self.max == ID_ZERO {
@@ -36,10 +35,10 @@ impl Bucket {
         let mut bucket = Bucket {
             min: new_min,
             max: old_max,
+            // wtf why do I have to write these out manually
             nodes: [None, None, None, None, None, None, None, None],
         };
 
-        // wtf why do I have to write these out manually
         let mut i = 0;
         for node in self.nodes.iter_mut() {
             if node.as_ref().map_or(false, |node| node.id >= self.max) {
@@ -75,7 +74,6 @@ impl RoutingTable {
         for bucket in self.buckets.iter_mut() {
             if bucket.covers(&node.id) {
                 if let Some(empty_spot) = bucket.empty_spot() {
-                    println!("inserting: {:?}", node.id);
                     *empty_spot = Some(node);
                     return true;
                 } else if bucket.covers(&self.own_id) {
@@ -83,8 +81,6 @@ impl RoutingTable {
                     println!("bucket min {:?}", bucket.min);
                     println!("bucket max {:?}", bucket.max);
                     let new_bucket = bucket.split();
-                    println!("post split new {new_bucket:#?}");
-                    println!("post split old {bucket:#?}");
                     self.buckets.push(new_bucket);
                     // not efficient
                     return self.insert_node(node);
@@ -220,5 +216,25 @@ mod test {
                 assert_non_overlapping(bucket_a, bucket_b);
             }
         }
+    }
+
+    #[test]
+    fn test_no_stack_overflow() {
+        let mut min = [0xFF; 20];
+        min[0] = 0x14;
+        let mut max = [0xFF; 20];
+        max[0] = 0x15;
+        let mut bucket = Bucket {
+            min: min.as_slice().into(),
+            max: max.as_slice().into(),
+            nodes: [None, None, None, None, None, None, None, None],
+        };
+        
+
+        let new_bucket = bucket.split();
+
+        verify_bucket(&bucket);
+        verify_bucket(&new_bucket);
+        assert_non_overlapping(&bucket, &new_bucket);
     }
 }
