@@ -1,10 +1,10 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
 use tokio_uring::net::UdpSocket;
 
-use crate::routing_table::{Node, NodeId};
+use crate::node::{Node, NodeId};
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -81,6 +81,33 @@ struct KrpcRes {
     e: Option<Error>,
 }
 
+#[derive(Debug)]
+pub struct Pong {
+    pub id: NodeId,
+}
+
+#[derive(Debug)]
+pub struct FindNodesResponse {
+    pub id: NodeId,
+    pub nodes: Vec<Node>,
+}
+
+fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
+    // TODO this will panic on invalid input
+    bytes
+        .chunks(26)
+        .map(|chunk| {
+            let id = chunk[..20].into();
+            let ip: IpAddr = [chunk[20], chunk[21], chunk[22], chunk[23]].into();
+            let port = u16::from_be_bytes([chunk[24], chunk[25]]);
+            Node {
+                id,
+                addr: (ip, port).into(),
+            }
+        })
+        .collect()
+}
+
 // TODO use tower!
 pub struct KrpcService {
     socket: UdpSocket,
@@ -95,15 +122,14 @@ impl KrpcService {
     async fn send_req(&self, node: &Node, req: KrpcReq) -> Result<Response, Error> {
         let encoded = serde_bencode::ser::to_bytes(&req).unwrap();
 
-        let node_addr = format!("{}:{}", node.host, node.port).parse().unwrap();
-        let (res, _) = self.socket.send_to(encoded, node_addr).await;
+        let (res, _) = self.socket.send_to(encoded, node.addr).await;
         res.unwrap();
 
         let buf = vec![0; 4096];
         let (response, buf) = self.socket.recv_from(buf).await;
         let (recv, addr) = response.unwrap();
         assert!(
-            addr == node_addr,
+            addr == node.addr,
             "Didn't receive response from right node FIXME"
         );
         println!("received: {recv}");
@@ -119,7 +145,7 @@ impl KrpcService {
         }
     }
     // TODO optimize and rework error handling
-    pub async fn ping(&self, node: &Node) -> Result<Response, Error> {
+    pub async fn ping(&self, node: &Node) -> Result<Pong, Error> {
         const QUERY: &str = "ping";
         // handle transaction_ids in a saner way so that
         // multiple queries can be sent simultaneously per node
@@ -133,7 +159,11 @@ impl KrpcService {
             },
         };
 
-        self.send_req(node, req).await
+        if let Response::QueriedNodeId { id } = self.send_req(node, req).await? {
+            Ok(Pong { id: id.into() })
+        } else {
+            panic!("unexpected response");
+        }
     }
 
     pub async fn find_nodes(
@@ -141,7 +171,7 @@ impl KrpcService {
         querying_node: &NodeId,
         target: &NodeId,
         queried_node: &Node,
-    ) -> Result<Response, Error> {
+    ) -> Result<FindNodesResponse, Error> {
         const QUERY: &str = "find_node";
         // handle transaction_ids in a saner way so that
         // multiple queries can be sent simultaneously per node
@@ -156,6 +186,14 @@ impl KrpcService {
             },
         };
 
-        self.send_req(queried_node, req).await
+        if let Response::FindNode { id, nodes } = self.send_req(queried_node, req).await? {
+            let nodes = parse_compact_nodes(nodes);
+            Ok(FindNodesResponse {
+                id: id.into(),
+                nodes,
+            })
+        } else {
+            panic!("unexpected response");
+        }
     }
 }

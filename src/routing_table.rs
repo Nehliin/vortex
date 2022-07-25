@@ -1,80 +1,6 @@
-use std::ops::Deref;
-
-use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
 
-// BE endian large nums that
-// can use lexographical order
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Deserialize, Serialize)]
-pub struct NodeId([u8; 20]);
-
-pub const ID_ZERO: NodeId = NodeId([0; 20]);
-pub const ID_MAX: NodeId = NodeId([0xFF; 20]);
-
-impl NodeId {
-    // TODO: don't change in place?
-    fn halve(&mut self) {
-        if let Some(most_significant) = self.0.iter_mut().find(|byte| **byte != 0) {
-            *most_significant >>= 1;
-        }
-    }
-
-    // a bit odd to return another node id here
-    pub fn distance(&self, other: &NodeId) -> NodeId {
-        // Almost optimal asm generated but can be improved
-        let mut dist = [0; 20];
-        self.0
-            .iter()
-            .zip(other.0.iter())
-            .zip(dist.iter_mut())
-            .for_each(|((a, b), res)| *res = a ^ b);
-        NodeId(dist)
-    }
-
-    pub fn to_bytes(self) -> Bytes {
-        Bytes::copy_from_slice(&self.0)
-    }
-}
-
-impl From<Bytes> for NodeId {
-    fn from(bytes: Bytes) -> Self {
-        bytes[..].into()
-    }
-}
-
-impl From<&[u8]> for NodeId {
-    fn from(slice: &[u8]) -> Self {
-        assert!(slice.len() == 20);
-        // use maybe uninit
-        let mut id = [0; 20];
-        id.copy_from_slice(slice);
-        NodeId(id)
-    }
-}
-
-impl Deref for NodeId {
-    type Target = [u8; 20];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl core::fmt::Debug for NodeId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("NodeId")
-            .field(&format!("{:02x?}", &self.0))
-            .finish()
-    }
-}
-
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
-pub struct Node {
-    pub id: NodeId,
-    // socket addr?
-    pub host: String,
-    pub port: u16,
-}
+use crate::node::{Node, NodeId, ID_MAX, ID_ZERO};
 
 // TODO implement PartialEq manually to only check min,max
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -97,8 +23,9 @@ impl Bucket {
 
     fn split(&mut self) -> Bucket {
         let old_max = self.max;
-        // modify max limit by divinding by 2
-        self.max.halve();
+        // modify max limit by finding midpoint
+
+        self.max = crate::node::midpoint(&self.min, &self.max);
         // max should never be 0
         if self.max == ID_ZERO {
             panic!("should never happen");
@@ -148,10 +75,16 @@ impl RoutingTable {
         for bucket in self.buckets.iter_mut() {
             if bucket.covers(&node.id) {
                 if let Some(empty_spot) = bucket.empty_spot() {
+                    println!("inserting: {:?}", node.id);
                     *empty_spot = Some(node);
                     return true;
                 } else if bucket.covers(&self.own_id) {
+                    println!("Splitting bucket for: {:?}", node.id);
+                    println!("bucket min {:?}", bucket.min);
+                    println!("bucket max {:?}", bucket.max);
                     let new_bucket = bucket.split();
+                    println!("post split new {new_bucket:#?}");
+                    println!("post split old {bucket:#?}");
                     self.buckets.push(new_bucket);
                     // not efficient
                     return self.insert_node(node);
@@ -199,6 +132,11 @@ mod test {
             num_bigint::Sign::Plus,
             vec![u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX],
         );
+
+        let (_, end_bytes) = end.to_bytes_be();
+        // Sanity check
+        assert!(ID_MAX == end_bytes.as_slice().into());
+
         for i in 1..17 {
             let id: BigInt = end.clone() - (end.clone() / 16) * i;
             let (_, mut id) = id.to_bytes_be();
@@ -207,8 +145,7 @@ mod test {
             }
             routing_table.insert_node(Node {
                 id: id.as_slice().into(),
-                host: "host".to_string(),
-                port: 0,
+                addr: "0.0.0.0:0".parse().unwrap(),
             });
 
             if i < 9 {
@@ -253,22 +190,23 @@ mod test {
 
     #[test]
     fn test_only_split_own_id() {
-        let mut routing_table = RoutingTable::new(ID_ZERO);
+        let mut id = ID_MAX;
+        id.halve();
+        let mut routing_table = RoutingTable::new(id);
 
         let end = BigInt::new(
             num_bigint::Sign::Plus,
             vec![u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX],
         );
-        for i in 1..32 {
-            let id: BigInt = end.clone() - (end.clone() / 32) * i;
+        for i in 1..128 {
+            let id: BigInt = end.clone() - (end.clone() / 128) * i;
             let (_, mut id) = id.to_bytes_be();
             while id.len() < 20 {
                 id.push(0);
             }
             routing_table.insert_node(Node {
                 id: id.as_slice().into(),
-                host: "host".to_string(),
-                port: 0,
+                addr: "0.0.0.0:0".parse().unwrap(),
             });
         }
 

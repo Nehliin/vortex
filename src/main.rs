@@ -3,15 +3,19 @@ use std::path::Path;
 use bytes::{BufMut, Bytes};
 use krpc::{KrpcService, Response};
 use magnet_url::Magnet;
+use node::{NodeId, ID_MAX};
 use rand::prelude::*;
-use routing_table::{Node, NodeId, RoutingTable, ID_MAX, ID_ZERO};
+use routing_table::RoutingTable;
 use sha1::{Digest, Sha1};
 use trust_dns_resolver::{
     config::{ResolverConfig, ResolverOpts},
     Resolver,
 };
 
+use crate::node::{Node, ID_ZERO};
+
 mod krpc;
+mod node;
 mod routing_table;
 
 // https://www.bittorrent.org/beps/bep_0015.html
@@ -147,46 +151,55 @@ fn main() {
         if should_bootstrap {
             let mut node = Node {
                 id: ID_ZERO,
-                host: ip.to_string(),
-                port: 6881,
+                addr: format!("{ip}:6881").parse().unwrap(),
             };
 
             let response = service.ping(&node).await.unwrap();
-
-            if let Response::QueriedNodeId { id } = response {
-                node.id = id.into();
-                dbg!(&node);
-                routing_table.insert_node(node);
-                save_table(Path::new("routing_table.json"), &routing_table).unwrap();
-            } else {
-                panic!("unexpected response");
-            }
+            node.id = response.id;
+            dbg!(&node);
+            routing_table.insert_node(node);
+            save_table(Path::new("routing_table.json"), &routing_table).unwrap();
         }
 
         // Find closest nodes
+        // 1. look in bootstrap for self
+        // 2. recursivly look for the closest node to self in the resposne
         let own_id = routing_table.own_id;
-        let mut current_queryed = routing_table
-            .buckets
-            .iter()
-            .map(|bucket| &bucket.nodes)
-            .flatten()
-            .min_by_key(|node| {
-                own_id.distance(&node.as_ref().map(|node| node.id).unwrap_or(ID_MAX))
-            })
-            .unwrap()
-            .as_ref()
-            .unwrap();
-        let mut current_min = current_queryed.id;
+        let mut prev_min = ID_MAX;
+        loop {
+            dbg!(&routing_table.buckets);
+            let next_to_query = routing_table
+                .buckets
+                .iter()
+                .flat_map(|bucket| &bucket.nodes)
+                .min_by_key(|node| {
+                    if let Some(node) = node {
+                        own_id.distance(&node.id)
+                    } else {
+                        ID_MAX
+                    }
+                })
+                .unwrap()
+                .as_ref()
+                .unwrap();
 
-        let response = service
-            .find_nodes(&own_id, &current_min, current_queryed)
-            .await
-            .unwrap();
-
-        if let Response::FindNode { id: _, nodes } = dbg!(response) {
-            println!("Nodes: {nodes:?}");
-        } else {
-            panic!("unexpected find_node response");
+            let distance = own_id.distance(&next_to_query.id);
+            if distance < prev_min {
+                let response = service
+                    .find_nodes(&own_id, &own_id, next_to_query)
+                    .await
+                    .unwrap();
+                for node in response.nodes.into_iter() {
+                    if routing_table.insert_node(node) {
+                        println!("Inserted node");
+                    }
+                }
+                prev_min = distance;
+            } else {
+                print!("Saving table");
+                save_table(Path::new("routing_table.json"), &routing_table).unwrap();
+                break;
+            }
         }
     });
 }
