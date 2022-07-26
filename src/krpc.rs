@@ -1,10 +1,14 @@
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    rc::Rc,
+    sync::Mutex,
     time::Duration,
 };
 
 use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
+use tokio::time::error::Elapsed;
 use tokio_uring::net::UdpSocket;
 
 use crate::node::{Node, NodeId};
@@ -53,15 +57,15 @@ pub enum Response {
 
 #[derive(Debug, Deserialize)]
 pub struct Error {
-    pub code: u16,
-    pub description: String,
+    pub code: u32,
+    pub description: Bytes,
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
             "KrpcRequest Failed: {} {}",
-            self.code, self.description
+            self.code, String::from_utf8_lossy(&self.description)
         ))
     }
 }
@@ -119,7 +123,7 @@ fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
     bytes
         .chunks(26)
         .map(|chunk| {
-            // Seems to be working? 
+            // Seems to be working?
             let id = chunk[..20].into();
             let ip: IpAddr = [chunk[20], chunk[21], chunk[22], chunk[23]].into();
             let port = u16::from_be_bytes([chunk[24], chunk[25]]);
@@ -131,64 +135,100 @@ fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
         .collect()
 }
 
+// TODO improve
+type ConnectionTable =
+    Rc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<Response, Error>>>>>;
+
 // TODO use tower!
 pub struct KrpcService {
-    socket: UdpSocket,
+    socket: Rc<UdpSocket>,
+    connection_table: ConnectionTable,
 }
 
 impl KrpcService {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
-        let socket = UdpSocket::bind(bind_addr).await?;
-        Ok(Self { socket })
+        let socket = Rc::new(UdpSocket::bind(bind_addr).await?);
+        let connection_table: ConnectionTable = Rc::new(Mutex::new(HashMap::new()));
+        let connection_table_clone = Rc::clone(&connection_table);
+        // too large
+        let mut recv_buffer = vec![0; 4096];
+        let socket_clone = Rc::clone(&socket);
+        tokio_uring::spawn(async move {
+            loop {
+                let (read, mut buf) = socket_clone
+                    .recv_from(std::mem::take(&mut recv_buffer))
+                    .await;
+                let (recv, _addr) = read.unwrap();
+                let resp: KrpcRes = serde_bencode::de::from_bytes(&buf[..recv]).unwrap();
+
+                let mut table = connection_table_clone.lock().unwrap();
+                if let Some(response_sender) = table.remove(&resp.t) {
+                    if resp.y == "r" {
+                        let _ = response_sender.send(Ok(resp.r.unwrap()));
+                    } else if resp.y == "e" {
+                        let _ = response_sender.send(Err(resp.e.unwrap()));
+                    } else {
+                        panic!("received unexpected response")
+                    }
+                } else {
+                    panic!("Transaction_id not found in the connection_table");
+                }
+                buf.clear();
+                recv_buffer = buf;
+            }
+        });
+
+        Ok(Self {
+            socket,
+            connection_table,
+        })
     }
 
-    fn gen_transaction_id() -> String {
+    fn gen_transaction_id(&self) -> String {
         // handle transaction_ids in a saner way so that
         // multiple queries can be sent simultaneously per node
         let mut id = String::new();
         id.push(rand::random::<char>());
         id.push(rand::random::<char>());
-        id
+
+        let conn_table = self.connection_table.lock().unwrap();
+        if conn_table.contains_key(&id) {
+            drop(conn_table);
+            // need to generate another id
+            self.gen_transaction_id()
+        } else {
+            id
+        }
     }
 
     async fn send_req(&self, node: &Node, req: KrpcReq) -> Result<Response, Error> {
         let encoded = serde_bencode::ser::to_bytes(&req).unwrap();
 
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut table = self.connection_table.lock().unwrap();
+            table.insert(req.t.clone(), tx);
+        }
+
         println!("Sending");
         let (res, _) = self.socket.send_to(encoded, node.addr).await;
         res.unwrap();
 
-        let buf = vec![0; 4096];
-        let (response, buf) =
-            tokio::time::timeout(Duration::from_secs(3), self.socket.recv_from(buf))
-                .await
-                .map_err(|_err| Error {
-                    code: 408,
-                    description: "Request timed out".to_string(),
-                })?;
-
-        let (recv, addr) = response.unwrap();
-        assert!(
-            addr == node.addr,
-            "Didn't receive response from right node FIXME"
-        );
-        println!("received: {recv}");
-        let resp: KrpcRes = serde_bencode::de::from_bytes(&buf[..recv]).unwrap();
-        assert!(resp.t == req.t, "Recived unrelated response");
-
-        if resp.y == "r" {
-            Ok(resp.r.unwrap())
-        } else if resp.y == "e" {
-            Err(resp.e.unwrap())
-        } else {
-            panic!("received unexpected response")
+        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+            Ok(Ok(Ok(response))) => Ok(response),
+            Err(_elapsed) => Err(Error {
+                code: 408,
+                description: b"Request timed out".as_slice().into(),
+            }),
+            Ok(Ok(Err(err))) => Err(err),
+            Ok(Err(_)) => panic!("sender dropped"),
         }
     }
     // TODO optimize and rework error handling
     pub async fn ping(&self, node: &Node) -> Result<Pong, Error> {
         const QUERY: &str = "ping";
 
-        let transaction_id = Self::gen_transaction_id();
+        let transaction_id = self.gen_transaction_id();
 
         let req = KrpcReq {
             t: transaction_id.to_string(),
@@ -214,7 +254,7 @@ impl KrpcService {
     ) -> Result<FindNodesResponse, Error> {
         const QUERY: &str = "find_node";
 
-        let transaction_id = Self::gen_transaction_id();
+        let transaction_id = self.gen_transaction_id();
 
         let req = KrpcReq {
             t: transaction_id.to_string(),
@@ -245,7 +285,7 @@ impl KrpcService {
     ) -> Result<GetPeersResponse, Error> {
         const QUERY: &str = "get_peers";
 
-        let transaction_id = Self::gen_transaction_id();
+        let transaction_id = self.gen_transaction_id();
 
         let req = KrpcReq {
             t: transaction_id.to_string(),
@@ -274,7 +314,7 @@ impl KrpcService {
                             .map(|bytes| Peer {
                                 addr: SocketAddr::new(
                                     IpAddr::V4(Ipv4Addr::new(
-                                        bytes[3], bytes[2], bytes[1], bytes[0],
+                                        bytes[0], bytes[1], bytes[2], bytes[3],
                                     )),
                                     u16::from_be_bytes([bytes[4], bytes[5]]),
                                 ),
