@@ -1,4 +1,4 @@
-use std::{path::Path, net::IpAddr};
+use std::{net::IpAddr, path::Path};
 
 use bytes::{BufMut, Bytes};
 use krpc::{KrpcService, Response};
@@ -12,7 +12,10 @@ use trust_dns_resolver::{
     Resolver,
 };
 
-use crate::node::{Node, ID_ZERO};
+use crate::{
+    krpc::Error,
+    node::{Node, ID_ZERO},
+};
 
 mod krpc;
 mod node;
@@ -143,8 +146,8 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boos
         println!("Scanning");
         let next_to_query = routing_table
             .buckets
-            .iter()
-            .flat_map(|bucket| &bucket.nodes)
+            .iter_mut()
+            .flat_map(|bucket| bucket.nodes.iter_mut())
             .min_by_key(|node| {
                 if let Some(node) = node {
                     own_id.distance(&node.id)
@@ -152,16 +155,24 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boos
                     ID_MAX
                 }
             })
-            .unwrap()
-            .as_ref()
             .unwrap();
 
-        let distance = own_id.distance(&next_to_query.id);
+        let distance = own_id.distance(&next_to_query.as_ref().unwrap().id);
         if distance < prev_min {
-            let response = service
-                .find_nodes(&own_id, &own_id, next_to_query)
-                .await
-                .unwrap();
+            let response = match service.find_nodes(&own_id, &own_id, next_to_query.as_ref().unwrap()).await {
+                Ok(reponse) => reponse,
+                Err(err) => {
+                    if err.code == 408 {
+                        println!("timeout for: {next_to_query:?}");
+                        next_to_query.take();
+                        continue;
+                    } else {
+                        panic!("{err}");
+                    }
+                }
+            };
+
+            println!("Got nodes");
             for node in response.nodes.into_iter() {
                 if routing_table.insert_node(node) {
                     println!("Inserted node");
@@ -204,6 +215,10 @@ fn main() {
             bootstrap(&mut routing_table, &service, ip).await;
         }
 
+        routing_table.ping_all_nodes(&service).await;
+        println!("Done with pings");
 
+        let remaining = routing_table.buckets.iter().flat_map(|bucket| &bucket.nodes).filter(|node| node.is_some()).count();
+        println!("remaining: {remaining}");
     });
 }

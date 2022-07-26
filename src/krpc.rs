@@ -1,4 +1,7 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
@@ -50,8 +53,8 @@ pub enum Response {
 
 #[derive(Debug, Deserialize)]
 pub struct Error {
-    code: u8,
-    description: String,
+    pub code: u16,
+    pub description: String,
 }
 
 impl std::fmt::Display for Error {
@@ -97,6 +100,7 @@ fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
     bytes
         .chunks(26)
         .map(|chunk| {
+            // Seems to be working? 
             let id = chunk[..20].into();
             let ip: IpAddr = [chunk[20], chunk[21], chunk[22], chunk[23]].into();
             let port = u16::from_be_bytes([chunk[24], chunk[25]]);
@@ -119,14 +123,31 @@ impl KrpcService {
         Ok(Self { socket })
     }
 
+    fn gen_transaction_id() -> String {
+        // handle transaction_ids in a saner way so that
+        // multiple queries can be sent simultaneously per node
+        let mut id = String::new();
+        id.push(rand::random::<char>());
+        id.push(rand::random::<char>());
+        id
+    }
+
     async fn send_req(&self, node: &Node, req: KrpcReq) -> Result<Response, Error> {
         let encoded = serde_bencode::ser::to_bytes(&req).unwrap();
 
+        println!("Sending");
         let (res, _) = self.socket.send_to(encoded, node.addr).await;
         res.unwrap();
 
         let buf = vec![0; 4096];
-        let (response, buf) = self.socket.recv_from(buf).await;
+        let (response, buf) =
+            tokio::time::timeout(Duration::from_secs(3), self.socket.recv_from(buf))
+                .await
+                .map_err(|_err| Error {
+                    code: 408,
+                    description: "Request timed out".to_string(),
+                })?;
+
         let (recv, addr) = response.unwrap();
         assert!(
             addr == node.addr,
@@ -147,9 +168,9 @@ impl KrpcService {
     // TODO optimize and rework error handling
     pub async fn ping(&self, node: &Node) -> Result<Pong, Error> {
         const QUERY: &str = "ping";
-        // handle transaction_ids in a saner way so that
-        // multiple queries can be sent simultaneously per node
-        let transaction_id: u16 = rand::random();
+
+        let transaction_id = Self::gen_transaction_id();
+
         let req = KrpcReq {
             t: transaction_id.to_string(),
             y: 'q',
@@ -173,9 +194,9 @@ impl KrpcService {
         queried_node: &Node,
     ) -> Result<FindNodesResponse, Error> {
         const QUERY: &str = "find_node";
-        // handle transaction_ids in a saner way so that
-        // multiple queries can be sent simultaneously per node
-        let transaction_id: u16 = dbg!(rand::random());
+
+        let transaction_id = Self::gen_transaction_id();
+
         let req = KrpcReq {
             t: transaction_id.to_string(),
             y: 'q',

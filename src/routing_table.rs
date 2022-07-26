@@ -1,6 +1,6 @@
 use serde_derive::{Deserialize, Serialize};
 
-use crate::node::{Node, NodeId, ID_MAX, ID_ZERO};
+use crate::{node::{Node, NodeId, ID_MAX, ID_ZERO}, krpc::KrpcService};
 
 // TODO implement PartialEq manually to only check min,max
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -88,6 +88,22 @@ impl RoutingTable {
             }
         }
         false
+    }
+
+    // TODO: properly add last_changed to buckets and 
+    // periodically ping nodes accoriding to 
+    // https://www.bittorrent.org/beps/bep_0005.html
+    pub async fn ping_all_nodes(&mut self, service: &KrpcService) {
+        for maybe_node in self.buckets.iter_mut().flat_map(|bucket| bucket.nodes.iter_mut()) {
+            if let Some(node) = maybe_node {
+                if service.ping(node).await.is_err() {
+                    println!("Ping failed for node: {node:?}");
+                    maybe_node.take();
+                } else {
+                    println!("Ping succeeded");
+                }
+            }
+        } 
     }
 }
 
