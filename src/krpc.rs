@@ -43,8 +43,8 @@ pub enum Response {
     GetPeers {
         id: Bytes,
         token: Bytes,
-        values: Option<Vec<String>>,
-        nodes: Option<String>,
+        values: Option<Vec<Bytes>>,
+        nodes: Option<Bytes>,
     },
     QueriedNodeId {
         id: Bytes,
@@ -93,6 +93,25 @@ pub struct Pong {
 pub struct FindNodesResponse {
     pub id: NodeId,
     pub nodes: Vec<Node>,
+}
+
+// TODO: move
+#[derive(Debug)]
+pub struct Peer {
+    pub addr: SocketAddr,
+}
+
+#[derive(Debug)]
+pub enum GetPeerResponseBody {
+    Nodes(Vec<Node>),
+    Peers(Vec<Peer>),
+}
+
+#[derive(Debug)]
+pub struct GetPeersResponse {
+    pub id: NodeId,
+    pub token: Bytes,
+    pub body: GetPeerResponseBody,
 }
 
 fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
@@ -216,5 +235,71 @@ impl KrpcService {
         } else {
             panic!("unexpected response");
         }
+    }
+
+    pub async fn get_peers(
+        &self,
+        querying_node: &NodeId,
+        info_hash: Bytes,
+        node: &Node,
+    ) -> Result<GetPeersResponse, Error> {
+        const QUERY: &str = "get_peers";
+
+        let transaction_id = Self::gen_transaction_id();
+
+        let req = KrpcReq {
+            t: transaction_id.to_string(),
+            y: 'q',
+            q: QUERY,
+            a: Query::GetPeers {
+                id: querying_node.to_bytes(),
+                info_hash,
+            },
+        };
+
+        if let Response::GetPeers {
+            id,
+            token,
+            values,
+            nodes,
+        } = self.send_req(node, req).await?
+        {
+            if let Some(peers) = values {
+                // Might miss if invalid format and its not divisible by chunk size
+                let peers = peers
+                    .into_iter()
+                    .flat_map(|peer_bytes| {
+                        peer_bytes
+                            .chunks_exact(6)
+                            .map(|bytes| Peer {
+                                addr: SocketAddr::new(
+                                    IpAddr::V4(Ipv4Addr::new(
+                                        bytes[3], bytes[2], bytes[1], bytes[0],
+                                    )),
+                                    u16::from_be_bytes([bytes[4], bytes[5]]),
+                                ),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+
+                return Ok(GetPeersResponse {
+                    id: id.into(),
+                    token,
+                    body: GetPeerResponseBody::Peers(peers),
+                });
+            }
+
+            if let Some(nodes) = nodes {
+                let nodes = parse_compact_nodes(nodes);
+
+                return Ok(GetPeersResponse {
+                    id: id.into(),
+                    token,
+                    body: GetPeerResponseBody::Nodes(nodes),
+                });
+            }
+        }
+        panic!("unexpected reponse");
     }
 }
