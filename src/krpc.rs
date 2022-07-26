@@ -39,16 +39,16 @@ pub enum Query {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum Response {
-    // For both ping and announce peer
-    FindNode {
-        id: Bytes,
-        nodes: Bytes,
-    },
     GetPeers {
         id: Bytes,
         token: Bytes,
         values: Option<Vec<Bytes>>,
         nodes: Option<Bytes>,
+    },
+    // For both ping and announce peer
+    FindNode {
+        id: Bytes,
+        nodes: Bytes,
     },
     QueriedNodeId {
         id: Bytes,
@@ -171,7 +171,7 @@ impl KrpcService {
                         panic!("received unexpected response")
                     }
                 } else {
-                    panic!("Transaction_id not found in the connection_table");
+                    println!("Transaction_id not found in the connection_table");
                 }
                 buf.clear();
                 recv_buffer = buf;
@@ -214,7 +214,7 @@ impl KrpcService {
         let (res, _) = self.socket.send_to(encoded, node.addr).await;
         res.unwrap();
 
-        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        match tokio::time::timeout(Duration::from_secs(3), rx).await {
             Ok(Ok(Ok(response))) => Ok(response),
             Err(_elapsed) => Err(Error {
                 code: 408,
@@ -302,7 +302,7 @@ impl KrpcService {
             token,
             values,
             nodes,
-        } = self.send_req(node, req).await?
+        } = dbg!(self.send_req(node, req).await?)
         {
             if let Some(peers) = values {
                 // Might miss if invalid format and its not divisible by chunk size

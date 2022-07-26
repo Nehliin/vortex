@@ -1,6 +1,9 @@
 use serde_derive::{Deserialize, Serialize};
 
-use crate::{node::{Node, NodeId, ID_MAX, ID_ZERO}, krpc::KrpcService};
+use crate::{
+    krpc::KrpcService,
+    node::{Node, NodeId, ID_MAX, ID_ZERO},
+};
 
 // TODO implement PartialEq manually to only check min,max
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -87,20 +90,51 @@ impl RoutingTable {
         false
     }
 
-    // TODO: properly add last_changed to buckets and 
-    // periodically ping nodes accoriding to 
+    // TODO: properly add last_changed to buckets and
+    // periodically ping nodes accoriding to
     // https://www.bittorrent.org/beps/bep_0005.html
     pub async fn ping_all_nodes(&mut self, service: &KrpcService) {
-        for maybe_node in self.buckets.iter_mut().flat_map(|bucket| bucket.nodes.iter_mut()) {
+        for maybe_node in self
+            .buckets
+            .iter_mut()
+            .flat_map(|bucket| bucket.nodes.iter_mut())
+        {
             if let Some(node) = maybe_node {
                 if let Err(err) = service.ping(node).await {
                     println!("Ping failed for node: {node:?}");
                     println!("error: {err}");
+                    maybe_node.take();
                 } else {
                     println!("Ping succeeded");
                 }
             }
-        } 
+        }
+    }
+
+    // TODO maybe not use nodeid as type for info_hash
+    pub fn get_closest(&self, info_hash: &NodeId) -> &Node {
+        let closest = self
+            .buckets
+            .iter()
+            .flat_map(|bucket| &bucket.nodes)
+            .min_by_key(|node| {
+                node.as_ref().map(|node| info_hash.distance(&node.id))
+                    .unwrap_or(ID_MAX)
+            })
+            .unwrap()
+            .as_ref()
+            .unwrap();
+
+        // Santify check
+        let mut found = 0;
+        for bucket in self.buckets.iter() {
+            if bucket.covers(info_hash) {
+                found += 1;
+                assert!(bucket.nodes.contains(&Some(closest.clone())));
+            }
+        }
+        assert_eq!(found, 1);
+        closest
     }
 }
 
@@ -242,7 +276,6 @@ mod test {
             max: max.as_slice().into(),
             nodes: [None, None, None, None, None, None, None, None],
         };
-        
 
         let new_bucket = bucket.split();
 

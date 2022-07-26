@@ -137,7 +137,7 @@ impl core::fmt::Debug for NodeId {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Node {
     pub id: NodeId,
     pub addr: SocketAddr,

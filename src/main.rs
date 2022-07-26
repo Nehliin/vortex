@@ -2,7 +2,7 @@ use std::{net::IpAddr, path::Path};
 
 use bytes::{BufMut, Bytes};
 use krpc::KrpcService;
-//use magnet_url::Magnet;
+use magnet_url::Magnet;
 use node::{NodeId, ID_MAX};
 use routing_table::RoutingTable;
 use sha1::{Digest, Sha1};
@@ -186,8 +186,61 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boos
     }
 }
 
+async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
+    // Find closest nodes
+    // 1. look in bootstrap for self
+    // 2. recursivly look for the closest node to self in the resposne
+    let own_id = routing_table.own_id;
+    let mut prev_min = ID_MAX;
+    loop {
+        println!("Scanning");
+        let next_to_query = routing_table
+            .buckets
+            .iter_mut()
+            .flat_map(|bucket| bucket.nodes.iter_mut())
+            .min_by_key(|node| {
+                if let Some(node) = node {
+                    own_id.distance(&node.id)
+                } else {
+                    ID_MAX
+                }
+            })
+            .unwrap();
+
+        let distance = own_id.distance(&next_to_query.as_ref().unwrap().id);
+        if distance < prev_min {
+            let response = match service
+                .find_nodes(&own_id, &own_id, next_to_query.as_ref().unwrap())
+                .await
+            {
+                Ok(reponse) => reponse,
+                Err(err) => {
+                    if err.code == 408 {
+                        println!("timeout for: {next_to_query:?}");
+                        next_to_query.take();
+                        continue;
+                    } else {
+                        panic!("{err}");
+                    }
+                }
+            };
+
+            println!("Got nodes from: {next_to_query:?}");
+            for node in response.nodes.into_iter() {
+                if routing_table.insert_node(node) {
+                    println!("Inserted node");
+                }
+            }
+            prev_min = distance;
+        } else {
+            print!("Saving table");
+            save_table(Path::new("routing_table.json"), routing_table).unwrap();
+            break;
+        }
+    }
+}
+
 fn main() {
-    // let magent_url = Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
     // Do this async
     let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default()).unwrap();
     let ip = resolver.lookup_ip(BOOTSTRAP).unwrap();
@@ -212,6 +265,9 @@ fn main() {
 
         if should_bootstrap {
             bootstrap(&mut routing_table, &service, ip).await;
+        } else {
+            std::fs::remove_file(Path::new("routing_table.json")).unwrap();
+            refresh(&mut routing_table, &service).await;
         }
 
         routing_table.ping_all_nodes(&service).await;
@@ -224,5 +280,35 @@ fn main() {
             .filter(|node| node.is_some())
             .count();
         println!("remaining: {remaining}");
+
+        let magent_url =
+            Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
+        dbg!(&magent_url.xt);
+        let info_hash = dbg!(NodeId::from(&magent_url.xt.unwrap().as_bytes()[..20]));
+
+        loop {
+            let closest_node = routing_table.get_closest(&info_hash);
+            dbg!(closest_node);
+
+            let response = service
+                .get_peers(&routing_table.own_id, info_hash.to_bytes(), closest_node)
+                .await
+                .unwrap();
+
+            dbg!(&response);
+            match response.body {
+                krpc::GetPeerResponseBody::Nodes(nodes) => {
+                    for node in nodes.into_iter() {
+                        routing_table.insert_node(node);
+                    }
+                }
+                krpc::GetPeerResponseBody::Peers(peers) => {
+                    dbg!(peers);
+                    break;
+                }
+            }
+        }
+
+        // announce peer
     });
 }
