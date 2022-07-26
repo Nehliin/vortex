@@ -1,10 +1,9 @@
 use std::{net::IpAddr, path::Path};
 
 use bytes::{BufMut, Bytes};
-use krpc::{KrpcService, Response};
-use magnet_url::Magnet;
+use krpc::KrpcService;
+//use magnet_url::Magnet;
 use node::{NodeId, ID_MAX};
-use rand::prelude::*;
 use routing_table::RoutingTable;
 use sha1::{Digest, Sha1};
 use trust_dns_resolver::{
@@ -12,10 +11,7 @@ use trust_dns_resolver::{
     Resolver,
 };
 
-use crate::{
-    krpc::Error,
-    node::{Node, ID_ZERO},
-};
+use crate::node::{Node, ID_ZERO};
 
 mod krpc;
 mod node;
@@ -159,7 +155,10 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boos
 
         let distance = own_id.distance(&next_to_query.as_ref().unwrap().id);
         if distance < prev_min {
-            let response = match service.find_nodes(&own_id, &own_id, next_to_query.as_ref().unwrap()).await {
+            let response = match service
+                .find_nodes(&own_id, &own_id, next_to_query.as_ref().unwrap())
+                .await
+            {
                 Ok(reponse) => reponse,
                 Err(err) => {
                     if err.code == 408 {
@@ -172,7 +171,7 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boos
                 }
             };
 
-            println!("Got nodes");
+            println!("Got nodes from: {next_to_query:?}");
             for node in response.nodes.into_iter() {
                 if routing_table.insert_node(node) {
                     println!("Inserted node");
@@ -218,7 +217,12 @@ fn main() {
         routing_table.ping_all_nodes(&service).await;
         println!("Done with pings");
 
-        let remaining = routing_table.buckets.iter().flat_map(|bucket| &bucket.nodes).filter(|node| node.is_some()).count();
+        let remaining = routing_table
+            .buckets
+            .iter()
+            .flat_map(|bucket| &bucket.nodes)
+            .filter(|node| node.is_some())
+            .count();
         println!("remaining: {remaining}");
     });
 }
