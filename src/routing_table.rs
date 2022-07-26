@@ -77,9 +77,6 @@ impl RoutingTable {
                     *empty_spot = Some(node);
                     return true;
                 } else if bucket.covers(&self.own_id) {
-                    println!("Splitting bucket for: {:?}", node.id);
-                    println!("bucket min {:?}", bucket.min);
-                    println!("bucket max {:?}", bucket.max);
                     let new_bucket = bucket.split();
                     self.buckets.push(new_bucket);
                     // not efficient
@@ -96,9 +93,9 @@ impl RoutingTable {
     pub async fn ping_all_nodes(&mut self, service: &KrpcService) {
         for maybe_node in self.buckets.iter_mut().flat_map(|bucket| bucket.nodes.iter_mut()) {
             if let Some(node) = maybe_node {
-                if service.ping(node).await.is_err() {
+                if let Err(err) = service.ping(node).await {
                     println!("Ping failed for node: {node:?}");
-                    maybe_node.take();
+                    println!("error: {err}");
                 } else {
                     println!("Ping succeeded");
                 }
