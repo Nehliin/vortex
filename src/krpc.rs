@@ -65,7 +65,8 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
             "KrpcRequest Failed: {} {}",
-            self.code, String::from_utf8_lossy(&self.description)
+            self.code,
+            String::from_utf8_lossy(&self.description)
         ))
     }
 }
@@ -140,6 +141,7 @@ type ConnectionTable =
     Rc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<Response, Error>>>>>;
 
 // TODO use tower!
+#[derive(Clone)]
 pub struct KrpcService {
     socket: Rc<UdpSocket>,
     connection_table: ConnectionTable,
@@ -159,7 +161,15 @@ impl KrpcService {
                     .recv_from(std::mem::take(&mut recv_buffer))
                     .await;
                 let (recv, _addr) = read.unwrap();
-                let resp: KrpcRes = serde_bencode::de::from_bytes(&buf[..recv]).unwrap();
+                let resp: KrpcRes = match serde_bencode::de::from_bytes(&buf[..recv]) {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        log::error!("Error parsing packet: {err}, packet: {}", String::from_utf8_lossy(&buf[..recv]));
+                        buf.clear();
+                        recv_buffer = buf;
+                        continue;
+                    },
+                };
 
                 let mut table = connection_table_clone.lock().unwrap();
                 if let Some(response_sender) = table.remove(&resp.t) {
@@ -171,7 +181,7 @@ impl KrpcService {
                         panic!("received unexpected response")
                     }
                 } else {
-                    println!("Transaction_id not found in the connection_table");
+                    log::warn!("Transaction_id not found in the connection_table");
                 }
                 buf.clear();
                 recv_buffer = buf;
@@ -210,7 +220,7 @@ impl KrpcService {
             table.insert(req.t.clone(), tx);
         }
 
-        println!("Sending");
+        log::debug!("Sending");
         let (res, _) = self.socket.send_to(encoded, node.addr).await;
         res.unwrap();
 
@@ -225,7 +235,7 @@ impl KrpcService {
         }
     }
     // TODO optimize and rework error handling
-    pub async fn ping(&self, node: &Node) -> Result<Pong, Error> {
+    pub async fn ping(&self, querying_node: &NodeId, node: &Node) -> Result<Pong, Error> {
         const QUERY: &str = "ping";
 
         let transaction_id = self.gen_transaction_id();
@@ -235,7 +245,7 @@ impl KrpcService {
             y: 'q',
             q: QUERY,
             a: Query::Ping {
-                id: node.id.to_bytes(),
+                id: querying_node.to_bytes(),
             },
         };
 
@@ -297,49 +307,69 @@ impl KrpcService {
             },
         };
 
-        if let Response::GetPeers {
-            id,
-            token,
-            values,
-            nodes,
-        } = dbg!(self.send_req(node, req).await?)
-        {
-            if let Some(peers) = values {
-                // Might miss if invalid format and its not divisible by chunk size
-                let peers = peers
-                    .into_iter()
-                    .flat_map(|peer_bytes| {
-                        peer_bytes
-                            .chunks_exact(6)
-                            .map(|bytes| Peer {
-                                addr: SocketAddr::new(
-                                    IpAddr::V4(Ipv4Addr::new(
-                                        bytes[0], bytes[1], bytes[2], bytes[3],
-                                    )),
-                                    u16::from_be_bytes([bytes[4], bytes[5]]),
-                                ),
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect();
+        // Apparently nodes don't follow spec?
+        match self.send_req(node, req).await? {
+            Response::GetPeers {
+                id,
+                token,
+                values,
+                nodes,
+            } => {
+                if let Some(peers) = values {
+                    // Might miss if invalid format and its not divisible by chunk size
+                    let peers = peers
+                        .into_iter()
+                        .flat_map(|peer_bytes| {
+                            peer_bytes
+                                .chunks_exact(6)
+                                .map(|bytes| Peer {
+                                    addr: SocketAddr::new(
+                                        IpAddr::V4(Ipv4Addr::new(
+                                            bytes[0], bytes[1], bytes[2], bytes[3],
+                                        )),
+                                        u16::from_be_bytes([bytes[4], bytes[5]]),
+                                    ),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
 
-                return Ok(GetPeersResponse {
-                    id: id.into(),
-                    token,
-                    body: GetPeerResponseBody::Peers(peers),
-                });
+                    return Ok(GetPeersResponse {
+                        id: id.into(),
+                        token,
+                        body: GetPeerResponseBody::Peers(peers),
+                    });
+                }
+
+                if let Some(nodes) = nodes {
+                    let nodes = parse_compact_nodes(nodes);
+
+                    return Ok(GetPeersResponse {
+                        id: id.into(),
+                        token,
+                        body: GetPeerResponseBody::Nodes(nodes),
+                    });
+                }
+                Err(Error {
+                    code: 203,
+                    description: b"Response contained neither nodes nor peers"
+                        .as_slice()
+                        .into(),
+                })
             }
-
-            if let Some(nodes) = nodes {
+            Response::FindNode { id, nodes } => {
                 let nodes = parse_compact_nodes(nodes);
 
-                return Ok(GetPeersResponse {
+                Ok(GetPeersResponse {
                     id: id.into(),
-                    token,
+                    token: Bytes::new(),
                     body: GetPeerResponseBody::Nodes(nodes),
-                });
+                })
             }
+            _ => Err(Error {
+                code: 203,
+                description: b"Unexpected response from get_peers".as_slice().into(),
+            }),
         }
-        panic!("unexpected reponse");
     }
 }
