@@ -129,61 +129,11 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boos
         addr: format!("{boostrap_ip}:6881").parse().unwrap(),
     };
 
-    let response = service.ping(&node).await.unwrap();
+    let response = service.ping(&routing_table.own_id, &node).await.unwrap();
     node.id = response.id;
     routing_table.insert_node(node);
 
-    // Find closest nodes
-    // 1. look in bootstrap for self
-    // 2. recursivly look for the closest node to self in the resposne
-    let own_id = routing_table.own_id;
-    let mut prev_min = ID_MAX;
-    loop {
-        println!("Scanning");
-        let next_to_query = routing_table
-            .buckets
-            .iter_mut()
-            .flat_map(|bucket| bucket.nodes.iter_mut())
-            .min_by_key(|node| {
-                if let Some(node) = node {
-                    own_id.distance(&node.id)
-                } else {
-                    ID_MAX
-                }
-            })
-            .unwrap();
-
-        let distance = own_id.distance(&next_to_query.as_ref().unwrap().id);
-        if distance < prev_min {
-            let response = match service
-                .find_nodes(&own_id, &own_id, next_to_query.as_ref().unwrap())
-                .await
-            {
-                Ok(reponse) => reponse,
-                Err(err) => {
-                    if err.code == 408 {
-                        println!("timeout for: {next_to_query:?}");
-                        next_to_query.take();
-                        continue;
-                    } else {
-                        panic!("{err}");
-                    }
-                }
-            };
-
-            println!("Got nodes from: {next_to_query:?}");
-            for node in response.nodes.into_iter() {
-                if routing_table.insert_node(node) {
-                    println!("Inserted node");
-                }
-            }
-            prev_min = distance;
-        } else {
-            print!("Saving table");
-            save_table(Path::new("routing_table.json"), routing_table).unwrap();
-            break;
-        }
-    }
+    refresh(routing_table, service).await;
 }
 
 async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
@@ -193,7 +143,7 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
     let own_id = routing_table.own_id;
     let mut prev_min = ID_MAX;
     loop {
-        println!("Scanning");
+        log::info!("Scanning");
         let next_to_query = routing_table
             .buckets
             .iter_mut()
@@ -216,7 +166,7 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
                 Ok(reponse) => reponse,
                 Err(err) => {
                     if err.code == 408 {
-                        println!("timeout for: {next_to_query:?}");
+                        log::warn!("timeout for: {next_to_query:?}");
                         next_to_query.take();
                         continue;
                     } else {
@@ -225,7 +175,7 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
                 }
             };
 
-            println!("Got nodes from: {next_to_query:?}");
+            log::debug!("Got nodes from: {next_to_query:?}");
             for node in response.nodes.into_iter() {
                 if routing_table.insert_node(node) {
                     println!("Inserted node");
@@ -233,7 +183,7 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
             }
             prev_min = distance;
         } else {
-            print!("Saving table");
+            log::info!("Saving table");
             save_table(Path::new("routing_table.json"), routing_table).unwrap();
             break;
         }
@@ -241,6 +191,8 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
 }
 
 fn main() {
+    env_logger::init();
+
     // Do this async
     let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default()).unwrap();
     let ip = resolver.lookup_ip(BOOTSTRAP).unwrap();
@@ -249,7 +201,7 @@ fn main() {
     let should_bootstrap;
     let mut routing_table;
     if let Some(table) = load_table(Path::new("routing_table.json")) {
-        println!("Loading table!");
+        log::info!("Loading table!");
         routing_table = table;
         should_bootstrap = false;
     } else {
@@ -271,7 +223,7 @@ fn main() {
         }
 
         routing_table.ping_all_nodes(&service).await;
-        println!("Done with pings");
+        log::info!("Done with pings");
 
         let remaining = routing_table
             .buckets
@@ -279,27 +231,34 @@ fn main() {
             .flat_map(|bucket| &bucket.nodes)
             .filter(|node| node.is_some())
             .count();
-        println!("remaining: {remaining}");
+        log::info!("remaining: {remaining}");
 
         let magent_url =
             Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
-        dbg!(&magent_url.xt);
         let info_hash = dbg!(NodeId::from(&magent_url.xt.unwrap().as_bytes()[..20]));
 
         loop {
             let closest_node = routing_table.get_closest(&info_hash);
-            dbg!(closest_node);
+            log::debug!("Closest node: {closest_node:?}");
 
-            let response = service
+            let response = match service
                 .get_peers(&routing_table.own_id, info_hash.to_bytes(), closest_node)
                 .await
-                .unwrap();
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    log::error!("Failed get_peers request: {err}");
+                    continue;
+                }
+            };
 
             dbg!(&response);
             match response.body {
                 krpc::GetPeerResponseBody::Nodes(nodes) => {
                     for node in nodes.into_iter() {
-                        routing_table.insert_node(node);
+                        if routing_table.force_insert(node) {
+                            log::warn!("Had to purge node");
+                        }
                     }
                 }
                 krpc::GetPeerResponseBody::Peers(peers) => {
