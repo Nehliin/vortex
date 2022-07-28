@@ -10,7 +10,7 @@ use crate::{
 pub struct Bucket {
     min: NodeId,
     max: NodeId,
-    pub nodes: [Option<Node>; 8],
+    pub nodes: [Option<Node>; 16],
 }
 
 impl Bucket {
@@ -39,7 +39,10 @@ impl Bucket {
             min: new_min,
             max: old_max,
             // wtf why do I have to write these out manually
-            nodes: [None, None, None, None, None, None, None, None],
+            nodes: [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None,
+            ],
         };
 
         let mut i = 0;
@@ -66,7 +69,10 @@ impl RoutingTable {
             buckets: vec![Bucket {
                 min: ID_ZERO,
                 max: ID_MAX,
-                nodes: [None, None, None, None, None, None, None, None],
+                nodes: [
+                    None, None, None, None, None, None, None, None, None, None, None, None, None,
+                    None, None, None,
+                ],
             }],
             own_id,
         }
@@ -94,20 +100,29 @@ impl RoutingTable {
     // periodically ping nodes accoriding to
     // https://www.bittorrent.org/beps/bep_0005.html
     pub async fn ping_all_nodes(&mut self, service: &KrpcService) {
-        for maybe_node in self
+        // Will live long enough and this is temporary
+        let this: &'static mut Self = unsafe { std::mem::transmute(self) };
+        let futures = this
             .buckets
             .iter_mut()
             .flat_map(|bucket| bucket.nodes.iter_mut())
-        {
-            if let Some(node) = maybe_node {
-                if let Err(err) = service.ping(node).await {
-                    println!("Ping failed for node: {node:?}");
-                    println!("error: {err}");
-                    maybe_node.take();
-                } else {
-                    println!("Ping succeeded");
-                }
-            }
+            .map(|maybe_node| {
+                let service_clone = service.clone();
+                let own_id = this.own_id;
+                tokio_uring::spawn(async move {
+                    if let Some(node) = maybe_node {
+                        if let Err(err) = service_clone.ping(&own_id, node).await {
+                            log::error!("Ping failed for node: {node:?}, error: {err}");
+                            maybe_node.take();
+                        } else {
+                            log::info!("Ping succeeded");
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for fut in futures {
+            fut.await.unwrap();
         }
     }
 
@@ -118,7 +133,8 @@ impl RoutingTable {
             .iter()
             .flat_map(|bucket| &bucket.nodes)
             .min_by_key(|node| {
-                node.as_ref().map(|node| info_hash.distance(&node.id))
+                node.as_ref()
+                    .map(|node| info_hash.distance(&node.id))
                     .unwrap_or(ID_MAX)
             })
             .unwrap()
@@ -135,6 +151,24 @@ impl RoutingTable {
         }
         assert_eq!(found, 1);
         closest
+    }
+
+    pub fn force_insert(&mut self, node: Node) -> bool {
+        if !self.insert_node(node.clone()) {
+            // TODO: naive
+            for bucket in self.buckets.iter_mut() {
+                if bucket.covers(&node.id) {
+                    // has to be full
+                    let mut to_remove = bucket
+                        .nodes
+                        .iter_mut()
+                        .max_by_key(|bucket_node| bucket_node.as_ref().unwrap().id.distance(&node.id));
+                    **to_remove.as_mut().unwrap() = Some(node);
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -180,8 +214,8 @@ mod test {
         // Sanity check
         assert!(ID_MAX == end_bytes.as_slice().into());
 
-        for i in 1..17 {
-            let id: BigInt = end.clone() - (end.clone() / 16) * i;
+        for i in 1..33 {
+            let id: BigInt = end.clone() - (end.clone() / 32) * i;
             let (_, mut id) = id.to_bytes_be();
             while id.len() < 20 {
                 id.push(0);
@@ -191,7 +225,7 @@ mod test {
                 addr: "0.0.0.0:0".parse().unwrap(),
             });
 
-            if i < 9 {
+            if i < 17 {
                 assert_eq!(routing_table.buckets.len(), 1);
                 assert_eq!(
                     routing_table.buckets[0]
@@ -224,7 +258,7 @@ mod test {
 
                 for bucket in routing_table.buckets.iter() {
                     verify_bucket(bucket);
-                    assert!(bucket.nodes.len() == 8);
+                    assert!(bucket.nodes.len() == 16);
                 }
                 assert_non_overlapping(&routing_table.buckets[0], &routing_table.buckets[1])
             }
@@ -274,7 +308,10 @@ mod test {
         let mut bucket = Bucket {
             min: min.as_slice().into(),
             max: max.as_slice().into(),
-            nodes: [None, None, None, None, None, None, None, None],
+            nodes: [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None,
+            ],
         };
 
         let new_bucket = bucket.split();
