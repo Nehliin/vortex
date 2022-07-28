@@ -7,8 +7,8 @@ edition = "2021"
 
 [dependencies]
 tokio-uring = { version = "0.3.0", features = ["bytes"]}
-# Focus is not on this encoding
 anyhow = "1.0"
+# Focus is not on this encoding
 serde_bencode = "0.2.3"
 serde = "1.0"
 serde_derive = "1.0"
@@ -20,6 +20,8 @@ bytes = { version = "1.1", features = ["serde"]}
 tokio = { version = "1.20.1", features = ["time", "sync"] }
 sha1 = "0.10.1"
 trust-dns-resolver = "0.21"
+log = "0.4"
+env_logger = "0.9"
 
 [dev-dependencies]
 num-bigint = "0.4.3"
