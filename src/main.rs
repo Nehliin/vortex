@@ -1,7 +1,7 @@
-use std::{collections::BTreeMap, net::IpAddr, path::Path};
+use std::{collections::BTreeMap, net::IpAddr, path::Path, time::Duration};
 
 use bytes::{BufMut, Bytes};
-use krpc::KrpcService;
+use krpc::{KrpcService, Peer};
 use magnet_url::Magnet;
 use node::{NodeId, ID_MAX};
 use routing_table::RoutingTable;
@@ -12,11 +12,15 @@ use trust_dns_resolver::{
     Resolver,
 };
 
-use crate::node::{Node, ID_ZERO};
+use crate::{
+    node::{Node, ID_ZERO},
+    u_tp::UTPSocket,
+};
 
 mod krpc;
 mod node;
 mod routing_table;
+mod u_tp;
 
 // https://www.bittorrent.org/beps/bep_0015.html
 struct TrackerPacket {
@@ -150,15 +154,12 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
 
         let distance = own_id.distance(&next_to_query.id);
         if distance < prev_min {
-            let response = match service
-                .find_nodes(&own_id, &own_id, next_to_query)
-                .await
-            {
+            let response = match service.find_nodes(&own_id, &own_id, next_to_query).await {
                 Ok(reponse) => reponse,
                 Err(err) => {
                     if err.code == 408 {
                         log::warn!("timeout for: {next_to_query:?}");
-                        // TODO unnecessary clone 
+                        // TODO unnecessary clone
                         let clone = next_to_query.clone();
                         routing_table.remove(&clone).unwrap();
                         continue;
@@ -186,6 +187,53 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
 fn pop_first(btree_map: &mut BTreeMap<NodeId, Node>) -> Node {
     let key = *btree_map.iter().next().unwrap().0;
     btree_map.remove(&key).unwrap()
+}
+
+async fn find_peers(
+    service: &KrpcService,
+    routing_table: &RoutingTable,
+    magnet_link: String,
+) -> Vec<Peer> {
+    let magent_url = Magnet::new(&magnet_link).unwrap();
+
+    let bytes = base32::decode(
+        base32::Alphabet::RFC4648 { padding: false },
+        magent_url.xt.as_ref().unwrap(),
+    );
+
+    let info_hash = NodeId::from(bytes.unwrap().as_slice());
+
+    let closest_node = routing_table.get_closest(&info_hash).unwrap();
+
+    let mut btree_map = BTreeMap::new();
+    btree_map.insert(info_hash.distance(&closest_node.id), closest_node.clone());
+    loop {
+        let closest_node = pop_first(&mut btree_map);
+        log::debug!("Closest node: {closest_node:?}");
+
+        let response = match service
+            .get_peers(&routing_table.own_id, info_hash.to_bytes(), &closest_node)
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                log::error!("Failed get_peers request: {err}");
+                continue;
+            }
+        };
+
+        match response.body {
+            krpc::GetPeerResponseBody::Nodes(nodes) => {
+                for node in nodes.into_iter() {
+                    btree_map.insert(info_hash.distance(&node.id), node);
+                }
+            }
+            krpc::GetPeerResponseBody::Peers(peers) => {
+                dbg!(&peers);
+                break peers;
+            }
+        }
+    }
 }
 
 fn main() {
@@ -230,45 +278,23 @@ fn main() {
             .count();
         log::info!("remaining: {remaining}");
 
-        let magent_url =
-            Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
+        let peers = find_peers(
+            &service,
+            &routing_table,
+            "magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA".to_string(),
+        )
+        .await;
 
-        let bytes = base32::decode(
-            base32::Alphabet::RFC4648 { padding: false },
-            magent_url.xt.as_ref().unwrap(),
-        );
-        println!("bytes: {}", bytes.as_ref().unwrap().len());
-        let info_hash = dbg!(NodeId::from(bytes.unwrap().as_slice()));
+        for peer in peers.iter() {
+            let connect_res =
+                tokio::time::timeout(Duration::from_secs(3), UTPSocket::connect(peer.addr)).await;
 
-        let closest_node = routing_table.get_closest(&info_hash).unwrap();
-
-        let mut btree_map = BTreeMap::new();
-        btree_map.insert(info_hash.distance(&closest_node.id), closest_node.clone());
-        loop {
-            let closest_node = pop_first(&mut btree_map);
-            log::debug!("Closest node: {closest_node:?}");
-
-            let response = match service
-                .get_peers(&routing_table.own_id, info_hash.to_bytes(), &closest_node)
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    log::error!("Failed get_peers request: {err}");
-                    continue;
-                }
-            };
-
-            match response.body {
-                krpc::GetPeerResponseBody::Nodes(nodes) => {
-                    for node in nodes.into_iter() {
-                        btree_map.insert(info_hash.distance(&node.id), node);
-                    }
-                }
-                krpc::GetPeerResponseBody::Peers(peers) => {
-                    dbg!(peers);
-                    break;
-                }
+            if let Ok(fut_result) = connect_res {
+                if fut_result.is_ok() {
+                    log::info!("Connection Successful!");
+                } 
+            } else {
+                log::error!("Failed to connect to peer: {peer:?}");
             }
         }
 
