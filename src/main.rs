@@ -241,10 +241,12 @@ fn main() {
         let magent_url =
             Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
 
+        let bytes = base32::decode(base32::Alphabet::RFC4648 { padding: false }, magent_url.xt.as_ref().unwrap());
+        println!("bytes: {}", bytes.as_ref().unwrap().len());
+        let info_hash = dbg!(NodeId::from(bytes.unwrap().as_slice()));
 
-        let info_hash = dbg!(NodeId::from(&magent_url.xt.unwrap().as_bytes()[..20]));
+        let closest_node = routing_table.get_closest(&info_hash).unwrap();
 
-        let closest_node = routing_table.get_closest(&info_hash);
         let mut btree_map = BTreeMap::new();
         btree_map.insert(info_hash.distance(&closest_node.id), closest_node.clone());
         loop {
