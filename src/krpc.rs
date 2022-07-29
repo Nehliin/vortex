@@ -8,7 +8,7 @@ use std::{
 
 use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
-use tokio::time::error::Elapsed;
+use time::OffsetDateTime;
 use tokio_uring::net::UdpSocket;
 
 use crate::node::{Node, NodeId};
@@ -131,6 +131,7 @@ fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
             Node {
                 id,
                 addr: (ip, port).into(),
+                last_seen: OffsetDateTime::now_utc(),
             }
         })
         .collect()

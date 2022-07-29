@@ -5,6 +5,8 @@ use std::{
 
 use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use tokio::time::Instant;
 
 // BE endian large nums that
 // can use lexographical order
@@ -141,6 +143,7 @@ impl core::fmt::Debug for NodeId {
 pub struct Node {
     pub id: NodeId,
     pub addr: SocketAddr,
+    pub last_seen: OffsetDateTime,
 }
 
 #[cfg(test)]

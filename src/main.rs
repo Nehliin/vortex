@@ -6,6 +6,7 @@ use magnet_url::Magnet;
 use node::{NodeId, ID_MAX};
 use routing_table::RoutingTable;
 use sha1::{Digest, Sha1};
+use time::OffsetDateTime;
 use trust_dns_resolver::{
     config::{ResolverConfig, ResolverOpts},
     Resolver,
@@ -127,6 +128,7 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boos
     let mut node = Node {
         id: ID_ZERO,
         addr: format!("{boostrap_ip}:6881").parse().unwrap(),
+        last_seen: OffsetDateTime::now_utc(),
     };
 
     let response = service.ping(&routing_table.own_id, &node).await.unwrap();
@@ -144,30 +146,21 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
     let mut prev_min = ID_MAX;
     loop {
         log::info!("Scanning");
-        let next_to_query = routing_table
-            .buckets
-            .iter_mut()
-            .flat_map(|bucket| bucket.nodes.iter_mut())
-            .min_by_key(|node| {
-                if let Some(node) = node {
-                    own_id.distance(&node.id)
-                } else {
-                    ID_MAX
-                }
-            })
-            .unwrap();
+        let next_to_query = routing_table.get_closest(&own_id).unwrap();
 
-        let distance = own_id.distance(&next_to_query.as_ref().unwrap().id);
+        let distance = own_id.distance(&next_to_query.id);
         if distance < prev_min {
             let response = match service
-                .find_nodes(&own_id, &own_id, next_to_query.as_ref().unwrap())
+                .find_nodes(&own_id, &own_id, next_to_query)
                 .await
             {
                 Ok(reponse) => reponse,
                 Err(err) => {
                     if err.code == 408 {
                         log::warn!("timeout for: {next_to_query:?}");
-                        next_to_query.take();
+                        // TODO unnecessary clone 
+                        let clone = next_to_query.clone();
+                        routing_table.remove(&clone).unwrap();
                         continue;
                     } else {
                         panic!("{err}");
@@ -233,15 +226,17 @@ fn main() {
         let remaining = routing_table
             .buckets
             .iter()
-            .flat_map(|bucket| &bucket.nodes)
-            .filter(|node| node.is_some())
+            .flat_map(|bucket| bucket.nodes())
             .count();
         log::info!("remaining: {remaining}");
 
         let magent_url =
             Magnet::new("magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA").unwrap();
 
-        let bytes = base32::decode(base32::Alphabet::RFC4648 { padding: false }, magent_url.xt.as_ref().unwrap());
+        let bytes = base32::decode(
+            base32::Alphabet::RFC4648 { padding: false },
+            magent_url.xt.as_ref().unwrap(),
+        );
         println!("bytes: {}", bytes.as_ref().unwrap().len());
         let info_hash = dbg!(NodeId::from(bytes.unwrap().as_slice()));
 

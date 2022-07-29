@@ -1,4 +1,5 @@
 use serde_derive::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::{
     krpc::KrpcService,
@@ -10,7 +11,8 @@ use crate::{
 pub struct Bucket {
     min: NodeId,
     max: NodeId,
-    pub nodes: [Option<Node>; 16],
+    nodes: [Option<Node>; 16],
+    last_changed: OffsetDateTime,
 }
 
 impl Bucket {
@@ -24,6 +26,20 @@ impl Bucket {
         self.nodes.iter_mut().find(|spot| spot.is_none())
     }
 
+    #[inline]
+    pub fn nodes(&self) -> impl Iterator<Item = &Node> {
+        self.nodes
+            .iter()
+            .filter_map(|maybe_node| maybe_node.as_ref())
+    }
+
+    #[inline]
+    pub fn nodes_mut(&mut self) -> impl Iterator<Item = &mut Node> {
+        self.nodes
+            .iter_mut()
+            .filter_map(|maybe_node| maybe_node.as_mut())
+    }
+
     fn split(&mut self) -> Bucket {
         let old_max = self.max;
         // modify max limit by finding midpoint
@@ -35,6 +51,8 @@ impl Bucket {
 
         let new_min = self.max;
 
+        let last_changed = OffsetDateTime::now_utc();
+
         let mut bucket = Bucket {
             min: new_min,
             max: old_max,
@@ -43,8 +61,10 @@ impl Bucket {
                 None, None, None, None, None, None, None, None, None, None, None, None, None, None,
                 None, None,
             ],
+            last_changed,
         };
 
+        self.last_changed = last_changed;
         let mut i = 0;
         for node in self.nodes.iter_mut() {
             if node.as_ref().map_or(false, |node| node.id >= self.max) {
@@ -72,6 +92,7 @@ impl RoutingTable {
                     None, None, None, None, None, None, None, None, None, None, None, None, None,
                     None, None, None,
                 ],
+                last_changed: OffsetDateTime::now_utc(),
             }],
             own_id,
         }
@@ -83,6 +104,7 @@ impl RoutingTable {
             if bucket.covers(&node.id) {
                 if let Some(empty_spot) = bucket.empty_spot() {
                     *empty_spot = Some(node);
+                    bucket.last_changed = OffsetDateTime::now_utc();
                     return true;
                 } else if bucket.covers(&self.own_id) {
                     let new_bucket = bucket.split();
@@ -138,7 +160,6 @@ impl RoutingTable {
             })? // never empty
             .as_ref()?;
 
-
         // Santify check TODO Remove
         let mut found = 0;
         for bucket in self.buckets.iter() {
@@ -150,6 +171,18 @@ impl RoutingTable {
         }
         assert_eq!(found, 1);
         Some(closest)
+    }
+
+    pub fn remove(&mut self, to_remove: &Node) -> anyhow::Result<()> {
+        let to_remove = self
+            .buckets
+            .iter_mut()
+            .flat_map(|bucket| bucket.nodes.iter_mut())
+            .find(|node| node.as_ref().map(|node| node == to_remove).unwrap_or(false))
+            .ok_or_else(|| anyhow::anyhow!("Node not found in routing table"))?;
+
+        to_remove.take();
+        Ok(())
     }
 
     pub fn force_insert(&mut self, node: Node) -> bool {
@@ -173,6 +206,7 @@ impl RoutingTable {
 #[cfg(test)]
 mod test {
     use num_bigint::BigInt;
+    use time::OffsetDateTime;
 
     use super::*;
 
@@ -255,6 +289,7 @@ mod test {
             routing_table.insert_node(Node {
                 id: id.as_slice().into(),
                 addr: "0.0.0.0:0".parse().unwrap(),
+                last_seen: OffsetDateTime::now_utc(),
             });
 
             if i < 17 {
@@ -316,6 +351,7 @@ mod test {
             routing_table.insert_node(Node {
                 id: id.as_slice().into(),
                 addr: "0.0.0.0:0".parse().unwrap(),
+                last_seen: OffsetDateTime::now_utc(),
             });
         }
 
@@ -344,6 +380,7 @@ mod test {
                 None, None, None, None, None, None, None, None, None, None, None, None, None, None,
                 None, None,
             ],
+            last_changed: OffsetDateTime::now_utc(),
         };
 
         let new_bucket = bucket.split();
