@@ -59,7 +59,6 @@ impl Bucket {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RoutingTable {
     pub buckets: Vec<Bucket>,
-    // TODO: Perhaps worth passing this along with insert_node and not keep it here
     pub own_id: NodeId,
 }
 
@@ -127,7 +126,7 @@ impl RoutingTable {
     }
 
     // TODO maybe not use nodeid as type for info_hash
-    pub fn get_closest(&self, info_hash: &NodeId) -> &Node {
+    pub fn get_closest(&self, info_hash: &NodeId) -> Option<&Node> {
         let closest = self
             .buckets
             .iter()
@@ -136,21 +135,21 @@ impl RoutingTable {
                 node.as_ref()
                     .map(|node| info_hash.distance(&node.id))
                     .unwrap_or(ID_MAX)
-            })
-            .unwrap()
-            .as_ref()
-            .unwrap();
+            })? // never empty
+            .as_ref()?;
 
-        // Santify check
+
+        // Santify check TODO Remove
         let mut found = 0;
         for bucket in self.buckets.iter() {
             if bucket.covers(info_hash) {
+                dbg!(&bucket);
                 found += 1;
                 assert!(bucket.nodes.contains(&Some(closest.clone())));
             }
         }
         assert_eq!(found, 1);
-        closest
+        Some(closest)
     }
 
     pub fn force_insert(&mut self, node: Node) -> bool {
@@ -159,10 +158,9 @@ impl RoutingTable {
             for bucket in self.buckets.iter_mut() {
                 if bucket.covers(&node.id) {
                     // has to be full
-                    let mut to_remove = bucket
-                        .nodes
-                        .iter_mut()
-                        .max_by_key(|bucket_node| bucket_node.as_ref().unwrap().id.distance(&node.id));
+                    let mut to_remove = bucket.nodes.iter_mut().max_by_key(|bucket_node| {
+                        bucket_node.as_ref().unwrap().id.distance(&node.id)
+                    });
                     **to_remove.as_mut().unwrap() = Some(node);
                     return true;
                 }
@@ -199,6 +197,40 @@ mod test {
             assert!(bucket_b.min < bucket_b.max);
             assert!(bucket_a.min < bucket_a.max);
         }
+    }
+
+    #[test]
+    fn test_get_closest() {
+        let routing_table: RoutingTable =
+            serde_json::from_reader(std::fs::File::open("get_closest.json").unwrap()).unwrap();
+        for bucket_a in routing_table.buckets.iter() {
+            verify_bucket(bucket_a);
+            for bucket_b in routing_table.buckets.iter() {
+                if bucket_b == bucket_a {
+                    continue;
+                }
+                verify_bucket(bucket_b);
+                assert_non_overlapping(bucket_a, bucket_b);
+            }
+        }
+
+        let info_bytes: &[u8] = &[
+            0xaa, 0x12, 0x73, 0xc9, 0xb8, 0xf0, 0x90, 0x29, 0xfc, 0xa8, 0x0d, 0xd8, 0x14, 0x22,
+            0xad, 11, 0xeb, 0xca, 0x20, 0x60,
+        ];
+        let info_hash = NodeId::from(info_bytes);
+
+        let closest = routing_table.get_closest(&info_hash).unwrap();
+
+        // Santify check
+        let mut found = 0;
+        for bucket in routing_table.buckets.iter() {
+            if bucket.covers(&info_hash) {
+                found += 1;
+                assert!(bucket.nodes.contains(&Some(closest.clone())));
+            }
+        }
+        assert_eq!(found, 1);
     }
 
     #[test]
