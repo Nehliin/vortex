@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio_uring::net::UdpSocket;
@@ -75,7 +75,7 @@ impl std::error::Error for Error {}
 
 #[derive(Debug, Serialize)]
 struct KrpcReq {
-    t: String,
+    t: Bytes,
     y: char,
     q: &'static str,
     a: Query,
@@ -83,7 +83,7 @@ struct KrpcReq {
 
 #[derive(Debug, Deserialize)]
 struct KrpcRes {
-    t: String,
+    t: Bytes,
     y: String,
     r: Option<Response>,
     e: Option<Error>,
@@ -139,7 +139,7 @@ fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
 
 // TODO improve
 type ConnectionTable =
-    Rc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<Response, Error>>>>>;
+    Rc<Mutex<HashMap<Bytes, tokio::sync::oneshot::Sender<Result<Response, Error>>>>>;
 
 // TODO use tower!
 #[derive(Clone)]
@@ -162,14 +162,19 @@ impl KrpcService {
                     .recv_from(std::mem::take(&mut recv_buffer))
                     .await;
                 let (recv, _addr) = read.unwrap();
+                // TODO This might fail on errors where t can't be parsed
+                // EX: Error parsing packet: Missing Field: `t`, packet: d1:eli202e12:Server Errore1:t2:��1:y1:ee
                 let resp: KrpcRes = match serde_bencode::de::from_bytes(&buf[..recv]) {
                     Ok(resp) => resp,
                     Err(err) => {
-                        log::error!("Error parsing packet: {err}, packet: {}", String::from_utf8_lossy(&buf[..recv]));
+                        log::error!(
+                            "Error parsing packet: {err}, packet: {}",
+                            String::from_utf8_lossy(&buf[..recv])
+                        );
                         buf.clear();
                         recv_buffer = buf;
                         continue;
-                    },
+                    }
                 };
 
                 let mut table = connection_table_clone.lock().unwrap();
@@ -195,12 +200,13 @@ impl KrpcService {
         })
     }
 
-    fn gen_transaction_id(&self) -> String {
+    fn gen_transaction_id(&self) -> Bytes {
         // handle transaction_ids in a saner way so that
         // multiple queries can be sent simultaneously per node
-        let mut id = String::new();
-        id.push(rand::random::<char>());
-        id.push(rand::random::<char>());
+        let mut id = BytesMut::new();
+        id.put_u8(rand::random::<char>() as u8);
+        id.put_u8(rand::random::<char>() as u8);
+        let id = id.freeze();
 
         let conn_table = self.connection_table.lock().unwrap();
         if conn_table.contains_key(&id) {
@@ -242,7 +248,7 @@ impl KrpcService {
         let transaction_id = self.gen_transaction_id();
 
         let req = KrpcReq {
-            t: transaction_id.to_string(),
+            t: transaction_id,
             y: 'q',
             q: QUERY,
             a: Query::Ping {
@@ -268,7 +274,7 @@ impl KrpcService {
         let transaction_id = self.gen_transaction_id();
 
         let req = KrpcReq {
-            t: transaction_id.to_string(),
+            t: transaction_id,
             y: 'q',
             q: QUERY,
             a: Query::FindNode {
@@ -299,7 +305,7 @@ impl KrpcService {
         let transaction_id = self.gen_transaction_id();
 
         let req = KrpcReq {
-            t: transaction_id.to_string(),
+            t: transaction_id,
             y: 'q',
             q: QUERY,
             a: Query::GetPeers {

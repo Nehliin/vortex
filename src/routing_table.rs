@@ -164,7 +164,6 @@ impl RoutingTable {
         let mut found = 0;
         for bucket in self.buckets.iter() {
             if bucket.covers(info_hash) {
-                dbg!(&bucket);
                 found += 1;
                 assert!(bucket.nodes.contains(&Some(closest.clone())));
             }

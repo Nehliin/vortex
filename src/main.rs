@@ -259,7 +259,6 @@ fn main() {
                 }
             };
 
-            dbg!(&response);
             match response.body {
                 krpc::GetPeerResponseBody::Nodes(nodes) => {
                     for node in nodes.into_iter() {
