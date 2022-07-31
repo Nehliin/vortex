@@ -292,7 +292,7 @@ fn main() {
             if let Ok(fut_result) = connect_res {
                 if fut_result.is_ok() {
                     log::info!("Connection Successful!");
-                } 
+                }
             } else {
                 log::error!("Failed to connect to peer: {peer:?}");
             }

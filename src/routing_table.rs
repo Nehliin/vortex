@@ -68,13 +68,18 @@ impl Bucket {
         let mut i = 0;
         for node in self.nodes.iter_mut() {
             if node.as_ref().map_or(false, |node| bucket.covers(&node.id)) {
-                // Assert it's covered by only one bucket 
-                debug_assert!(!(self.min <= node.as_ref().unwrap().id && node.as_ref().unwrap().id < self.max));
+                // Assert it's covered by only one bucket
+                debug_assert!(
+                    !(self.min <= node.as_ref().unwrap().id
+                        && node.as_ref().unwrap().id < self.max)
+                );
                 bucket.nodes[i] = node.take();
                 i += 1;
             } else {
                 // Assert it's covered by at least one bucket
-                debug_assert!(node.as_ref().map_or(true, |node| self.min <= node.id && node.id < self.max))
+                debug_assert!(node
+                    .as_ref()
+                    .map_or(true, |node| self.min <= node.id && node.id < self.max))
             }
         }
         bucket
@@ -138,7 +143,7 @@ impl RoutingTable {
                 tokio_uring::spawn(async move {
                     if let Some(node) = maybe_node {
                         if let Err(err) = service_clone.ping(&own_id, node).await {
-                            log::error!("Ping failed for node: {node:?}, error: {err}");
+                            log::warn!("Ping failed for node: {node:?}, error: {err}");
                             maybe_node.take();
                         } else {
                             log::info!("Ping succeeded");
