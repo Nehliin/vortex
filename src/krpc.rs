@@ -7,6 +7,7 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
+use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio_uring::net::UdpSocket;
@@ -187,7 +188,7 @@ impl KrpcService {
                         panic!("received unexpected response")
                     }
                 } else {
-                    log::warn!("Transaction_id not found in the connection_table");
+                    log::error!("Transaction_id not found in the connection_table");
                 }
                 buf.clear();
                 recv_buffer = buf;
@@ -201,11 +202,13 @@ impl KrpcService {
     }
 
     fn gen_transaction_id(&self) -> Bytes {
+        use rand::distributions::Alphanumeric;
+        let mut rng = rand::thread_rng();
         // handle transaction_ids in a saner way so that
         // multiple queries can be sent simultaneously per node
         let mut id = BytesMut::new();
-        id.put_u8(rand::random::<char>() as u8);
-        id.put_u8(rand::random::<char>() as u8);
+        id.put_u8(rng.sample(Alphanumeric) as u8);
+        id.put_u8(rng.sample(Alphanumeric) as u8);
         let id = id.freeze();
 
         let conn_table = self.connection_table.lock().unwrap();
