@@ -1,8 +1,8 @@
 use std::{
+    cell::RefCell,
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     rc::Rc,
-    sync::Mutex,
     time::Duration,
 };
 
@@ -10,6 +10,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tokio::sync::oneshot;
 use tokio_uring::net::UdpSocket;
 
 use crate::node::{Node, NodeId};
@@ -138,9 +139,35 @@ fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
         .collect()
 }
 
-// TODO improve
-type ConnectionTable =
-    Rc<Mutex<HashMap<Bytes, tokio::sync::oneshot::Sender<Result<Response, Error>>>>>;
+#[derive(Clone, Default, Debug)]
+// TODO rename, it's not really a connection
+struct ConnectionTable(Rc<RefCell<HashMap<Bytes, oneshot::Sender<Result<Response, Error>>>>>);
+
+// Ensures Refcell borrow is never held across await point
+impl ConnectionTable {
+    fn insert_connection(
+        &self,
+        transaction_id: Bytes,
+    ) -> oneshot::Receiver<Result<Response, Error>> {
+        let mut table = (*self.0).borrow_mut();
+        let (tx, rx) = oneshot::channel();
+        table.insert(transaction_id, tx);
+        rx
+    }
+
+    fn exists(&self, transaction_id: &Bytes) -> bool {
+        let table = (*self.0).borrow();
+        table.contains_key(transaction_id)
+    }
+
+    fn remove_connection(
+        &self,
+        transaction_id: &Bytes,
+    ) -> Option<oneshot::Sender<Result<Response, Error>>> {
+        let mut table = (*self.0).borrow_mut();
+        table.remove(transaction_id)
+    }
+}
 
 // TODO use tower!
 #[derive(Clone)]
@@ -152,8 +179,8 @@ pub struct KrpcService {
 impl KrpcService {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
         let socket = Rc::new(UdpSocket::bind(bind_addr).await?);
-        let connection_table: ConnectionTable = Rc::new(Mutex::new(HashMap::new()));
-        let connection_table_clone = Rc::clone(&connection_table);
+        let connection_table = ConnectionTable::default();
+        let connection_table_clone = connection_table.clone();
         // too large
         let mut recv_buffer = vec![0; 4096];
         let socket_clone = Rc::clone(&socket);
@@ -178,8 +205,8 @@ impl KrpcService {
                     }
                 };
 
-                let mut table = connection_table_clone.lock().unwrap();
-                if let Some(response_sender) = table.remove(&resp.t) {
+                let response_sender = connection_table_clone.remove_connection(&resp.t);
+                if let Some(response_sender) = response_sender {
                     if resp.y == "r" {
                         let _ = response_sender.send(Ok(resp.r.unwrap()));
                     } else if resp.y == "e" {
@@ -188,7 +215,11 @@ impl KrpcService {
                         panic!("received unexpected response")
                     }
                 } else {
-                    log::error!("Transaction_id not found in the connection_table");
+                    log::error!(
+                        "Transaction_id: {:?} not found in the connection_table: {:?}",
+                        resp.t,
+                        connection_table_clone
+                    );
                 }
                 buf.clear();
                 recv_buffer = buf;
@@ -211,9 +242,7 @@ impl KrpcService {
         id.put_u8(rng.sample(Alphanumeric) as u8);
         let id = id.freeze();
 
-        let conn_table = self.connection_table.lock().unwrap();
-        if conn_table.contains_key(&id) {
-            drop(conn_table);
+        if self.connection_table.exists(&id) {
             // need to generate another id
             self.gen_transaction_id()
         } else {
@@ -224,11 +253,7 @@ impl KrpcService {
     async fn send_req(&self, node: &Node, req: KrpcReq) -> Result<Response, Error> {
         let encoded = serde_bencode::ser::to_bytes(&req).unwrap();
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        {
-            let mut table = self.connection_table.lock().unwrap();
-            table.insert(req.t.clone(), tx);
-        }
+        let rx = self.connection_table.insert_connection(req.t.clone());
 
         log::debug!("Sending");
         let (res, _) = self.socket.send_to(encoded, node.addr).await;
