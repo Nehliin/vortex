@@ -140,12 +140,11 @@ fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
 }
 
 #[derive(Clone, Default, Debug)]
-// TODO rename, it's not really a connection
-struct ConnectionTable(Rc<RefCell<HashMap<Bytes, oneshot::Sender<Result<Response, Error>>>>>);
+struct InflightRpcs(Rc<RefCell<HashMap<Bytes, oneshot::Sender<Result<Response, Error>>>>>);
 
 // Ensures Refcell borrow is never held across await point
-impl ConnectionTable {
-    fn insert_connection(
+impl InflightRpcs {
+    fn insert_rpc(
         &self,
         transaction_id: Bytes,
     ) -> oneshot::Receiver<Result<Response, Error>> {
@@ -160,7 +159,7 @@ impl ConnectionTable {
         table.contains_key(transaction_id)
     }
 
-    fn remove_connection(
+    fn remove_rpc(
         &self,
         transaction_id: &Bytes,
     ) -> Option<oneshot::Sender<Result<Response, Error>>> {
@@ -173,13 +172,13 @@ impl ConnectionTable {
 #[derive(Clone)]
 pub struct KrpcService {
     socket: Rc<UdpSocket>,
-    connection_table: ConnectionTable,
+    connection_table: InflightRpcs,
 }
 
 impl KrpcService {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
         let socket = Rc::new(UdpSocket::bind(bind_addr).await?);
-        let connection_table = ConnectionTable::default();
+        let connection_table = InflightRpcs::default();
         let connection_table_clone = connection_table.clone();
         // too large
         let mut recv_buffer = vec![0; 4096];
@@ -205,7 +204,7 @@ impl KrpcService {
                     }
                 };
 
-                let response_sender = connection_table_clone.remove_connection(&resp.t);
+                let response_sender = connection_table_clone.remove_rpc(&resp.t);
                 if let Some(response_sender) = response_sender {
                     if resp.y == "r" {
                         let _ = response_sender.send(Ok(resp.r.unwrap()));
@@ -253,7 +252,7 @@ impl KrpcService {
     async fn send_req(&self, node: &Node, req: KrpcReq) -> Result<Response, Error> {
         let encoded = serde_bencode::ser::to_bytes(&req).unwrap();
 
-        let rx = self.connection_table.insert_connection(req.t.clone());
+        let rx = self.connection_table.insert_rpc(req.t.clone());
 
         log::debug!("Sending");
         let (res, _) = self.socket.send_to(encoded, node.addr).await;
