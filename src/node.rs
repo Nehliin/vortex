@@ -103,6 +103,7 @@ impl Sub for &NodeId {
 
 #[inline]
 pub fn midpoint(low: &NodeId, high: &NodeId) -> NodeId {
+    debug_assert!(low < high);
     let mut diff = high - low;
     diff.halve();
     low + &diff

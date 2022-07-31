@@ -67,9 +67,14 @@ impl Bucket {
         self.last_changed = last_changed;
         let mut i = 0;
         for node in self.nodes.iter_mut() {
-            if node.as_ref().map_or(false, |node| node.id >= self.max) {
+            if node.as_ref().map_or(false, |node| bucket.covers(&node.id)) {
+                // Assert it's covered by only one bucket 
+                debug_assert!(!(self.min <= node.as_ref().unwrap().id && node.as_ref().unwrap().id < self.max));
                 bucket.nodes[i] = node.take();
                 i += 1;
+            } else {
+                // Assert it's covered by at least one bucket
+                debug_assert!(node.as_ref().map_or(true, |node| self.min <= node.id && node.id < self.max))
             }
         }
         bucket
@@ -160,15 +165,15 @@ impl RoutingTable {
             })? // never empty
             .as_ref()?;
 
-        // Santify check TODO FIX AND REMOVE 
-        /*let mut found = 0;
+        // Santify check TODO FIX AND REMOVE
+        let mut found = 0;
         for bucket in self.buckets.iter() {
-            if bucket.covers(info_hash) {
+            if bucket.covers(&closest.id) {
                 found += 1;
                 assert!(bucket.nodes.contains(&Some(closest.clone())));
             }
         }
-        assert_eq!(found, 1);*/
+        assert_eq!(found, 1);
         Some(closest)
     }
 
