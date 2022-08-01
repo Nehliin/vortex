@@ -168,9 +168,15 @@ impl InflightRpcs {
     }
 }
 
+// EXAMPLE OF FAILURE:
+// Error parsing packet: Missing Field: `t`, packet: d1:eli202e12:Server Errore1:t2:lC1:y1:ee
+// Error parsing packet: Missing Field: `t`, packet: d1:eli202e12:Server Errore1:t2:zg1:y1:ee
+
+
 // TODO use tower!
 #[derive(Clone)]
 pub struct KrpcService {
+    // TODO Set cpu affinity for socket
     socket: Rc<UdpSocket>,
     connection_table: InflightRpcs,
 }
@@ -214,10 +220,10 @@ impl KrpcService {
                         panic!("received unexpected response")
                     }
                 } else {
+                    // TODO probably incomming connections
                     log::error!(
-                        "Transaction_id: {:?} not found in the connection_table: {:?}",
+                        "Transaction_id: {:?} not found in the connection_table",
                         resp.t,
-                        connection_table_clone
                     );
                 }
                 buf.clear();
