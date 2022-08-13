@@ -190,7 +190,6 @@ impl UTPSocket {
                                 log::warn!("Received FIN out of order, packets will be lost");
                             }
                             break;
-
                         }
                         _ => {
                             // READ bytes after header
