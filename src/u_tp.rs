@@ -37,6 +37,8 @@ struct SocketInner {
     cur_window_packets: u16,
     // Last received window this socket advertised in bytes
     last_recv_window: u32,
+    // temporary to test acking
+    temp_addr: SocketAddr,
 }
 
 #[derive(Clone)]
@@ -76,6 +78,7 @@ impl UTPSocket {
                 // mimic libutp without a callback set (default behavior)
                 last_recv_window: 1024 * 1024,
                 conn_id_send: conn_id + 1,
+                temp_addr: bind_addr,
             })),
         };
 
@@ -104,7 +107,10 @@ impl UTPSocket {
                         // This must be a syn-ack and the state ack_nr is initialzied here
                         // to match the seq_nr received from the other end since this is the first
                         // nr of the connection. I suspect this is initialzied early because
-                        // packets may be received out of order
+                        // packets may be received out of order.
+                        //
+                        // Ah yes the ack_nr just indicates that we've acked up until the SYN
+                        // packet since we don't always start from 1
                         state.ack_nr = packet.seq_nr - 1;
                     }
 
@@ -117,11 +123,25 @@ impl UTPSocket {
                             // The number of packets past the expected packet. Diff between acked
                             // up until and current -1 gives 0 the meaning of this being the next
                             // expected packet in the sequence.
-                            let _dist_from_expected = packet.seq_nr - state.ack_nr - 1;
+                            let dist_from_expected = packet.seq_nr - state.ack_nr - 1;
+                            log::trace!("Packet dist_from_expected: {dist_from_expected}");
                             state.connection_state = ConnectionState::Connected;
                             connect_notifier.send(()).unwrap();
+
+                            if dist_from_expected == 0 {
+                                // in order packet
+                                let addr = state.temp_addr;
+                                // don't hold refcell across await point
+                                drop(state);
+                                log::info!("Acked packet!");
+                                self.ack(addr).await.unwrap();
+                            } else {
+                                // out of order packets we can't handle yet
+                            }
+
                         }
                         _ => {
+                            // READ bytes after header
                             log::error!("Unhandled packet type!: {:?}", packet.packet_type);
                         }
                     }
@@ -139,6 +159,7 @@ impl UTPSocket {
         let (tx, rc) = tokio::sync::oneshot::channel();
         let packet_header = {
             let mut state = self.state.borrow_mut();
+            state.temp_addr = addr;
             state.connection_state = ConnectionState::SynSent {
                 connect_notifier: tx,
             };
@@ -157,6 +178,25 @@ impl UTPSocket {
 
         self.send_packet(packet_header, addr).await?;
         rc.await?;
+        Ok(())
+    }
+
+    async fn ack(&self, addr: SocketAddr) -> anyhow::Result<()> {
+        let timestamp_microseconds = get_microseconds();
+        let packet_header = {
+            let state = self.state.borrow_mut();
+            PacketHeader {
+                seq_nr: state.seq_nr,
+                ack_nr: state.ack_nr,
+                conn_id: state.conn_id_send,
+                packet_type: PacketType::State,
+                timestamp_microseconds: timestamp_microseconds as u32,
+                timestamp_difference_microseconds: 0,
+                wnd_size: dbg!(state.last_recv_window),
+                extension: 0,
+            }
+        };
+        self.send_packet(packet_header, addr).await?;
         Ok(())
     }
 

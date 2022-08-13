@@ -293,7 +293,7 @@ fn main() {
 
             if let Ok(fut_result) = connect_res {
                 if fut_result.is_ok() {
-                    log::debug!("Connected!");
+                    log::debug!("Connected to {}!", peer.addr);
                 }
             } else {
                 log::error!("Failed to connect to peer: {:?}", peer.addr);
