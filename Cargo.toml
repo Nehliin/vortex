@@ -24,6 +24,7 @@ trust-dns-resolver = "0.21"
 log = "0.4"
 env_logger = "0.9"
 base32 = "0.4"
+libc = "0.2"
 
 [dev-dependencies]
 num-bigint = "0.4.3"

@@ -257,26 +257,6 @@ fn main() {
         should_bootstrap = true;
     }
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    std::thread::spawn(move || {
-        tokio_uring::start(async move {
-            while let Some(peer_addr) = rx.recv().await {
-                let socket = UTPSocket::bind("0.0.0.0:0".parse().unwrap()).await.unwrap();
-                let connect_res =
-                    tokio::time::timeout(Duration::from_secs(3), socket.connect(peer_addr)).await;
-
-                if let Ok(fut_result) = connect_res {
-                    if fut_result.is_ok() {
-                        log::debug!("Connection packet sent");
-                        //tokio::time::sleep(Duration::from_secs(3)).await;
-                    }
-                } else {
-                    log::error!("Failed to connect to peer: {peer_addr:?}");
-                }
-            }
-        });
-    });
-
     tokio_uring::start(async move {
         let service = KrpcService::new("0.0.0.0:1337".parse().unwrap())
             .await
@@ -307,16 +287,20 @@ fn main() {
         .await;
 
         for peer in peers.into_iter() {
-            /*let connect_res = tokio::time::timeout(Duration::from_secs(3), UTPSocket::connect_old(peer.addr)).await;
-            if let Ok(fut_res) = connect_res {
-               fut_res.unwrap(); 
+            let socket = UTPSocket::bind("0.0.0.0:0".parse().unwrap()).await.unwrap();
+            let connect_res =
+                tokio::time::timeout(Duration::from_secs(3), socket.connect(peer.addr)).await;
+
+            if let Ok(fut_result) = connect_res {
+                if fut_result.is_ok() {
+                    log::debug!("Connection packet sent");
+                    //tokio::time::sleep(Duration::from_secs(3)).await;
+                }
             } else {
-                log::error!("failed to connect to peer")
-            }*/
-            tx.send("84.90.26.110:51413".parse().unwrap()).await.unwrap();
-            break;
-           //tx.send(peer.addr).await.unwrap();
+                log::error!("Failed to connect to peer: {:?}", peer.addr);
+            }
         }
+        tokio::time::sleep(Duration::from_secs(5)).await;
         // announce peer
     });
 }

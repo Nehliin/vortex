@@ -17,7 +17,7 @@ struct SocketInner {
     connection_state: ConnectionState,
     // Sequence number for next packet to be sent
     seq_nr: u16,
-    // All sequence numbers up until and including this which have been 
+    // All sequence numbers up until and including this which have been
     // properly recived
     ack_nr: u16,
     // Connection id for packets I receive
@@ -40,10 +40,9 @@ pub struct UTPSocket {
     state: Rc<RefCell<SocketInner>>,
 }
 
-
-// Conceptually there is a single socket that handles multiple connections 
+// Conceptually there is a single socket that handles multiple connections
 // The socket context keeps a hashmap of all connections keyed by the socketaddr
-// the network loop listens on data and then finds the relevant connection based on addr 
+// the network loop listens on data and then finds the relevant connection based on addr
 // and also double checks the connection ids
 
 // TODO better error handling
@@ -58,7 +57,7 @@ impl UTPSocket {
             state: Rc::new(RefCell::new(SocketInner {
                 connection_state: ConnectionState::Idle,
                 // start from 1 for compability with older clients but not as secure
-                seq_nr: 1, //rand::random::<u16>(),
+                seq_nr: rand::random::<u16>(),
                 conn_id_recv: conn_id,
                 cur_window_packets: 0,
                 ack_nr: 0,
@@ -67,7 +66,7 @@ impl UTPSocket {
                 conn_id_send: conn_id + 1,
             })),
         };
-        
+
         let this = utp_socket.clone();
         tokio_uring::spawn(async move {
             this.process_incomming().await;
@@ -88,12 +87,12 @@ impl UTPSocket {
                     let packet = PacketHeader::from(&buf[..recv]);
                     // TODO ignore packets who have invalid ack nr
                     let mut state = self.state.borrow_mut();
-                    
+
                     if state.connection_state == ConnectionState::SynSent {
                         // This must be a syn-ack and the state ack_nr is initialzied here
-                        // to match the seq_nr received from the other end since this is the first 
+                        // to match the seq_nr received from the other end since this is the first
                         // nr of the connection. I suspect this is initialzied early because
-                        // packets may be received out of order 
+                        // packets may be received out of order
                         state.ack_nr = packet.seq_nr - 1;
                     }
 
@@ -104,9 +103,9 @@ impl UTPSocket {
                             // up until and current -1 gives 0 the meaning of this being the next
                             // expected packet in the sequence.
                             let _dist_from_expected = packet.seq_nr - state.ack_nr - 1;
-                             state.connection_state = ConnectionState::Connected;
-                             log::info!("Connected!");
-                        },
+                            state.connection_state = ConnectionState::Connected;
+                            log::info!("Connected!");
+                        }
                         _ => {
                             log::error!("Unhandled packet type!: {:?}", packet.packet_type);
                         }
@@ -115,12 +114,13 @@ impl UTPSocket {
                 Err(err) => log::error!("Failed to receive on utp socket: {err}"),
             }
             recv_buf = buf;
+            log::info!("process loop");
         }
     }
 
     pub async fn connect(&self, addr: SocketAddr) -> anyhow::Result<()> {
         // TODO This is just wrong
-        let timestamp_microseconds = OffsetDateTime::now_utc().microsecond();
+        let timestamp_microseconds = get_microseconds() as u32;
 
         let packet_header = {
             let state = self.state.borrow();
@@ -141,58 +141,19 @@ impl UTPSocket {
     }
 
     async fn send_packet(&self, packet: PacketHeader, addr: SocketAddr) -> anyhow::Result<()> {
-        log::debug!("Sending {:?} for addr: {addr}", packet.packet_type);
+        let packet_bytes = packet.to_bytes();
+        log::debug!(
+            "Sending {:?} bytes: {} to addr: {addr}",
+            packet.packet_type,
+            packet_bytes.len()
+        );
         // TODO check how this relates to windows size and opt_sndbuf
-        let (result, _buf) = self.socket.send_to(packet.to_bytes(), addr).await;
+        let (result, _buf) = self.socket.send_to(packet_bytes, addr).await;
         let _ = result?;
         let mut state = self.state.borrow_mut();
+        state.connection_state = ConnectionState::SynSent;
         state.seq_nr += 1;
         state.cur_window_packets += 1;
-        Ok(())
-    }
-
-    pub async fn connect_old(addr: SocketAddr) -> anyhow::Result<()> {
-        let socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).await?;
-
-        /*let mut utp_socket = Self {
-            socket,
-            state: ConnectionState::SynSent,
-            // start from 1 for compability with older clients but not as secure
-            seq_nr: rand::random::<u16>(),
-            conn_id_recv: conn_id,
-            cur_window_packets: 0,
-            // mimic libutp without a callback set (default behavior)
-            last_recv_window: 1024 * 1024,
-            conn_id_send: conn_id + 1,
-        };*/
-
-        //let sent_packet = PacketHeader::connect(utp_socket.conn_id_recv, utp_socket.seq_nr);
-        let sent_packet = PacketHeader::connect(rand::random::<u16>(), 1);
-        //utp_socket.seq_nr += 1;
-
-        log::debug!("Sending ST_SYN for addr: {addr}");
-        let (result, _buf) =socket
-            .send_to(sent_packet.to_bytes(), addr)
-            .await;
-        let _ = result?;
-
-        log::debug!("Waiting for ST_STATE for addr: {addr}");
-        let buf = vec![0; 4096];
-        // Wait for resposse
-        let (result, buf) = socket.recv_from(buf).await;
-        let (recv, from_addr) = result?;
-
-        log::debug!("Received packet from addr: {from_addr}");
-        assert!(addr == from_addr);
-
-        let packet = PacketHeader::from(&buf[..recv]);
-        dbg!(&packet);
-
-        if packet.packet_type == PacketType::State {
-            log::info!("Connected??");
-            log::info!("sent_packet: {sent_packet:?}");
-            log::info!("recv_packet: {packet:?}");
-        }
         Ok(())
     }
 }
@@ -250,38 +211,56 @@ impl From<&[u8]> for PacketHeader {
     }
 }
 
-impl PacketHeader {
-    fn connect(conn_id_recv: u16, seq_nr: u16) -> Self {
-        // TODO This is just wrong
-        let timestamp_microseconds = OffsetDateTime::now_utc().microsecond();
+fn get_microseconds() -> u64 {
+    static mut OFFSET: u64 = 0;
+    static mut PREVIOUS: u64 = 0;
 
-        Self {
-            seq_nr,
-            ack_nr: 0,
-            conn_id: conn_id_recv,
-            packet_type: PacketType::Syn,
-            timestamp_microseconds,
-            timestamp_difference_microseconds: 0,
-            wnd_size: 1024 * 1024, // mimics libutp
-            extension: 0,
-        }
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let res = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+
+    if res < 0 {
+        panic!("clock get time failed");
     }
+
+    let mut now = ts.tv_sec as u64 * 1000000 + ts.tv_nsec as u64 / 1000;
+    unsafe {
+        now += OFFSET;
+        if PREVIOUS > now {
+            OFFSET += PREVIOUS - now;
+            now = PREVIOUS;
+        }
+        PREVIOUS = now;
+    }
+
+    now
+}
+
+impl PacketHeader {
 
     fn to_bytes(&self) -> Bytes {
         use bytes::BufMut;
         let mut bytes = BytesMut::new();
-        let mut first_byte = (self.packet_type as u8).to_be();
+
+        let mut first_byte = self.packet_type as u8;
         first_byte <<= 4;
         first_byte |= 0b0000_0001;
+
+        println!("{first_byte:#b}");
         // type and version
         bytes.put_u8(first_byte);
-        bytes.put_u8(self.extension.to_be());
-        bytes.put_u16(self.conn_id.to_be());
-        bytes.put_u32(self.timestamp_microseconds.to_be());
-        bytes.put_u32(self.timestamp_difference_microseconds.to_be());
-        bytes.put_u32(self.wnd_size.to_be());
-        bytes.put_u16(self.seq_nr.to_be());
-        bytes.put_u16(self.ack_nr.to_be());
-        bytes.freeze()
+        // 0 so doesn't matter for now if to_be should be used or not
+        bytes.put_u8(self.extension);
+        bytes.put_u16(self.conn_id);
+        bytes.put_u32(self.timestamp_microseconds);
+        bytes.put_u32(self.timestamp_difference_microseconds);
+        bytes.put_u32(self.wnd_size);
+        bytes.put_u16(self.seq_nr);
+        bytes.put_u16(self.ack_nr);
+        let res = bytes.freeze();
+        println!("{:02x?}", &res[..]);
+        res
     }
 }
