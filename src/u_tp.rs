@@ -41,6 +41,8 @@ struct SocketInner {
     // whenever a packet is received this state is updated
     // by subtracting timestamp_microseconds from the host current time
     reply_micro: u32,
+    // Last packet in sequence, taken from the FIN packet
+    eof_pkt: Option<u16>,
     // temporary to test acking
     temp_addr: SocketAddr,
 }
@@ -83,6 +85,7 @@ impl UTPSocket {
                 last_recv_window: 1024 * 1024,
                 conn_id_send: conn_id + 1,
                 reply_micro: 0,
+                eof_pkt: None,
                 temp_addr: bind_addr,
             })),
         };
@@ -100,7 +103,6 @@ impl UTPSocket {
         let mut recv_buf = vec![0; 1024 * 1024];
         loop {
             let (result, buf) = self.socket.recv_from(std::mem::take(&mut recv_buf)).await;
-            log::info!("got something!");
             match result {
                 Ok((recv, addr)) => {
                     log::info!("Received {recv} from {addr}");
@@ -176,6 +178,19 @@ impl UTPSocket {
                             } else {
                                 // out of order packets we can't handle yet
                             }
+                        }
+                        (PacketType::Fin, _) => {
+                            log::trace!("Received FIN: {}", temp_addr);
+                            let mut state = self.state.borrow_mut();
+                            state.eof_pkt = Some(packet.seq_nr);
+                            if dist_from_expected == 0 {
+                                log::info!("Connection closed: {}", temp_addr);
+                            } else {
+                                // TODO handle out of order packets
+                                log::warn!("Received FIN out of order, packets will be lost");
+                            }
+                            break;
+
                         }
                         _ => {
                             // READ bytes after header
@@ -289,8 +304,8 @@ impl From<&[u8]> for PacketHeader {
         assert!(version == 1);
         let extension = bytes.get_u8();
         let conn_id = bytes.get_u16();
-        let timestamp_microseconds = dbg!(bytes.get_u32());
-        let timestamp_difference_microseconds = dbg!(bytes.get_u32());
+        let timestamp_microseconds = bytes.get_u32();
+        let timestamp_difference_microseconds = bytes.get_u32();
         let wnd_size = bytes.get_u32();
         let seq_nr = bytes.get_u16();
         let ack_nr = bytes.get_u16();
