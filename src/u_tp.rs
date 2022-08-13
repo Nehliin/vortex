@@ -1,16 +1,25 @@
 use std::{cell::RefCell, net::SocketAddr, rc::Rc};
 
 use bytes::{Buf, Bytes, BytesMut};
-use time::OffsetDateTime;
 use tokio_uring::net::UdpSocket;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum ConnectionState {
     Idle,
     // TODO syn received to handle incoming traffic
-    SynSent,
+    SynSent {
+        connect_notifier: tokio::sync::oneshot::Sender<()>,
+    },
     Connected,
 }
+
+impl PartialEq for ConnectionState {
+    fn eq(&self, other: &Self) -> bool {
+        core::mem::discriminant(self) == core::mem::discriminant(other)
+    }
+}
+
+impl Eq for ConnectionState {}
 
 struct SocketInner {
     // Current socket state
@@ -39,6 +48,9 @@ pub struct UTPSocket {
     // without problems as long as a borrow is not held across await points
     state: Rc<RefCell<SocketInner>>,
 }
+
+// One could do callbacks like libutp but it would require allocations
+// unlessa a manual vtable was employed which I'd rather avoid
 
 // Conceptually there is a single socket that handles multiple connections
 // The socket context keeps a hashmap of all connections keyed by the socketaddr
@@ -88,7 +100,7 @@ impl UTPSocket {
                     // TODO ignore packets who have invalid ack nr
                     let mut state = self.state.borrow_mut();
 
-                    if state.connection_state == ConnectionState::SynSent {
+                    if matches!(state.connection_state, ConnectionState::SynSent { .. }) {
                         // This must be a syn-ack and the state ack_nr is initialzied here
                         // to match the seq_nr received from the other end since this is the first
                         // nr of the connection. I suspect this is initialzied early because
@@ -96,15 +108,18 @@ impl UTPSocket {
                         state.ack_nr = packet.seq_nr - 1;
                     }
 
-                    match packet.packet_type {
+                    let conn_state =
+                        std::mem::replace(&mut state.connection_state, ConnectionState::Idle);
+
+                    match (packet.packet_type, conn_state) {
                         // Outgoing connection completion
-                        PacketType::State if state.connection_state == ConnectionState::SynSent => {
+                        (PacketType::State, ConnectionState::SynSent { connect_notifier }) => {
                             // The number of packets past the expected packet. Diff between acked
                             // up until and current -1 gives 0 the meaning of this being the next
                             // expected packet in the sequence.
                             let _dist_from_expected = packet.seq_nr - state.ack_nr - 1;
                             state.connection_state = ConnectionState::Connected;
-                            log::info!("Connected!");
+                            connect_notifier.send(()).unwrap();
                         }
                         _ => {
                             log::error!("Unhandled packet type!: {:?}", packet.packet_type);
@@ -119,11 +134,14 @@ impl UTPSocket {
     }
 
     pub async fn connect(&self, addr: SocketAddr) -> anyhow::Result<()> {
-        // TODO This is just wrong
         let timestamp_microseconds = get_microseconds() as u32;
 
+        let (tx, rc) = tokio::sync::oneshot::channel();
         let packet_header = {
-            let state = self.state.borrow();
+            let mut state = self.state.borrow_mut();
+            state.connection_state = ConnectionState::SynSent {
+                connect_notifier: tx,
+            };
 
             PacketHeader {
                 seq_nr: state.seq_nr,
@@ -137,7 +155,9 @@ impl UTPSocket {
             }
         };
 
-        self.send_packet(packet_header, addr).await
+        self.send_packet(packet_header, addr).await?;
+        rc.await?;
+        Ok(())
     }
 
     async fn send_packet(&self, packet: PacketHeader, addr: SocketAddr) -> anyhow::Result<()> {
@@ -151,7 +171,6 @@ impl UTPSocket {
         let (result, _buf) = self.socket.send_to(packet_bytes, addr).await;
         let _ = result?;
         let mut state = self.state.borrow_mut();
-        state.connection_state = ConnectionState::SynSent;
         state.seq_nr += 1;
         state.cur_window_packets += 1;
         Ok(())
@@ -211,6 +230,8 @@ impl From<&[u8]> for PacketHeader {
     }
 }
 
+// Not very rusty at all, stolen from libutp to test
+// impact on connection errors
 fn get_microseconds() -> u64 {
     static mut OFFSET: u64 = 0;
     static mut PREVIOUS: u64 = 0;
@@ -239,7 +260,6 @@ fn get_microseconds() -> u64 {
 }
 
 impl PacketHeader {
-
     fn to_bytes(&self) -> Bytes {
         use bytes::BufMut;
         let mut bytes = BytesMut::new();
@@ -248,7 +268,6 @@ impl PacketHeader {
         first_byte <<= 4;
         first_byte |= 0b0000_0001;
 
-        println!("{first_byte:#b}");
         // type and version
         bytes.put_u8(first_byte);
         // 0 so doesn't matter for now if to_be should be used or not
@@ -260,7 +279,7 @@ impl PacketHeader {
         bytes.put_u16(self.seq_nr);
         bytes.put_u16(self.ack_nr);
         let res = bytes.freeze();
-        println!("{:02x?}", &res[..]);
+        log::debug!("{:02x?}", &res[..]);
         res
     }
 }

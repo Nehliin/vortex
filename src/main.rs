@@ -293,14 +293,12 @@ fn main() {
 
             if let Ok(fut_result) = connect_res {
                 if fut_result.is_ok() {
-                    log::debug!("Connection packet sent");
-                    //tokio::time::sleep(Duration::from_secs(3)).await;
+                    log::debug!("Connected!");
                 }
             } else {
                 log::error!("Failed to connect to peer: {:?}", peer.addr);
             }
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
         // announce peer
     });
 }

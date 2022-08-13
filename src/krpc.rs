@@ -144,10 +144,7 @@ struct InflightRpcs(Rc<RefCell<HashMap<Bytes, oneshot::Sender<Result<Response, E
 
 // Ensures Refcell borrow is never held across await point
 impl InflightRpcs {
-    fn insert_rpc(
-        &self,
-        transaction_id: Bytes,
-    ) -> oneshot::Receiver<Result<Response, Error>> {
+    fn insert_rpc(&self, transaction_id: Bytes) -> oneshot::Receiver<Result<Response, Error>> {
         let mut table = (*self.0).borrow_mut();
         let (tx, rx) = oneshot::channel();
         table.insert(transaction_id, tx);
@@ -171,7 +168,6 @@ impl InflightRpcs {
 // EXAMPLE OF FAILURE:
 // Error parsing packet: Missing Field: `t`, packet: d1:eli202e12:Server Errore1:t2:lC1:y1:ee
 // Error parsing packet: Missing Field: `t`, packet: d1:eli202e12:Server Errore1:t2:zg1:y1:ee
-
 
 // TODO use tower!
 #[derive(Clone)]
