@@ -37,6 +37,10 @@ struct SocketInner {
     cur_window_packets: u16,
     // Last received window this socket advertised in bytes
     last_recv_window: u32,
+    // Last delay measurement from other endpoint
+    // whenever a packet is received this state is updated 
+    // by subtracting timestamp_microseconds from the host current time
+    reply_micro: u32,
     // temporary to test acking
     temp_addr: SocketAddr,
 }
@@ -78,6 +82,7 @@ impl UTPSocket {
                 // mimic libutp without a callback set (default behavior)
                 last_recv_window: 1024 * 1024,
                 conn_id_send: conn_id + 1,
+                reply_micro: 0,
                 temp_addr: bind_addr,
             })),
         };
@@ -113,6 +118,17 @@ impl UTPSocket {
                         // packet since we don't always start from 1
                         state.ack_nr = packet.seq_nr - 1;
                     }
+
+
+                    let their_delay = if packet.timestamp_microseconds == 0 {
+                        // I supose this is for incoming traffic that wants to open 
+                        // new connections?
+                        0
+                    } else {
+                        let time = get_microseconds();
+                        time - packet.timestamp_microseconds as u64
+                    };
+                    state.reply_micro = their_delay as u32;
 
                     let conn_state =
                         std::mem::replace(&mut state.connection_state, ConnectionState::Idle);
@@ -170,7 +186,7 @@ impl UTPSocket {
                 conn_id: state.conn_id_recv,
                 packet_type: PacketType::Syn,
                 timestamp_microseconds,
-                timestamp_difference_microseconds: 0,
+                timestamp_difference_microseconds: state.reply_micro,
                 wnd_size: state.last_recv_window,
                 extension: 0,
             }
@@ -191,7 +207,7 @@ impl UTPSocket {
                 conn_id: state.conn_id_send,
                 packet_type: PacketType::State,
                 timestamp_microseconds: timestamp_microseconds as u32,
-                timestamp_difference_microseconds: 0,
+                timestamp_difference_microseconds: state.reply_micro,
                 wnd_size: dbg!(state.last_recv_window),
                 extension: 0,
             }
@@ -251,8 +267,8 @@ impl From<&[u8]> for PacketHeader {
         assert!(version == 1);
         let extension = bytes.get_u8();
         let conn_id = bytes.get_u16();
-        let timestamp_microseconds = bytes.get_u32();
-        let timestamp_difference_microseconds = bytes.get_u32();
+        let timestamp_microseconds = dbg!(bytes.get_u32());
+        let timestamp_difference_microseconds = dbg!(bytes.get_u32());
         let wnd_size = bytes.get_u32();
         let seq_nr = bytes.get_u16();
         let ack_nr = bytes.get_u16();
