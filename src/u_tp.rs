@@ -38,7 +38,7 @@ struct SocketInner {
     // Last received window this socket advertised in bytes
     last_recv_window: u32,
     // Last delay measurement from other endpoint
-    // whenever a packet is received this state is updated 
+    // whenever a packet is received this state is updated
     // by subtracting timestamp_microseconds from the host current time
     reply_micro: u32,
     // temporary to test acking
@@ -106,55 +106,76 @@ impl UTPSocket {
                     log::info!("Received {recv} from {addr}");
                     let packet = PacketHeader::from(&buf[..recv]);
                     // TODO ignore packets who have invalid ack nr
-                    let mut state = self.state.borrow_mut();
 
-                    if matches!(state.connection_state, ConnectionState::SynSent { .. }) {
-                        // This must be a syn-ack and the state ack_nr is initialzied here
-                        // to match the seq_nr received from the other end since this is the first
-                        // nr of the connection. I suspect this is initialzied early because
-                        // packets may be received out of order.
-                        //
-                        // Ah yes the ack_nr just indicates that we've acked up until the SYN
-                        // packet since we don't always start from 1
-                        state.ack_nr = packet.seq_nr - 1;
-                    }
+                    let (conn_state, dist_from_expected) = {
+                        let mut state = self.state.borrow_mut();
+                        if matches!(state.connection_state, ConnectionState::SynSent { .. }) {
+                            // This must be a syn-ack and the state ack_nr is initialzied here
+                            // to match the seq_nr received from the other end since this is the first
+                            // nr of the connection. I suspect this is initialzied early because
+                            // packets may be received out of order.
+                            //
+                            // Ah yes the ack_nr just indicates that we've (since this is the state
+                            // ack_nr) acked up until the SYN
+                            // packet since we don't always start from 1
+                            state.ack_nr = packet.seq_nr - 1;
+                        }
 
-
-                    let their_delay = if packet.timestamp_microseconds == 0 {
-                        // I supose this is for incoming traffic that wants to open 
-                        // new connections?
-                        0
-                    } else {
-                        let time = get_microseconds();
-                        time - packet.timestamp_microseconds as u64
+                        let their_delay = if packet.timestamp_microseconds == 0 {
+                            // I supose this is for incoming traffic that wants to open
+                            // new connections?
+                            0
+                        } else {
+                            let time = get_microseconds();
+                            time - packet.timestamp_microseconds as u64
+                        };
+                        state.reply_micro = their_delay as u32;
+                        // The number of packets past the expected packet. Diff between acked
+                        // up until and current -1 gives 0 the meaning of this being the next
+                        // expected packet in the sequence.
+                        let dist_from_expected = packet.seq_nr - state.ack_nr - 1;
+                        (
+                            std::mem::replace(&mut state.connection_state, ConnectionState::Idle),
+                            dist_from_expected,
+                        )
                     };
-                    state.reply_micro = their_delay as u32;
 
-                    let conn_state =
-                        std::mem::replace(&mut state.connection_state, ConnectionState::Idle);
+                    let temp_addr = self.state.borrow().temp_addr;
 
                     match (packet.packet_type, conn_state) {
                         // Outgoing connection completion
                         (PacketType::State, ConnectionState::SynSent { connect_notifier }) => {
-                            // The number of packets past the expected packet. Diff between acked
-                            // up until and current -1 gives 0 the meaning of this being the next
-                            // expected packet in the sequence.
-                            let dist_from_expected = packet.seq_nr - state.ack_nr - 1;
                             log::trace!("Packet dist_from_expected: {dist_from_expected}");
+                            let mut state = self.state.borrow_mut();
+                            state.cur_window_packets -= 1;
                             state.connection_state = ConnectionState::Connected;
                             connect_notifier.send(()).unwrap();
 
                             if dist_from_expected == 0 {
+                                log::trace!("SYN_ACK");
+                            } else {
+                                // out of order packets we can't handle yet
+                            }
+                        }
+                        (PacketType::State, _) => {
+                            log::trace!("Packet dist_from_expected: {dist_from_expected}");
+                            log::trace!("Received ACK: {}", temp_addr);
+                            let mut state = self.state.borrow_mut();
+                            state.cur_window_packets -= 1;
+                        }
+                        (PacketType::Data, _) => {
+                            log::trace!("Packet dist_from_expected: {dist_from_expected}");
+                            if dist_from_expected == 0 {
                                 // in order packet
-                                let addr = state.temp_addr;
-                                // don't hold refcell across await point
-                                drop(state);
-                                log::info!("Acked packet!");
+                                {
+                                    let mut state = self.state.borrow_mut();
+                                    state.ack_nr += 1;
+                                }
+                                log::trace!("Sending ACK");
                                 self.ack(addr).await.unwrap();
                             } else {
                                 // out of order packets we can't handle yet
                             }
-
                         }
                         _ => {
                             // READ bytes after header
@@ -165,7 +186,6 @@ impl UTPSocket {
                 Err(err) => log::error!("Failed to receive on utp socket: {err}"),
             }
             recv_buf = buf;
-            log::info!("process loop");
         }
     }
 
@@ -180,7 +200,7 @@ impl UTPSocket {
                 connect_notifier: tx,
             };
 
-            PacketHeader {
+            let header = PacketHeader {
                 seq_nr: state.seq_nr,
                 ack_nr: 0,
                 conn_id: state.conn_id_recv,
@@ -189,7 +209,9 @@ impl UTPSocket {
                 timestamp_difference_microseconds: state.reply_micro,
                 wnd_size: state.last_recv_window,
                 extension: 0,
-            }
+            };
+            state.seq_nr += 1;
+            header
         };
 
         self.send_packet(packet_header, addr).await?;
@@ -200,7 +222,7 @@ impl UTPSocket {
     async fn ack(&self, addr: SocketAddr) -> anyhow::Result<()> {
         let timestamp_microseconds = get_microseconds();
         let packet_header = {
-            let state = self.state.borrow_mut();
+            let state = self.state.borrow();
             PacketHeader {
                 seq_nr: state.seq_nr,
                 ack_nr: state.ack_nr,
@@ -227,7 +249,7 @@ impl UTPSocket {
         let (result, _buf) = self.socket.send_to(packet_bytes, addr).await;
         let _ = result?;
         let mut state = self.state.borrow_mut();
-        state.seq_nr += 1;
+        // Might be certain situations where this shouldn't be appended?
         state.cur_window_packets += 1;
         Ok(())
     }
