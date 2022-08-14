@@ -14,6 +14,7 @@ pub(crate) enum ConnectionState {
         connect_notifier: tokio::sync::oneshot::Sender<()>,
     },
     Connected,
+    FinSent,
 }
 
 impl PartialEq for ConnectionState {
@@ -40,7 +41,8 @@ pub(crate) struct StreamState {
     // Current amount of packets sent but not acked
     pub(crate) cur_window_packets: u16,
     // Last received window this socket advertised in bytes
-    pub(crate) last_recv_window: u32,
+    pub(crate) our_advertised_window: u32,
+    pub(crate) their_advertised_window: u32,
     // Last delay measurement from other endpoint
     // whenever a packet is received this state is updated
     // by subtracting timestamp_microseconds from the host current time
@@ -63,19 +65,55 @@ impl UtpStream {
         }
     }
 
-    pub(crate) fn process_incoming(&self, packet: PacketHeader) -> anyhow::Result<()> {
-        // TODO ignore packets who have invalid ack nr
+    pub(crate) fn process_incoming(&self, packet: PacketHeader) -> anyhow::Result<bool> {
+        // Mismatching id
+        if packet.conn_id != self.state().conn_id_recv {
+            // sanity check
+            assert!(
+                packet.packet_type != PacketType::Syn,
+                "Syn packets should be handled elsewhere"
+            );
+            anyhow::bail!(
+                "Received invalid packet connection id: {}, expected: {}",
+                packet.conn_id,
+                self.state().conn_id_recv
+            )
+        }
 
         let (conn_state, dist_from_expected) = {
             let mut state = self.state_mut();
-            if matches!(state.connection_state, ConnectionState::SynSent { .. }) {
+
+            let syn_sent = matches!(state.connection_state, ConnectionState::SynSent { .. });
+
+            // Sequence number used to check that the ack is valid.
+            // If we receive an ack for a packet past this sequence number
+            // we have received an ack for an unsent packet which is incorrect.
+            // Syn is the first packet sent so no - 1 there and same goes for Fin I guess?
+            //
+            // TODO: move this to be part of the match or something
+            // ALSO TODO: handle wrapping ack/seq nr.
+            let cmp_seq_nr = if (syn_sent || state.connection_state == ConnectionState::FinSent)
+                && packet.packet_type == PacketType::State
+            {
+                state.seq_nr
+            } else {
+                state.seq_nr - 1
+            };
+
+            if cmp_seq_nr < packet.ack_nr {
+                anyhow::bail!("Incoming ack_nr was invalid");
+            }
+
+            // TODO: handle eof
+
+            if syn_sent {
                 // This must be a syn-ack and the state ack_nr is initialzied here
                 // to match the seq_nr received from the other end since this is the first
                 // nr of the connection. I suspect this is initialzied early because
                 // packets may be received out of order.
                 //
                 // Ah yes the ack_nr just indicates that we've (since this is the state
-                // ack_nr) acked up until the SYN
+                // ack_nr) acked up until and including the SYN
                 // packet since we don't always start from 1
                 state.ack_nr = packet.seq_nr - 1;
             }
@@ -89,6 +127,7 @@ impl UtpStream {
                 time - packet.timestamp_microseconds as u64
             };
             state.reply_micro = their_delay as u32;
+            state.their_advertised_window = packet.wnd_size;
             // The number of packets past the expected packet. Diff between acked
             // up until and current -1 gives 0 the meaning of this being the next
             // expected packet in the sequence.
@@ -100,6 +139,9 @@ impl UtpStream {
         };
 
         let addr = self.state().addr;
+        let need_to_ack = packet.packet_type == PacketType::Data
+            || packet.packet_type == PacketType::Syn // TODO handled elsewhere
+            || packet.packet_type == PacketType::Fin;
 
         match (packet.packet_type, conn_state) {
             // Outgoing connection completion
@@ -132,7 +174,7 @@ impl UtpStream {
                     }
                     log::trace!("Sending ACK (almost)");
                     // TODOOO
-                    //stream.ack(addr).await.unwrap();
+                    // consume_incoming_data in libtorrent
                 } else {
                     // out of order packets we can't handle yet
                 }
@@ -143,6 +185,7 @@ impl UtpStream {
                 state.eof_pkt = Some(packet.seq_nr);
                 if dist_from_expected == 0 {
                     log::info!("Connection closed: {}", addr);
+                    // more stuff here
                 } else {
                     // TODO handle out of order packets
                     log::warn!("Received FIN out of order, packets will be lost");
@@ -153,7 +196,8 @@ impl UtpStream {
                 log::error!("Unhandled packet type!: {:?}", packet.packet_type);
             }
         }
-        Ok(())
+
+        Ok(need_to_ack)
     }
 }
 

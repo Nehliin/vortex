@@ -45,14 +45,8 @@ impl UtpSocket {
                 // Double check if this is cancellation safe
                 // (I don't think it is but shouldn't matter anyways)
                 tokio::select! {
-                    buf_res = process_incomming(&net_loop_socket, &streams_clone, std::mem::take(&mut recv_buf)) => {
-                            match buf_res {
-                                Ok(buffer) => recv_buf = buffer,
-                                Err(err) => {
-                                    log::error!("Error {err}: Shutting down network loop");
-                                    break;
-                                },
-                            }
+                    buf = process_incomming(&net_loop_socket, &streams_clone, std::mem::take(&mut recv_buf)) => {
+                           recv_buf = buf;
                         }
                     _ = &mut shutdown_receiver =>  {
                         log::info!("Shutting down network loop");
@@ -88,11 +82,13 @@ impl UtpSocket {
             cur_window_packets: 0,
             ack_nr: 0,
             // mimic libutp without a callback set (default behavior)
-            last_recv_window: 1024 * 1024,
+            our_advertised_window: 1024 * 1024,
             conn_id_send: stream_key.conn_id + 1,
             reply_micro: 0,
             eof_pkt: None,
             addr,
+            // mtu
+            their_advertised_window: 1500,
         });
 
         self.streams.borrow_mut().insert(stream_key, stream.clone());
@@ -113,19 +109,19 @@ impl UtpSocket {
                 packet_type: PacketType::Syn,
                 timestamp_microseconds,
                 timestamp_difference_microseconds: state.reply_micro,
-                wnd_size: state.last_recv_window,
+                wnd_size: state.our_advertised_window,
                 extension: 0,
             };
             state.seq_nr += 1;
             header
         };
 
-        self.send_packet(packet_header, &stream).await?;
+        UtpSocket::send_packet(&self.socket, packet_header, &stream).await?;
         rc.await?;
         Ok(stream)
     }
 
-    async fn ack(&self, stream: &UtpStream) -> anyhow::Result<()> {
+    async fn ack(socket: &UdpSocket, stream: &UtpStream) -> anyhow::Result<()> {
         let timestamp_microseconds = get_microseconds();
         let packet_header = {
             let state = stream.state();
@@ -136,15 +132,19 @@ impl UtpSocket {
                 packet_type: PacketType::State,
                 timestamp_microseconds: timestamp_microseconds as u32,
                 timestamp_difference_microseconds: state.reply_micro,
-                wnd_size: dbg!(state.last_recv_window),
+                wnd_size: dbg!(state.our_advertised_window),
                 extension: 0,
             }
         };
-        self.send_packet(packet_header, stream).await?;
+        UtpSocket::send_packet(socket, packet_header, stream).await?;
         Ok(())
     }
 
-    async fn send_packet(&self, packet: PacketHeader, stream: &UtpStream) -> anyhow::Result<()> {
+    async fn send_packet(
+        socket: &UdpSocket,
+        packet: PacketHeader,
+        stream: &UtpStream,
+    ) -> anyhow::Result<()> {
         let addr = stream.state().addr;
         let packet_bytes = packet.to_bytes();
         log::debug!(
@@ -153,7 +153,7 @@ impl UtpSocket {
             packet_bytes.len()
         );
         // TODO check how this relates to windows size and opt_sndbuf
-        let (result, _buf) = self.socket.send_to(packet_bytes, addr).await;
+        let (result, _buf) = socket.send_to(packet_bytes, addr).await;
         let _ = result?;
         let mut state = stream.state_mut();
         // Might be certain situations where this shouldn't be appended?
@@ -174,31 +174,38 @@ async fn process_incomming(
     socket: &UdpSocket,
     connections: &Rc<RefCell<HashMap<StreamKey, UtpStream>>>,
     recv_buf: Vec<u8>,
-) -> anyhow::Result<Vec<u8>> {
+) -> Vec<u8> {
     let (result, buf) = socket.recv_from(recv_buf).await;
     match result {
         Ok((recv, addr)) => {
             log::info!("Received {recv} from {addr}");
-            let packet = PacketHeader::from(&buf[..recv]);
+            match PacketHeader::try_from(&buf[..recv]) {
+                Ok(packet) => {
+                    let key = StreamKey {
+                        conn_id: packet.conn_id,
+                        addr,
+                    };
 
-            let key = StreamKey {
-                conn_id: packet.conn_id,
-                addr,
-            };
-
-            // Check version here instead of panicking in packetHeader impl 
-
-            if let Some(stream) = connections.borrow().get(&key) {
-                stream.process_incoming(packet);
-            } else {
-                log::warn!("Connection not established prior");
-                // Can't handle incoming traffic yet
-                return Ok(buf);
+                    if let Some(stream) = connections.borrow().get(&key) {
+                        match stream.process_incoming(packet) {
+                            Ok(needs_ack) => {
+                                UtpSocket::ack(&socket, stream).await;
+                            }
+                            Err(err) => {
+                                log::error!("Error: Failed processing incoming packet: {err}");
+                            }
+                        }
+                    } else {
+                        log::warn!("Connection not established prior");
+                        // Can't handle incoming traffic yet
+                    }
+                }
+                Err(err) => log::error!("Error parsing packet: {err}"),
             }
         }
         Err(err) => log::error!("Failed to receive on utp socket: {err}"),
     }
-    Ok(buf)
+    buf
 }
 
 #[repr(u8)]
@@ -224,15 +231,21 @@ pub struct PacketHeader {
     pub extension: u8,
 }
 
-impl From<&[u8]> for PacketHeader {
-    fn from(mut bytes: &[u8]) -> Self {
+impl TryFrom<&[u8]> for PacketHeader {
+    type Error = anyhow::Error;
+
+    fn try_from(mut bytes: &[u8]) -> anyhow::Result<Self> {
+        const HEADER_SIZE: usize = 20;
+        anyhow::ensure!(
+            bytes.len() >= HEADER_SIZE,
+            "Error: Packet to small to parse"
+        );
         let first_byte = bytes.get_u8();
         let packet_type = first_byte >> 4;
-        assert!(packet_type < 5);
+        anyhow::ensure!(packet_type < 5, "Error: Packet type not recognized");
         let packet_type: PacketType = unsafe { std::mem::transmute(packet_type) };
-        dbg!(packet_type);
         let version = first_byte & 0b0000_1111;
-        assert!(version == 1);
+        anyhow::ensure!(version == 1, "Error: Packet version not supported");
         let extension = bytes.get_u8();
         let conn_id = bytes.get_u16();
         let timestamp_microseconds = bytes.get_u32();
@@ -241,7 +254,7 @@ impl From<&[u8]> for PacketHeader {
         let seq_nr = bytes.get_u16();
         let ack_nr = bytes.get_u16();
 
-        Self {
+        Ok(Self {
             seq_nr,
             ack_nr,
             conn_id,
@@ -250,7 +263,7 @@ impl From<&[u8]> for PacketHeader {
             timestamp_difference_microseconds,
             wnd_size,
             extension,
-        }
+        })
     }
 }
 
