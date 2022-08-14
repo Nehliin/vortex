@@ -1,6 +1,5 @@
 use std::{collections::BTreeMap, net::IpAddr, path::Path, time::Duration};
 
-use bytes::{BufMut, Bytes};
 use krpc::{KrpcService, Peer};
 use magnet_url::Magnet;
 use node::{NodeId, ID_MAX};
@@ -14,93 +13,14 @@ use trust_dns_resolver::{
 
 use crate::{
     node::{Node, ID_ZERO},
-    u_tp::{UtpSocket, UtpStream},
+    utp_socket::UtpSocket,
 };
 
 mod krpc;
 mod node;
 mod routing_table;
-mod u_tp;
-
-// https://www.bittorrent.org/beps/bep_0015.html
-struct TrackerPacket {
-    protocol_id: i64,
-    action: i32,
-    transaction_id: i32,
-}
-
-impl TrackerPacket {
-    fn new(action: i32) -> Self {
-        TrackerPacket {
-            protocol_id: 0x41727101980, // magic constant
-            action,
-            transaction_id: rand::random::<i32>(),
-        }
-    }
-
-    fn to_bytes(self) -> bytes::Bytes {
-        let mut bytes = bytes::BytesMut::new();
-        bytes.reserve(16);
-        bytes.put_i64(self.protocol_id);
-        bytes.put_i32(self.action);
-        bytes.put_i32(self.transaction_id);
-        bytes.freeze()
-    }
-}
-
-#[derive(Debug)]
-struct TrackerResponse {
-    action: i32,
-    transaction_id: i32,
-    connection_id: i64,
-}
-
-impl From<Bytes> for TrackerResponse {
-    fn from(mut bytes: Bytes) -> Self {
-        use bytes::Buf;
-        let action = bytes.get_i32();
-        let transaction_id = bytes.get_i32();
-        let connection_id = bytes.get_i64();
-        TrackerResponse {
-            action,
-            transaction_id,
-            connection_id,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct AnnounceRequest {
-    connection_id: i64,
-    action: i32,
-    transaction_id: i32,
-    info_hash: [u8; 20],
-    peer_id: [u8; 20],
-    downloaded: i64,
-    left: i64,
-    uploaded: i64,
-    event: i32,
-    ip_addr: i32,
-    key: i32,
-    num_want: i32,
-    port: i32,
-}
-
-impl AnnounceRequest {
-    fn to_bytes(&self) -> Bytes {
-        let mut bytes = bytes::BytesMut::new();
-        bytes.put_i64(self.connection_id);
-        bytes.put_i32(self.action);
-        bytes.put_i32(self.transaction_id);
-        bytes.put_slice(&self.info_hash);
-        bytes.put_slice(&self.peer_id);
-        bytes.put_i64(self.downloaded);
-        bytes.put_i64(self.left);
-        bytes.put_i64(self.uploaded);
-        bytes.put_i64(self.uploaded);
-        bytes.freeze()
-    }
-}
+mod utp_socket;
+mod utp_stream;
 
 fn generate_node_id() -> NodeId {
     let id = rand::random::<[u8; 20]>();
