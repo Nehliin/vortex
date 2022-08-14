@@ -186,102 +186,14 @@ async fn process_incomming(
                 addr,
             };
 
-            let stream = {
-                if let Some(stream) = connections.borrow().get(&key) {
-                    stream.clone()
-                } else {
-                    // Can't handle incoming traffic yet
-                    return Ok(buf);
-                }
-            };
-            // TODO ignore packets who have invalid ack nr
+            // Check version here instead of panicking in packetHeader impl 
 
-            let (conn_state, dist_from_expected) = {
-                let mut state = stream.state_mut();
-                if matches!(state.connection_state, ConnectionState::SynSent { .. }) {
-                    // This must be a syn-ack and the state ack_nr is initialzied here
-                    // to match the seq_nr received from the other end since this is the first
-                    // nr of the connection. I suspect this is initialzied early because
-                    // packets may be received out of order.
-                    //
-                    // Ah yes the ack_nr just indicates that we've (since this is the state
-                    // ack_nr) acked up until the SYN
-                    // packet since we don't always start from 1
-                    state.ack_nr = packet.seq_nr - 1;
-                }
-
-                let their_delay = if packet.timestamp_microseconds == 0 {
-                    // I supose this is for incoming traffic that wants to open
-                    // new connections?
-                    0
-                } else {
-                    let time = get_microseconds();
-                    time - packet.timestamp_microseconds as u64
-                };
-                state.reply_micro = their_delay as u32;
-                // The number of packets past the expected packet. Diff between acked
-                // up until and current -1 gives 0 the meaning of this being the next
-                // expected packet in the sequence.
-                let dist_from_expected = packet.seq_nr - state.ack_nr - 1;
-                (
-                    std::mem::replace(&mut state.connection_state, ConnectionState::Idle),
-                    dist_from_expected,
-                )
-            };
-
-            let addr = stream.state().addr;
-
-            match (packet.packet_type, conn_state) {
-                // Outgoing connection completion
-                (PacketType::State, ConnectionState::SynSent { connect_notifier }) => {
-                    log::trace!("Packet dist_from_expected: {dist_from_expected}");
-                    let mut state = stream.state_mut();
-                    state.cur_window_packets -= 1;
-                    state.connection_state = ConnectionState::Connected;
-                    connect_notifier.send(()).unwrap();
-
-                    if dist_from_expected == 0 {
-                        log::trace!("SYN_ACK");
-                    } else {
-                        // out of order packets we can't handle yet
-                    }
-                }
-                (PacketType::State, _) => {
-                    log::trace!("Packet dist_from_expected: {dist_from_expected}");
-                    log::trace!("Received ACK: {}", addr);
-                    let mut state = stream.state_mut();
-                    state.cur_window_packets -= 1;
-                }
-                (PacketType::Data, _) => {
-                    log::trace!("Packet dist_from_expected: {dist_from_expected}");
-                    if dist_from_expected == 0 {
-                        // in order packet
-                        {
-                            let mut state = stream.state_mut();
-                            state.ack_nr += 1;
-                        }
-                        log::trace!("Sending ACK (almost)");
-                        // TODOOO
-                        //stream.ack(addr).await.unwrap();
-                    } else {
-                        // out of order packets we can't handle yet
-                    }
-                }
-                (PacketType::Fin, _) => {
-                    log::trace!("Received FIN: {}", addr);
-                    let mut state = stream.state_mut();
-                    state.eof_pkt = Some(packet.seq_nr);
-                    if dist_from_expected == 0 {
-                        log::info!("Connection closed: {}", addr);
-                    } else {
-                        // TODO handle out of order packets
-                        log::warn!("Received FIN out of order, packets will be lost");
-                    }
-                }
-                _ => {
-                    // READ bytes after header
-                    log::error!("Unhandled packet type!: {:?}", packet.packet_type);
-                }
+            if let Some(stream) = connections.borrow().get(&key) {
+                stream.process_incoming(packet);
+            } else {
+                log::warn!("Connection not established prior");
+                // Can't handle incoming traffic yet
+                return Ok(buf);
             }
         }
         Err(err) => log::error!("Failed to receive on utp socket: {err}"),
@@ -302,14 +214,14 @@ pub enum PacketType {
 // repr c instead? and just send directly over socket?
 #[derive(Debug)]
 pub struct PacketHeader {
-    seq_nr: u16,
-    ack_nr: u16,
-    conn_id: u16,
-    packet_type: PacketType,
-    timestamp_microseconds: u32,
-    timestamp_difference_microseconds: u32,
-    wnd_size: u32,
-    extension: u8,
+    pub seq_nr: u16,
+    pub ack_nr: u16,
+    pub conn_id: u16,
+    pub packet_type: PacketType,
+    pub timestamp_microseconds: u32,
+    pub timestamp_difference_microseconds: u32,
+    pub wnd_size: u32,
+    pub extension: u8,
 }
 
 impl From<&[u8]> for PacketHeader {
@@ -344,7 +256,7 @@ impl From<&[u8]> for PacketHeader {
 
 // Not very rusty at all, stolen from libutp to test
 // impact on connection errors
-fn get_microseconds() -> u64 {
+pub fn get_microseconds() -> u64 {
     static mut OFFSET: u64 = 0;
     static mut PREVIOUS: u64 = 0;
 
