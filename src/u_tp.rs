@@ -1,4 +1,9 @@
-use std::{cell::RefCell, net::SocketAddr, rc::Rc};
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    collections::HashMap,
+    net::SocketAddr,
+    rc::Rc,
+};
 
 use bytes::{Buf, Bytes, BytesMut};
 use tokio_uring::net::UdpSocket;
@@ -21,7 +26,8 @@ impl PartialEq for ConnectionState {
 
 impl Eq for ConnectionState {}
 
-struct SocketInner {
+#[derive(Debug)]
+struct StreamState {
     // Current socket state
     connection_state: ConnectionState,
     // Sequence number for next packet to be sent
@@ -43,18 +49,29 @@ struct SocketInner {
     reply_micro: u32,
     // Last packet in sequence, taken from the FIN packet
     eof_pkt: Option<u16>,
-    // temporary to test acking
-    temp_addr: SocketAddr,
+    // The adder the stream is connected to
+    addr: SocketAddr,
 }
 
-#[derive(Clone)]
-pub struct UTPSocket {
-    // it's not necessary to use one socket per state most likely
+#[derive(Clone, Debug)]
+pub struct UtpStream {
+    inner: Rc<RefCell<StreamState>>,
+}
+
+impl UtpStream {
+    fn state_mut(&self) -> RefMut<'_, StreamState> {
+        self.inner.borrow_mut()
+    }
+
+    fn state(&self) -> Ref<'_, StreamState> {
+        self.inner.borrow()
+    }
+}
+
+pub struct UtpSocket {
     socket: Rc<UdpSocket>,
-    // I expect each socket to run on a separate thread ish
-    // The sending operations can run concurrently with the receive task
-    // without problems as long as a borrow is not held across await points
-    state: Rc<RefCell<SocketInner>>,
+    shutdown_signal: tokio::sync::oneshot::Sender<()>,
+    streams: Rc<RefCell<HashMap<StreamKey, UtpStream>>>,
 }
 
 // One could do callbacks like libutp but it would require allocations
@@ -65,151 +82,214 @@ pub struct UTPSocket {
 // the network loop listens on data and then finds the relevant connection based on addr
 // and also double checks the connection ids
 
-// TODO better error handling
-impl UTPSocket {
-    pub async fn bind(bind_addr: SocketAddr) -> anyhow::Result<Self> {
-        let socket = UdpSocket::bind(bind_addr).await?;
-        // TODO neither guaranteed to be unique nor kept track of outside the socket
-        let conn_id = rand::random::<u16>();
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
+struct StreamKey {
+    conn_id: u16,
+    addr: SocketAddr,
+}
 
-        let utp_socket = Self {
-            socket: Rc::new(socket),
-            state: Rc::new(RefCell::new(SocketInner {
-                connection_state: ConnectionState::Idle,
-                // start from 1 for compability with older clients but not as secure
-                seq_nr: rand::random::<u16>(),
-                conn_id_recv: conn_id,
-                cur_window_packets: 0,
-                ack_nr: 0,
-                // mimic libutp without a callback set (default behavior)
-                last_recv_window: 1024 * 1024,
-                conn_id_send: conn_id + 1,
-                reply_micro: 0,
-                eof_pkt: None,
-                temp_addr: bind_addr,
-            })),
+// TODO better error handling
+// This is more similar to TcpListener
+impl UtpSocket {
+    pub async fn bind(bind_addr: SocketAddr) -> anyhow::Result<Self> {
+        let socket = Rc::new(UdpSocket::bind(bind_addr).await?);
+        let net_loop_socket = socket.clone();
+
+        let (shutdown_signal, mut shutdown_receiver) = tokio::sync::oneshot::channel();
+        //connections: HashMap<SocketKey, Rc<RefCell<UtpStream>>>,
+        let utp_socket = UtpSocket {
+            socket,
+            shutdown_signal,
+            streams: Default::default(),
         };
 
-        let this = utp_socket.clone();
+        let streams_clone = utp_socket.streams.clone();
+        // Net loop
         tokio_uring::spawn(async move {
-            this.process_incomming().await;
+            loop {
+                // TODO check how this relates to windows size and opt_rcvbuf
+                let mut recv_buf = vec![0; 1024 * 1024];
+                // Double check if this is cancellation safe
+                // (I don't think it is but shouldn't matter anyways)
+                tokio::select! {
+                    buf_res = UtpSocket::process_incomming(&net_loop_socket, &streams_clone, std::mem::take(&mut recv_buf)) => {
+                            match buf_res {
+                                Ok(buffer) => recv_buf = buffer,
+                                Err(err) => {
+                                    log::error!("Error {err}: Shutting down network loop");
+                                    break;
+                                },
+                            }
+                        }
+                    _ = &mut shutdown_receiver =>  {
+                        log::info!("Shutting down network loop");
+                        // TODO shutdown all streams gracefully
+                        break;
+                    }
+                }
+            }
         });
 
         Ok(utp_socket)
     }
 
-    async fn process_incomming(&self) {
-        // TODO check how this relates to windows size and opt_rcvbuf
-        let mut recv_buf = vec![0; 1024 * 1024];
-        loop {
-            let (result, buf) = self.socket.recv_from(std::mem::take(&mut recv_buf)).await;
-            match result {
-                Ok((recv, addr)) => {
-                    log::info!("Received {recv} from {addr}");
-                    let packet = PacketHeader::from(&buf[..recv]);
-                    // TODO ignore packets who have invalid ack nr
+    async fn process_incomming(
+        socket: &UdpSocket,
+        connections: &Rc<RefCell<HashMap<StreamKey, UtpStream>>>,
+        mut recv_buf: Vec<u8>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let (result, buf) = socket.recv_from(recv_buf).await;
+        match result {
+            Ok((recv, addr)) => {
+                log::info!("Received {recv} from {addr}");
+                let packet = PacketHeader::from(&buf[..recv]);
 
-                    let (conn_state, dist_from_expected) = {
-                        let mut state = self.state.borrow_mut();
-                        if matches!(state.connection_state, ConnectionState::SynSent { .. }) {
-                            // This must be a syn-ack and the state ack_nr is initialzied here
-                            // to match the seq_nr received from the other end since this is the first
-                            // nr of the connection. I suspect this is initialzied early because
-                            // packets may be received out of order.
-                            //
-                            // Ah yes the ack_nr just indicates that we've (since this is the state
-                            // ack_nr) acked up until the SYN
-                            // packet since we don't always start from 1
-                            state.ack_nr = packet.seq_nr - 1;
-                        }
+                let key = StreamKey {
+                    conn_id: packet.conn_id,
+                    addr,
+                };
 
-                        let their_delay = if packet.timestamp_microseconds == 0 {
-                            // I supose this is for incoming traffic that wants to open
-                            // new connections?
-                            0
-                        } else {
-                            let time = get_microseconds();
-                            time - packet.timestamp_microseconds as u64
-                        };
-                        state.reply_micro = their_delay as u32;
-                        // The number of packets past the expected packet. Diff between acked
-                        // up until and current -1 gives 0 the meaning of this being the next
-                        // expected packet in the sequence.
-                        let dist_from_expected = packet.seq_nr - state.ack_nr - 1;
-                        (
-                            std::mem::replace(&mut state.connection_state, ConnectionState::Idle),
-                            dist_from_expected,
-                        )
+                let stream = {
+                    if let Some(stream) = connections.borrow().get(&key) {
+                        stream.clone()
+                    } else {
+                        // Can't handle incoming traffic yet
+                        return Ok(buf);
+                    }
+                };
+                // TODO ignore packets who have invalid ack nr
+
+                let (conn_state, dist_from_expected) = {
+                    let mut state = stream.state_mut();
+                    if matches!(state.connection_state, ConnectionState::SynSent { .. }) {
+                        // This must be a syn-ack and the state ack_nr is initialzied here
+                        // to match the seq_nr received from the other end since this is the first
+                        // nr of the connection. I suspect this is initialzied early because
+                        // packets may be received out of order.
+                        //
+                        // Ah yes the ack_nr just indicates that we've (since this is the state
+                        // ack_nr) acked up until the SYN
+                        // packet since we don't always start from 1
+                        state.ack_nr = packet.seq_nr - 1;
+                    }
+
+                    let their_delay = if packet.timestamp_microseconds == 0 {
+                        // I supose this is for incoming traffic that wants to open
+                        // new connections?
+                        0
+                    } else {
+                        let time = get_microseconds();
+                        time - packet.timestamp_microseconds as u64
                     };
+                    state.reply_micro = their_delay as u32;
+                    // The number of packets past the expected packet. Diff between acked
+                    // up until and current -1 gives 0 the meaning of this being the next
+                    // expected packet in the sequence.
+                    let dist_from_expected = packet.seq_nr - state.ack_nr - 1;
+                    (
+                        std::mem::replace(&mut state.connection_state, ConnectionState::Idle),
+                        dist_from_expected,
+                    )
+                };
 
-                    let temp_addr = self.state.borrow().temp_addr;
+                let addr = stream.state().addr;
 
-                    match (packet.packet_type, conn_state) {
-                        // Outgoing connection completion
-                        (PacketType::State, ConnectionState::SynSent { connect_notifier }) => {
-                            log::trace!("Packet dist_from_expected: {dist_from_expected}");
-                            let mut state = self.state.borrow_mut();
-                            state.cur_window_packets -= 1;
-                            state.connection_state = ConnectionState::Connected;
-                            connect_notifier.send(()).unwrap();
+                match (packet.packet_type, conn_state) {
+                    // Outgoing connection completion
+                    (PacketType::State, ConnectionState::SynSent { connect_notifier }) => {
+                        log::trace!("Packet dist_from_expected: {dist_from_expected}");
+                        let mut state = stream.state_mut();
+                        state.cur_window_packets -= 1;
+                        state.connection_state = ConnectionState::Connected;
+                        connect_notifier.send(()).unwrap();
 
-                            if dist_from_expected == 0 {
-                                log::trace!("SYN_ACK");
-                            } else {
-                                // out of order packets we can't handle yet
-                            }
-                        }
-                        (PacketType::State, _) => {
-                            log::trace!("Packet dist_from_expected: {dist_from_expected}");
-                            log::trace!("Received ACK: {}", temp_addr);
-                            let mut state = self.state.borrow_mut();
-                            state.cur_window_packets -= 1;
-                        }
-                        (PacketType::Data, _) => {
-                            log::trace!("Packet dist_from_expected: {dist_from_expected}");
-                            if dist_from_expected == 0 {
-                                // in order packet
-                                {
-                                    let mut state = self.state.borrow_mut();
-                                    state.ack_nr += 1;
-                                }
-                                log::trace!("Sending ACK");
-                                self.ack(addr).await.unwrap();
-                            } else {
-                                // out of order packets we can't handle yet
-                            }
-                        }
-                        (PacketType::Fin, _) => {
-                            log::trace!("Received FIN: {}", temp_addr);
-                            let mut state = self.state.borrow_mut();
-                            state.eof_pkt = Some(packet.seq_nr);
-                            if dist_from_expected == 0 {
-                                log::info!("Connection closed: {}", temp_addr);
-                            } else {
-                                // TODO handle out of order packets
-                                log::warn!("Received FIN out of order, packets will be lost");
-                            }
-                            break;
-                        }
-                        _ => {
-                            // READ bytes after header
-                            log::error!("Unhandled packet type!: {:?}", packet.packet_type);
+                        if dist_from_expected == 0 {
+                            log::trace!("SYN_ACK");
+                        } else {
+                            // out of order packets we can't handle yet
                         }
                     }
+                    (PacketType::State, _) => {
+                        log::trace!("Packet dist_from_expected: {dist_from_expected}");
+                        log::trace!("Received ACK: {}", addr);
+                        let mut state = stream.state_mut();
+                        state.cur_window_packets -= 1;
+                    }
+                    (PacketType::Data, _) => {
+                        log::trace!("Packet dist_from_expected: {dist_from_expected}");
+                        if dist_from_expected == 0 {
+                            // in order packet
+                            {
+                                let mut state = stream.state_mut();
+                                state.ack_nr += 1;
+                            }
+                            log::trace!("Sending ACK (almost)");
+                            // TODOOO
+                            //stream.ack(addr).await.unwrap();
+                        } else {
+                            // out of order packets we can't handle yet
+                        }
+                    }
+                    (PacketType::Fin, _) => {
+                        log::trace!("Received FIN: {}", addr);
+                        let mut state = stream.state_mut();
+                        state.eof_pkt = Some(packet.seq_nr);
+                        if dist_from_expected == 0 {
+                            log::info!("Connection closed: {}", addr);
+                        } else {
+                            // TODO handle out of order packets
+                            log::warn!("Received FIN out of order, packets will be lost");
+                        }
+                    }
+                    _ => {
+                        // READ bytes after header
+                        log::error!("Unhandled packet type!: {:?}", packet.packet_type);
+                    }
                 }
-                Err(err) => log::error!("Failed to receive on utp socket: {err}"),
             }
-            recv_buf = buf;
+            Err(err) => log::error!("Failed to receive on utp socket: {err}"),
         }
+        Ok(buf)
     }
 
-    pub async fn connect(&self, addr: SocketAddr) -> anyhow::Result<()> {
+    pub async fn connect(&self, addr: SocketAddr) -> anyhow::Result<UtpStream> {
+        let mut stream_key = StreamKey {
+            conn_id: rand::random(),
+            addr,
+        };
+
+        while self.streams.borrow().contains_key(&stream_key) {
+            log::debug!("Stream with same conn_id and addr already exists, regenerating conn_id");
+            stream_key = StreamKey {
+                conn_id: rand::random::<u16>(),
+                addr,
+            }
+        }
+
+        let stream = UtpStream {
+            inner: Rc::new(RefCell::new(StreamState {
+                connection_state: ConnectionState::Idle,
+                // start from 1 for compability with older clients but not as secure
+                seq_nr: rand::random::<u16>(),
+                conn_id_recv: stream_key.conn_id,
+                cur_window_packets: 0,
+                ack_nr: 0,
+                // mimic libutp without a callback set (default behavior)
+                last_recv_window: 1024 * 1024,
+                conn_id_send: stream_key.conn_id + 1,
+                reply_micro: 0,
+                eof_pkt: None,
+                addr,
+            })),
+        };
+
+        self.streams.borrow_mut().insert(stream_key, stream.clone());
+
         let timestamp_microseconds = get_microseconds() as u32;
 
         let (tx, rc) = tokio::sync::oneshot::channel();
         let packet_header = {
-            let mut state = self.state.borrow_mut();
-            state.temp_addr = addr;
+            let mut state = stream.state_mut();
             state.connection_state = ConnectionState::SynSent {
                 connect_notifier: tx,
             };
@@ -228,31 +308,35 @@ impl UTPSocket {
             header
         };
 
-        self.send_packet(packet_header, addr).await?;
+        self.send_packet(packet_header, &stream).await?;
         rc.await?;
-        Ok(())
+        Ok(stream)
     }
 
-    async fn ack(&self, addr: SocketAddr) -> anyhow::Result<()> {
+    async fn ack(&self, stream: &UtpStream) -> anyhow::Result<()> {
         let timestamp_microseconds = get_microseconds();
-        let packet_header = {
-            let state = self.state.borrow();
-            PacketHeader {
-                seq_nr: state.seq_nr,
-                ack_nr: state.ack_nr,
-                conn_id: state.conn_id_send,
-                packet_type: PacketType::State,
-                timestamp_microseconds: timestamp_microseconds as u32,
-                timestamp_difference_microseconds: state.reply_micro,
-                wnd_size: dbg!(state.last_recv_window),
-                extension: 0,
-            }
+        let (packet_header, addr) = {
+            let state = stream.state();
+            (
+                PacketHeader {
+                    seq_nr: state.seq_nr,
+                    ack_nr: state.ack_nr,
+                    conn_id: state.conn_id_send,
+                    packet_type: PacketType::State,
+                    timestamp_microseconds: timestamp_microseconds as u32,
+                    timestamp_difference_microseconds: state.reply_micro,
+                    wnd_size: dbg!(state.last_recv_window),
+                    extension: 0,
+                },
+                state.addr,
+            )
         };
-        self.send_packet(packet_header, addr).await?;
+        self.send_packet(packet_header, stream).await?;
         Ok(())
     }
 
-    async fn send_packet(&self, packet: PacketHeader, addr: SocketAddr) -> anyhow::Result<()> {
+    async fn send_packet(&self, packet: PacketHeader, stream: &UtpStream) -> anyhow::Result<()> {
+        let addr = stream.state().addr;
         let packet_bytes = packet.to_bytes();
         log::debug!(
             "Sending {:?} bytes: {} to addr: {addr}",
@@ -262,8 +346,9 @@ impl UTPSocket {
         // TODO check how this relates to windows size and opt_sndbuf
         let (result, _buf) = self.socket.send_to(packet_bytes, addr).await;
         let _ = result?;
-        let mut state = self.state.borrow_mut();
+        let mut state = stream.state_mut();
         // Might be certain situations where this shouldn't be appended?
+        // seems like only ST_DATA and ST_FIN
         state.cur_window_packets += 1;
         Ok(())
     }

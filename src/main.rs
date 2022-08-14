@@ -14,7 +14,7 @@ use trust_dns_resolver::{
 
 use crate::{
     node::{Node, ID_ZERO},
-    u_tp::UTPSocket,
+    u_tp::{UtpSocket, UtpStream},
 };
 
 mod krpc;
@@ -286,17 +286,20 @@ fn main() {
         )
         .await;
 
+        let socket = UtpSocket::bind("0.0.0.0:0".parse().unwrap()).await.unwrap();
         for peer in peers.into_iter() {
-            let socket = UTPSocket::bind("0.0.0.0:0".parse().unwrap()).await.unwrap();
             let connect_res =
                 tokio::time::timeout(Duration::from_secs(3), socket.connect(peer.addr)).await;
 
-            if let Ok(fut_result) = connect_res {
-                if fut_result.is_ok() {
+            match connect_res {
+                Ok(Ok(stream)) => {
                     log::info!("Connected to {}!", peer.addr);
+                    log::debug!("Stream {:?}", stream);
                 }
-            } else {
-                log::error!("Failed to connect to peer: {:?}", peer.addr);
+                Ok(Err(err)) => {
+                    log::error!("Failed to connect to peer: {:?}, error: {err}", peer.addr)
+                }
+                Err(err) => log::error!("Failed to connect to peer: {:?}, error: {err}", peer.addr),
             }
         }
         // announce peer
