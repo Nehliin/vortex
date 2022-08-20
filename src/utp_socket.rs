@@ -1,9 +1,12 @@
 use std::{cell::RefCell, collections::HashMap, net::SocketAddr, rc::Rc};
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::Bytes;
 use tokio_uring::net::UdpSocket;
 
-use crate::utp_stream::{ConnectionState, StreamState, UtpStream};
+use crate::{
+    utp_packet::{get_microseconds, PacketHeader, PacketType, Packet},
+    utp_stream::{ConnectionState, StreamState, UtpStream}, packet_buffer::PacketBuffer,
+};
 
 // Conceptually there is a single socket that handles multiple connections
 // The socket context keeps a hashmap of all connections keyed by the socketaddr
@@ -82,6 +85,7 @@ impl UtpSocket {
             cur_window_packets: 0,
             ack_nr: 0,
             // mimic libutp without a callback set (default behavior)
+            // this is the receive buffer initial size
             our_advertised_window: 1024 * 1024,
             conn_id_send: stream_key.conn_id + 1,
             reply_micro: 0,
@@ -89,6 +93,8 @@ impl UtpSocket {
             addr,
             // mtu
             their_advertised_window: 1500,
+            incoming_buffer: PacketBuffer::new(256),
+            receive_buf: Vec::with_capacity(1024 * 1024),
         });
 
         self.streams.borrow_mut().insert(stream_key, stream.clone());
@@ -170,6 +176,16 @@ impl Drop for UtpSocket {
     }
 }
 
+// Socket reads and parses out a vec of packets per read
+// the packets are then sent to the streams incoming circular packet buffer
+// in the stream specific packet handler they check if it's the expected packet or out of order
+// if it's out of order they then just insert it into the buffer
+// if it's in order they handle it together with all other potential packets that are orderd
+// after it and stored in the incoming buffer
+//
+// outbuffer is written to by the stream and handled in a separate task i think
+// the packets can get stored in that task if they need to be resent?
+// the incoming task could keep a channel of acks received that can be removed from resend buf
 async fn process_incomming(
     socket: &UdpSocket,
     connections: &Rc<RefCell<HashMap<StreamKey, UtpStream>>>,
@@ -180,10 +196,15 @@ async fn process_incomming(
         Ok((recv, addr)) => {
             log::info!("Received {recv} from {addr}");
             match PacketHeader::try_from(&buf[..recv]) {
-                Ok(packet) => {
+                Ok(packet_header) => {
                     let key = StreamKey {
-                        conn_id: packet.conn_id,
+                        conn_id: packet_header.conn_id,
                         addr,
+                    };
+
+                    let packet = Packet {
+                        header: packet_header,
+                        data: Bytes::copy_from_slice(&buf[recv..]),
                     };
 
                     if let Some(stream) = connections.borrow().get(&key) {
@@ -208,115 +229,4 @@ async fn process_incomming(
     buf
 }
 
-#[repr(u8)]
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum PacketType {
-    Data = 0,
-    Fin = 1,
-    State = 2,
-    Reset = 3,
-    Syn = 4,
-}
-
-// repr c instead? and just send directly over socket?
-#[derive(Debug)]
-pub struct PacketHeader {
-    pub seq_nr: u16,
-    pub ack_nr: u16,
-    pub conn_id: u16,
-    pub packet_type: PacketType,
-    pub timestamp_microseconds: u32,
-    pub timestamp_difference_microseconds: u32,
-    pub wnd_size: u32,
-    pub extension: u8,
-}
-
-impl TryFrom<&[u8]> for PacketHeader {
-    type Error = anyhow::Error;
-
-    fn try_from(mut bytes: &[u8]) -> anyhow::Result<Self> {
-        const HEADER_SIZE: usize = 20;
-        anyhow::ensure!(
-            bytes.len() >= HEADER_SIZE,
-            "Error: Packet to small to parse"
-        );
-        let first_byte = bytes.get_u8();
-        let packet_type = first_byte >> 4;
-        anyhow::ensure!(packet_type < 5, "Error: Packet type not recognized");
-        let packet_type: PacketType = unsafe { std::mem::transmute(packet_type) };
-        let version = first_byte & 0b0000_1111;
-        anyhow::ensure!(version == 1, "Error: Packet version not supported");
-        let extension = bytes.get_u8();
-        let conn_id = bytes.get_u16();
-        let timestamp_microseconds = bytes.get_u32();
-        let timestamp_difference_microseconds = bytes.get_u32();
-        let wnd_size = bytes.get_u32();
-        let seq_nr = bytes.get_u16();
-        let ack_nr = bytes.get_u16();
-
-        Ok(Self {
-            seq_nr,
-            ack_nr,
-            conn_id,
-            packet_type,
-            timestamp_microseconds,
-            timestamp_difference_microseconds,
-            wnd_size,
-            extension,
-        })
-    }
-}
-
-// Not very rusty at all, stolen from libutp to test
-// impact on connection errors
-pub fn get_microseconds() -> u64 {
-    static mut OFFSET: u64 = 0;
-    static mut PREVIOUS: u64 = 0;
-
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let res = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-
-    if res < 0 {
-        panic!("clock get time failed");
-    }
-
-    let mut now = ts.tv_sec as u64 * 1000000 + ts.tv_nsec as u64 / 1000;
-    unsafe {
-        now += OFFSET;
-        if PREVIOUS > now {
-            OFFSET += PREVIOUS - now;
-            now = PREVIOUS;
-        }
-        PREVIOUS = now;
-    }
-
-    now
-}
-
-impl PacketHeader {
-    fn to_bytes(&self) -> Bytes {
-        use bytes::BufMut;
-        let mut bytes = BytesMut::new();
-
-        let mut first_byte = self.packet_type as u8;
-        first_byte <<= 4;
-        first_byte |= 0b0000_0001;
-
-        // type and version
-        bytes.put_u8(first_byte);
-        // 0 so doesn't matter for now if to_be should be used or not
-        bytes.put_u8(self.extension);
-        bytes.put_u16(self.conn_id);
-        bytes.put_u32(self.timestamp_microseconds);
-        bytes.put_u32(self.timestamp_difference_microseconds);
-        bytes.put_u32(self.wnd_size);
-        bytes.put_u16(self.seq_nr);
-        bytes.put_u16(self.ack_nr);
-        let res = bytes.freeze();
-        log::debug!("{:02x?}", &res[..]);
-        res
-    }
-}
+// Process outgoing

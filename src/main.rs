@@ -18,7 +18,9 @@ use crate::{
 
 mod krpc;
 mod node;
+mod packet_buffer;
 mod routing_table;
+mod utp_packet;
 mod utp_socket;
 mod utp_stream;
 
@@ -212,9 +214,8 @@ fn main() {
                 tokio::time::timeout(Duration::from_secs(3), socket.connect(peer.addr)).await;
 
             match connect_res {
-                Ok(Ok(stream)) => {
+                Ok(Ok(_stream)) => {
                     log::info!("Connected to {}!", peer.addr);
-                    log::debug!("Stream {:?}", stream);
                 }
                 Ok(Err(err)) => {
                     log::error!("Failed to connect to peer: {:?}, error: {err}", peer.addr)
