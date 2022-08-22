@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    packet_buffer::PacketBuffer,
+    reorder_buffer::ReorderBuffer,
     utp_packet::{get_microseconds, Packet, PacketType},
 };
 
@@ -54,7 +54,7 @@ pub(crate) struct StreamState {
     // The adder the stream is connected to
     pub(crate) addr: SocketAddr,
     // incoming buffer, used to reorder packets
-    pub(crate) incoming_buffer: PacketBuffer,
+    pub(crate) incoming_buffer: ReorderBuffer,
     // Receive buffer, used to store packet data before read requests
     // this is what's used to determine window size
     pub(crate) receive_buf: Vec<u8>,
@@ -151,7 +151,7 @@ impl UtpStream {
             // Out of order packet
             self.state_mut()
                 .incoming_buffer
-                .insert(packet_header.seq_nr as usize, packet);
+                .insert(packet_header.seq_nr as i32, packet);
             return Ok(need_to_ack);
         }
 

@@ -18,7 +18,7 @@ use crate::{
 
 mod krpc;
 mod node;
-mod packet_buffer;
+mod reorder_buffer;
 mod routing_table;
 mod utp_packet;
 mod utp_socket;

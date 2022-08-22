@@ -5,7 +5,7 @@ use tokio_uring::net::UdpSocket;
 
 use crate::{
     utp_packet::{get_microseconds, PacketHeader, PacketType, Packet},
-    utp_stream::{ConnectionState, StreamState, UtpStream}, packet_buffer::PacketBuffer,
+    utp_stream::{ConnectionState, StreamState, UtpStream}, reorder_buffer::ReorderBuffer,
 };
 
 // Conceptually there is a single socket that handles multiple connections
@@ -93,7 +93,7 @@ impl UtpSocket {
             addr,
             // mtu
             their_advertised_window: 1500,
-            incoming_buffer: PacketBuffer::new(256),
+            incoming_buffer: ReorderBuffer::new(256),
             receive_buf: Vec::with_capacity(1024 * 1024),
         });
 
