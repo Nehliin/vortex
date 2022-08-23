@@ -16,10 +16,12 @@ impl ReorderBuffer {
         }
     }
 
-    pub fn insert(&mut self, position: i32, packet: Packet) {
-        if self.get(position).is_some() {
+    pub fn insert(&mut self, packet: Packet) {
+        if self.get(packet.header.seq_nr).is_some() {
             return;
         }
+
+        let position = packet.header.seq_nr as i32;
 
         let (first_val, last_val) = if let (Some(first_val), Some(last_val)) = (
             self.buffer[self.first]
@@ -112,16 +114,16 @@ impl ReorderBuffer {
     }
 
     #[inline]
-    pub fn get(&self, position: i32) -> Option<&Packet> {
-        let index = self.index_of(position)?;
+    pub fn get(&self, position: u16) -> Option<&Packet> {
+        let index = self.index_of(position as i32)?;
         self.buffer[index]
             .as_ref()
             .filter(|packet| packet.header.seq_nr == position as u16)
     }
 
     #[inline]
-    pub fn remove(&mut self, position: i32) -> Option<Packet> {
-        let index = self.index_of(position)?;
+    pub fn remove(&mut self, position: u16) -> Option<Packet> {
+        let index = self.index_of(position as i32)?;
 
         let maybe_packet = self.buffer[index].take();
         if let Some(packet) = maybe_packet.as_ref() {
@@ -220,12 +222,12 @@ mod test {
         let mut buffer = ReorderBuffer::new(256);
 
         for packet in data.into_iter() {
-            buffer.insert(packet.header.seq_nr as i32, packet);
+            buffer.insert(packet);
         }
 
         for seq_nr in 1..3 {
             let packet = buffer.get(seq_nr).unwrap();
-            assert_eq!(packet.header.seq_nr as i32, seq_nr);
+            assert_eq!(packet.header.seq_nr, seq_nr);
         }
     }
 
@@ -276,7 +278,7 @@ mod test {
         let mut buffer = ReorderBuffer::new(256);
 
         for packet in data.into_iter() {
-            buffer.insert(packet.header.seq_nr as i32, packet);
+            buffer.insert(packet);
         }
 
         let packet = buffer.get(1).unwrap();
@@ -334,7 +336,7 @@ mod test {
         let mut buffer = ReorderBuffer::new(256);
 
         for packet in data.into_iter() {
-            buffer.insert(packet.header.seq_nr as i32, packet);
+            buffer.insert(packet);
         }
 
         let packet = buffer.get(108).unwrap();
@@ -379,7 +381,7 @@ mod test {
         let mut buffer = ReorderBuffer::new(256);
 
         for packet in data.into_iter() {
-            buffer.insert(packet.header.seq_nr as i32, packet);
+            buffer.insert(packet);
         }
 
         let packet = buffer.get(245).unwrap();
@@ -395,38 +397,32 @@ mod test {
         // which doesn't match the one being inserted
         // caught by fuzzing
         let mut buffer = ReorderBuffer::new(64);
-        buffer.insert(
-            2570,
-            Packet {
-                header: PacketHeader {
-                    seq_nr: 2570,
-                    ack_nr: 0,
-                    conn_id: 0,
-                    packet_type: crate::utp_packet::PacketType::Data,
-                    timestamp_microseconds: 0,
-                    timestamp_difference_microseconds: 0,
-                    wnd_size: 0,
-                    extension: 0,
-                },
-                data: Bytes::new(),
+        buffer.insert(Packet {
+            header: PacketHeader {
+                seq_nr: 2570,
+                ack_nr: 0,
+                conn_id: 0,
+                packet_type: crate::utp_packet::PacketType::Data,
+                timestamp_microseconds: 0,
+                timestamp_difference_microseconds: 0,
+                wnd_size: 0,
+                extension: 0,
             },
-        );
-        buffer.insert(
-            2698,
-            Packet {
-                header: PacketHeader {
-                    seq_nr: 2698,
-                    ack_nr: 0,
-                    conn_id: 0,
-                    packet_type: crate::utp_packet::PacketType::Data,
-                    timestamp_microseconds: 0,
-                    timestamp_difference_microseconds: 0,
-                    wnd_size: 0,
-                    extension: 0,
-                },
-                data: Bytes::new(),
+            data: Bytes::new(),
+        });
+        buffer.insert(Packet {
+            header: PacketHeader {
+                seq_nr: 2698,
+                ack_nr: 0,
+                conn_id: 0,
+                packet_type: crate::utp_packet::PacketType::Data,
+                timestamp_microseconds: 0,
+                timestamp_difference_microseconds: 0,
+                wnd_size: 0,
+                extension: 0,
             },
-        );
+            data: Bytes::new(),
+        });
         let packet = buffer.get(2570).unwrap();
         assert_eq!(packet.header.seq_nr, 2570);
         let packet = buffer.get(2698).unwrap();
@@ -441,22 +437,19 @@ mod test {
         let mut buffer = ReorderBuffer::new(64);
 
         for seq_nr in input.iter() {
-            buffer.insert(
-                *seq_nr,
-                Packet {
-                    header: PacketHeader {
-                        seq_nr: *seq_nr as u16,
-                        ack_nr: 0,
-                        conn_id: 0,
-                        packet_type: crate::utp_packet::PacketType::Data,
-                        timestamp_microseconds: 0,
-                        timestamp_difference_microseconds: 0,
-                        wnd_size: 0,
-                        extension: 0,
-                    },
-                    data: Bytes::new(),
+            buffer.insert(Packet {
+                header: PacketHeader {
+                    seq_nr: *seq_nr as u16,
+                    ack_nr: 0,
+                    conn_id: 0,
+                    packet_type: crate::utp_packet::PacketType::Data,
+                    timestamp_microseconds: 0,
+                    timestamp_difference_microseconds: 0,
+                    wnd_size: 0,
+                    extension: 0,
                 },
-            );
+                data: Bytes::new(),
+            });
         }
 
         for seq_nr in input.iter() {
@@ -471,22 +464,19 @@ mod test {
         let mut buffer = ReorderBuffer::new(64);
 
         for seq_nr in input.iter() {
-            buffer.insert(
-                *seq_nr,
-                Packet {
-                    header: PacketHeader {
-                        seq_nr: *seq_nr as u16,
-                        ack_nr: 0,
-                        conn_id: 0,
-                        packet_type: crate::utp_packet::PacketType::Data,
-                        timestamp_microseconds: 0,
-                        timestamp_difference_microseconds: 0,
-                        wnd_size: 0,
-                        extension: 0,
-                    },
-                    data: Bytes::new(),
+            buffer.insert(Packet {
+                header: PacketHeader {
+                    seq_nr: *seq_nr as u16,
+                    ack_nr: 0,
+                    conn_id: 0,
+                    packet_type: crate::utp_packet::PacketType::Data,
+                    timestamp_microseconds: 0,
+                    timestamp_difference_microseconds: 0,
+                    wnd_size: 0,
+                    extension: 0,
                 },
-            );
+                data: Bytes::new(),
+            });
         }
 
         assert!(buffer.get(8).is_none());
@@ -511,22 +501,19 @@ mod test {
         let mut buffer = ReorderBuffer::new(64);
 
         for seq_nr in input.iter() {
-            buffer.insert(
-                *seq_nr,
-                Packet {
-                    header: PacketHeader {
-                        seq_nr: *seq_nr as u16,
-                        ack_nr: 0,
-                        conn_id: 0,
-                        packet_type: crate::utp_packet::PacketType::Data,
-                        timestamp_microseconds: 0,
-                        timestamp_difference_microseconds: 0,
-                        wnd_size: 0,
-                        extension: 0,
-                    },
-                    data: Bytes::new(),
+            buffer.insert(Packet {
+                header: PacketHeader {
+                    seq_nr: *seq_nr as u16,
+                    ack_nr: 0,
+                    conn_id: 0,
+                    packet_type: crate::utp_packet::PacketType::Data,
+                    timestamp_microseconds: 0,
+                    timestamp_difference_microseconds: 0,
+                    wnd_size: 0,
+                    extension: 0,
                 },
-            );
+                data: Bytes::new(),
+            });
         }
 
         for seq_nr in input.iter() {
@@ -548,22 +535,19 @@ mod test {
         let mut buffer = ReorderBuffer::new(64);
 
         for seq_nr in input.iter() {
-            buffer.insert(
-                *seq_nr,
-                Packet {
-                    header: PacketHeader {
-                        seq_nr: *seq_nr as u16,
-                        ack_nr: 0,
-                        conn_id: 0,
-                        packet_type: crate::utp_packet::PacketType::Data,
-                        timestamp_microseconds: 0,
-                        timestamp_difference_microseconds: 0,
-                        wnd_size: 0,
-                        extension: 0,
-                    },
-                    data: Bytes::new(),
+            buffer.insert(Packet {
+                header: PacketHeader {
+                    seq_nr: *seq_nr as u16,
+                    ack_nr: 0,
+                    conn_id: 0,
+                    packet_type: crate::utp_packet::PacketType::Data,
+                    timestamp_microseconds: 0,
+                    timestamp_difference_microseconds: 0,
+                    wnd_size: 0,
+                    extension: 0,
                 },
-            );
+                data: Bytes::new(),
+            });
         }
 
         for seq_nr in input.iter() {

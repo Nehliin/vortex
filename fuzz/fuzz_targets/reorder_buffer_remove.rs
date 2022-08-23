@@ -13,7 +13,6 @@ fuzz_target!(|data: Vec<u16>| {
     let mut unique = std::collections::HashSet::new();
     for seq_nr in data.iter() {
         buffer.insert(
-            *seq_nr as i32,
             Packet {
                 header: PacketHeader {
                     seq_nr: *seq_nr,
@@ -32,11 +31,11 @@ fuzz_target!(|data: Vec<u16>| {
     }
 
     for seq_nr in unique.iter() {
-        let packet = buffer.remove(*seq_nr as i32).unwrap();
+        let packet = buffer.remove(*seq_nr).unwrap();
         assert_eq!(packet.header.seq_nr, *seq_nr);
     }
 
     for seq_nr in data.iter() {
-        assert!(buffer.get(*seq_nr as i32).is_none());
+        assert!(buffer.get(*seq_nr).is_none());
     }
 });

@@ -12,7 +12,6 @@ fuzz_target!(|data: Vec<u16>| {
 
     for seq_nr in data.iter() {
         buffer.insert(
-            *seq_nr as i32,
             Packet {
                 header: PacketHeader {
                     seq_nr: *seq_nr,
@@ -30,7 +29,7 @@ fuzz_target!(|data: Vec<u16>| {
     }
 
     for seq_nr in data.iter() {
-        let packet = buffer.get(*seq_nr as i32).unwrap();
+        let packet = buffer.get(*seq_nr).unwrap();
         assert_eq!(packet.header.seq_nr, *seq_nr);
     }
 });

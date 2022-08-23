@@ -4,8 +4,9 @@ use bytes::Bytes;
 use tokio_uring::net::UdpSocket;
 
 use crate::{
-    utp_packet::{get_microseconds, PacketHeader, PacketType, Packet},
-    utp_stream::{ConnectionState, StreamState, UtpStream}, reorder_buffer::ReorderBuffer,
+    reorder_buffer::ReorderBuffer,
+    utp_packet::{get_microseconds, Packet, PacketHeader, PacketType},
+    utp_stream::{ConnectionState, StreamState, UtpStream},
 };
 
 // Conceptually there is a single socket that handles multiple connections

@@ -149,15 +149,13 @@ impl UtpStream {
         if dist_from_expected != 0 {
             log::debug!("Got out of order packet");
             // Out of order packet
-            self.state_mut()
-                .incoming_buffer
-                .insert(packet_header.seq_nr as i32, packet);
+            self.state_mut().incoming_buffer.insert(packet);
             return Ok(need_to_ack);
         }
 
         self.handle_inorder_packet(packet);
 
-        let mut seq_nr = packet_header.seq_nr as i32;
+        let mut seq_nr = packet_header.seq_nr;
         while let Some(packet) = self.state_mut().incoming_buffer.remove(seq_nr) {
             self.handle_inorder_packet(packet);
             seq_nr += 1;
