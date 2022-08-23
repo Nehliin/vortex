@@ -45,8 +45,8 @@ impl ReorderBuffer {
                     // by calculating dist between position (< first_val)
                     // and last_val
                     self.resize(1 + (last_val - position) as usize);
-                    // This is conceptually the same as what's done in the 
-                    // else branch but avoids the rem_euclid operation since 
+                    // This is conceptually the same as what's done in the
+                    // else branch but avoids the rem_euclid operation since
                     // we know that first always = 0 after resizing
                     let new_first = self.buffer.len() - (first_val - position) as usize;
                     self.buffer[new_first] = Some(packet);
@@ -102,17 +102,65 @@ impl ReorderBuffer {
         self.first = 0;
     }
 
-    pub fn get(&self, position: i32) -> Option<&Packet> {
+    #[inline]
+    fn index_of(&self, position: i32) -> Option<usize> {
         let first_val = self.buffer[self.first].as_ref()?.header.seq_nr as i32;
-        let index =
-            (self.first as i32 + (position - first_val)).rem_euclid(self.buffer.len() as i32);
-        self.buffer[index as usize]
+        Some(
+            (self.first as i32 + (position - first_val)).rem_euclid(self.buffer.len() as i32)
+                as usize,
+        )
+    }
+
+    #[inline]
+    pub fn get(&self, position: i32) -> Option<&Packet> {
+        let index = self.index_of(position)?;
+        self.buffer[index]
             .as_ref()
             .filter(|packet| packet.header.seq_nr == position as u16)
     }
 
-    pub fn remove(&mut self, index: usize) -> Option<Packet> {
-        unimplemented!()
+    #[inline]
+    pub fn remove(&mut self, position: i32) -> Option<Packet> {
+        let index = self.index_of(position)?;
+
+        let maybe_packet = self.buffer[index].take();
+        if let Some(packet) = maybe_packet.as_ref() {
+            if packet.header.seq_nr == position as u16 {
+                if self.first == index {
+                    // Only one element in the buffer
+                    if self.buffer[self.last].is_none() {
+                        self.first = 0;
+                        self.last = 0;
+                    } else {
+                        // find new first index
+                        self.first += 1;
+                        self.first %= self.buffer.len();
+                        while self.first != self.last && self.buffer[self.first].is_none() {
+                            self.first += 1;
+                            self.first %= self.buffer.len();
+                        }
+                    }
+                } else if self.last == index {
+                    // Only one element in the buffer
+                    if self.buffer[self.first].is_none() {
+                        self.first = 0;
+                        self.last = 0;
+                    } else {
+                        // find new last index
+                        self.last =
+                            (self.last as i32 - 1).rem_euclid(self.buffer.len() as i32) as usize;
+                        while self.first != self.last && self.buffer[self.last].is_none() {
+                            self.last = (self.last as i32 - 1).rem_euclid(self.buffer.len() as i32)
+                                as usize;
+                        }
+                    }
+                }
+                return maybe_packet;
+            } else {
+                self.buffer[index] = maybe_packet;
+            }
+        }
+        None
     }
 }
 
@@ -387,7 +435,7 @@ mod test {
 
     #[test]
     fn resizing() {
-        // Ensures the existing span + the new value 
+        // Ensures the existing span + the new value
         // fits in the resized buffer. Caught by fuzzing
         let input = [25413, 25392, 16744, 2607];
         let mut buffer = ReorderBuffer::new(64);
@@ -414,6 +462,117 @@ mod test {
         for seq_nr in input.iter() {
             let packet = buffer.get(*seq_nr).unwrap();
             assert_eq!(packet.header.seq_nr, *seq_nr as u16);
+        }
+    }
+
+    #[test]
+    fn removal() {
+        let input = [3, 6, 7];
+        let mut buffer = ReorderBuffer::new(64);
+
+        for seq_nr in input.iter() {
+            buffer.insert(
+                *seq_nr,
+                Packet {
+                    header: PacketHeader {
+                        seq_nr: *seq_nr as u16,
+                        ack_nr: 0,
+                        conn_id: 0,
+                        packet_type: crate::utp_packet::PacketType::Data,
+                        timestamp_microseconds: 0,
+                        timestamp_difference_microseconds: 0,
+                        wnd_size: 0,
+                        extension: 0,
+                    },
+                    data: Bytes::new(),
+                },
+            );
+        }
+
+        assert!(buffer.get(8).is_none());
+        assert!(buffer.get(5).is_none());
+
+        for seq_nr in input.iter() {
+            let packet = buffer.remove(*seq_nr).unwrap();
+            assert_eq!(packet.header.seq_nr, *seq_nr as u16);
+        }
+
+        for seq_nr in input.iter() {
+            assert!(buffer.get(*seq_nr).is_none());
+        }
+    }
+
+    #[test]
+    fn removal_of_last_with_wraparound() {
+        // Ensures calculating the new last index
+        // works as expected when wrapping around
+        // found by fuzzing
+        let input = [57078, 56842];
+        let mut buffer = ReorderBuffer::new(64);
+
+        for seq_nr in input.iter() {
+            buffer.insert(
+                *seq_nr,
+                Packet {
+                    header: PacketHeader {
+                        seq_nr: *seq_nr as u16,
+                        ack_nr: 0,
+                        conn_id: 0,
+                        packet_type: crate::utp_packet::PacketType::Data,
+                        timestamp_microseconds: 0,
+                        timestamp_difference_microseconds: 0,
+                        wnd_size: 0,
+                        extension: 0,
+                    },
+                    data: Bytes::new(),
+                },
+            );
+        }
+
+        for seq_nr in input.iter() {
+            let packet = buffer.remove(*seq_nr).unwrap();
+            assert_eq!(packet.header.seq_nr, *seq_nr as u16);
+        }
+
+        for seq_nr in input.iter() {
+            assert!(buffer.get(*seq_nr).is_none());
+        }
+    }
+
+    #[test]
+    fn removal_of_last_with_wraparound_v2() {
+        // Ensures calculating the new last index
+        // works as expected when wrapping around
+        // found by fuzzing
+        let input = [22320, 22370, 14126];
+        let mut buffer = ReorderBuffer::new(64);
+
+        for seq_nr in input.iter() {
+            buffer.insert(
+                *seq_nr,
+                Packet {
+                    header: PacketHeader {
+                        seq_nr: *seq_nr as u16,
+                        ack_nr: 0,
+                        conn_id: 0,
+                        packet_type: crate::utp_packet::PacketType::Data,
+                        timestamp_microseconds: 0,
+                        timestamp_difference_microseconds: 0,
+                        wnd_size: 0,
+                        extension: 0,
+                    },
+                    data: Bytes::new(),
+                },
+            );
+        }
+
+        for seq_nr in input.iter() {
+            let packet = buffer.remove(*seq_nr).unwrap();
+            assert_eq!(packet.header.seq_nr, *seq_nr as u16);
+        }
+
+        for seq_nr in input.iter() {
+            assert!(buffer.get(*seq_nr).is_none());
         }
     }
 }

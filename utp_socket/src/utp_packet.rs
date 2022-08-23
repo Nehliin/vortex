@@ -84,7 +84,7 @@ impl PacketHeader {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Packet {
     pub header: PacketHeader,
     // Todo bytes might not be necessesary here

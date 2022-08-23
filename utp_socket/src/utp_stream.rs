@@ -157,7 +157,7 @@ impl UtpStream {
 
         self.handle_inorder_packet(packet);
 
-        let mut seq_nr = packet_header.seq_nr as usize;
+        let mut seq_nr = packet_header.seq_nr as i32;
         while let Some(packet) = self.state_mut().incoming_buffer.remove(seq_nr) {
             self.handle_inorder_packet(packet);
             seq_nr += 1;
