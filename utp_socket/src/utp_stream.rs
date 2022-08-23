@@ -308,10 +308,7 @@ impl UtpStream {
             }
             (PacketType::Data, conn_state) => {
                 // in order packet
-                {
-                    let mut state = self.state_mut();
-                    state.ack_nr += 1;
-                }
+                state.ack_nr += 1;
                 log::trace!("Sending ACK (almost)");
                 // TODOOO
                 // consume_incoming_data in libtorrent
@@ -322,10 +319,9 @@ impl UtpStream {
                 state.connection_state = conn_state;
             }
             (PacketType::Fin, conn_state) => {
-                log::trace!("Received FIN: {}", addr);
-                let mut state = self.state_mut();
+                log::trace!("Received FIN: {}", self.addr);
                 state.eof_pkt = Some(packet.header.seq_nr);
-                log::info!("Connection closed: {}", addr);
+                log::info!("Connection closed: {}", self.addr);
 
                 // more stuff here
                 //
@@ -333,7 +329,6 @@ impl UtpStream {
                 state.connection_state = conn_state;
             }
             (p_type, conn_state) => {
-                // READ bytes after header
                 log::error!("Unhandled packet type!: {:?}", p_type);
                 // Reset connection state if it wasn't modified
                 state.connection_state = conn_state;
