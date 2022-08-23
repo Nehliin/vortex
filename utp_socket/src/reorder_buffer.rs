@@ -1,7 +1,7 @@
 use crate::utp_packet::Packet;
 
 pub struct ReorderBuffer {
-    buffer: Vec<Option<Packet>>,
+    buffer: Box<[Option<Packet>]>,
     first: usize,
     last: usize,
 }
@@ -10,7 +10,8 @@ impl ReorderBuffer {
     // size in PACKETS
     pub fn new(size: usize) -> Self {
         ReorderBuffer {
-            buffer: vec![Option::<Packet>::None; size],
+            // TODO vec not needed
+            buffer: vec![Option::<Packet>::None; size].into_boxed_slice(),
             first: 0,
             last: 0,
         }
@@ -84,7 +85,7 @@ impl ReorderBuffer {
 
     fn resize(&mut self, min_size: usize) {
         let new_size = std::cmp::max(min_size, self.buffer.len() * 2);
-        let mut buf_new = vec![Option::<Packet>::None; new_size];
+        let mut buf_new = vec![Option::<Packet>::None; new_size].into_boxed_slice();
         let first_part = &self.buffer[self.first..];
         let second_part = &self.buffer[..self.first];
         // Can't use ptr copy since Bytes isn't copy
@@ -121,7 +122,7 @@ impl ReorderBuffer {
             .filter(|packet| packet.header.seq_nr == position as u16)
     }
 
-    #[inline]
+    // TODO make sequential removal more efficient
     pub fn remove(&mut self, position: u16) -> Option<Packet> {
         let index = self.index_of(position as i32)?;
 
@@ -163,6 +164,33 @@ impl ReorderBuffer {
             }
         }
         None
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let empty = self.buffer[self.first].is_none();
+        // santiy check
+        debug_assert!(self.buffer[self.last].is_none());
+        empty
+    }
+
+    // TODO remove allocations from this
+    pub fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Packet> + 'a> {
+        if self.first <= self.last {
+            Box::new(
+                self.buffer[self.first..self.last]
+                    .iter()
+                    .filter(|maybe_packet| maybe_packet.is_some())
+                    .map(|maybe_packet| maybe_packet.as_ref().unwrap()),
+            )
+        } else {
+            Box::new(
+                self.buffer[self.first..]
+                    .iter()
+                    .chain(self.buffer[..self.last].iter())
+                    .filter(|maybe_packet| maybe_packet.is_some())
+                    .map(|maybe_packet| maybe_packet.as_ref().unwrap()),
+            )
+        }
     }
 }
 

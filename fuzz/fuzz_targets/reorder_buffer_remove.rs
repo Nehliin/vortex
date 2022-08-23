@@ -38,4 +38,6 @@ fuzz_target!(|data: Vec<u16>| {
     for seq_nr in data.iter() {
         assert!(buffer.get(*seq_nr).is_none());
     }
+
+    assert!(buffer.is_empty());
 });
