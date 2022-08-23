@@ -41,7 +41,13 @@ impl ReorderBuffer {
                 // If the available space is less than the distance to
                 // the first value we need to realloc
                 if self.buffer.len() as i32 - (last_val - first_val) <= first_val - position {
-                    self.resize(1 + (first_val - position) as usize);
+                    // Ensure current span + new value fits
+                    // by calculating dist between position (< first_val)
+                    // and last_val
+                    self.resize(1 + (last_val - position) as usize);
+                    // This is conceptually the same as what's done in the 
+                    // else branch but avoids the rem_euclid operation since 
+                    // we know that first always = 0 after resizing
                     let new_first = self.buffer.len() - (first_val - position) as usize;
                     self.buffer[new_first] = Some(packet);
                     self.first = new_first;
@@ -100,7 +106,9 @@ impl ReorderBuffer {
         let first_val = self.buffer[self.first].as_ref()?.header.seq_nr as i32;
         let index =
             (self.first as i32 + (position - first_val)).rem_euclid(self.buffer.len() as i32);
-        self.buffer[index as usize].as_ref()
+        self.buffer[index as usize]
+            .as_ref()
+            .filter(|packet| packet.header.seq_nr == position as u16)
     }
 
     pub fn remove(&mut self, index: usize) -> Option<Packet> {
@@ -110,7 +118,6 @@ impl ReorderBuffer {
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashSet;
 
     use bytes::Bytes;
 
@@ -334,19 +341,63 @@ mod test {
     }
 
     #[test]
-    fn insert_many_unorderd() {
-        let mut buffer = ReorderBuffer::new(256);
-        let mut inserted = HashSet::new();
-        for _ in 0..1000 {
-            let seq_nr = (rand::random::<f32>() * 1000.0) + 1.0;
-            let seq_nr = seq_nr as u16;
-            println!("seq {}", seq_nr);
-            inserted.insert(seq_nr);
+    fn index_collision() {
+        // Tests the case where the seq_nr
+        // mod capacity yields an existing entry
+        // which doesn't match the one being inserted
+        // caught by fuzzing
+        let mut buffer = ReorderBuffer::new(64);
+        buffer.insert(
+            2570,
+            Packet {
+                header: PacketHeader {
+                    seq_nr: 2570,
+                    ack_nr: 0,
+                    conn_id: 0,
+                    packet_type: crate::utp_packet::PacketType::Data,
+                    timestamp_microseconds: 0,
+                    timestamp_difference_microseconds: 0,
+                    wnd_size: 0,
+                    extension: 0,
+                },
+                data: Bytes::new(),
+            },
+        );
+        buffer.insert(
+            2698,
+            Packet {
+                header: PacketHeader {
+                    seq_nr: 2698,
+                    ack_nr: 0,
+                    conn_id: 0,
+                    packet_type: crate::utp_packet::PacketType::Data,
+                    timestamp_microseconds: 0,
+                    timestamp_difference_microseconds: 0,
+                    wnd_size: 0,
+                    extension: 0,
+                },
+                data: Bytes::new(),
+            },
+        );
+        let packet = buffer.get(2570).unwrap();
+        assert_eq!(packet.header.seq_nr, 2570);
+        let packet = buffer.get(2698).unwrap();
+        assert_eq!(packet.header.seq_nr, 2698);
+    }
+
+    #[test]
+    fn resizing() {
+        // Ensures the existing span + the new value 
+        // fits in the resized buffer. Caught by fuzzing
+        let input = [25413, 25392, 16744, 2607];
+        let mut buffer = ReorderBuffer::new(64);
+
+        for seq_nr in input.iter() {
             buffer.insert(
-                seq_nr as i32,
+                *seq_nr,
                 Packet {
                     header: PacketHeader {
-                        seq_nr,
+                        seq_nr: *seq_nr as u16,
                         ack_nr: 0,
                         conn_id: 0,
                         packet_type: crate::utp_packet::PacketType::Data,
@@ -360,9 +411,9 @@ mod test {
             );
         }
 
-        for seq_nr in inserted.iter() {
-            let packet = buffer.get(*seq_nr as i32).unwrap();
-            assert_eq!(packet.header.seq_nr, *seq_nr);
+        for seq_nr in input.iter() {
+            let packet = buffer.get(*seq_nr).unwrap();
+            assert_eq!(packet.header.seq_nr, *seq_nr as u16);
         }
     }
 }

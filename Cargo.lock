@@ -861,6 +861,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "utp_socket"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "libc",
+ "log",
+ "rand",
+ "tokio",
+ "tokio-uring",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -889,6 +902,7 @@ dependencies = [
  "tokio",
  "tokio-uring",
  "trust-dns-resolver",
+ "utp_socket",
 ]
 
 [[package]]

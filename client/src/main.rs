@@ -11,18 +11,12 @@ use trust_dns_resolver::{
     Resolver,
 };
 
-use crate::{
-    node::{Node, ID_ZERO},
-    utp_socket::UtpSocket,
-};
+use crate::node::{Node, ID_ZERO};
+use utp_socket::utp_socket::UtpSocket;
 
 mod krpc;
 mod node;
-mod reorder_buffer;
 mod routing_table;
-mod utp_packet;
-mod utp_socket;
-mod utp_stream;
 
 fn generate_node_id() -> NodeId {
     let id = rand::random::<[u8; 20]>();

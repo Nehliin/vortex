@@ -1,0 +1,16 @@
+[package]
+name = "utp_socket"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0"
+rand = "0.8.5"
+bytes = { version = "1.2", features = ["serde"]}
+tokio-uring = { version = "0.3.0", features = ["bytes"]}
+tokio = { version = "1.20.1", features = ["time", "sync", "macros"] }
+log = "0.4"
+libc = "0.2"
+

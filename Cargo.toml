@@ -1,30 +1,5 @@
-[package]
-name = "vortex"
-version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-tokio-uring = { version = "0.3.0", features = ["bytes"]}
-anyhow = "1.0"
-# Focus is not on this encoding
-serde_bencode = "0.2.3"
-serde = "1.0"
-serde_derive = "1.0"
-serde_bytes = "0.11"
-serde_json = "1.0"
-magnet-url = "2.0"
-rand = "0.8.5"
-time = { version = "0.3", features = ["serde", "local-offset"]}
-bytes = { version = "1.2", features = ["serde"]}
-tokio = { version = "1.20.1", features = ["time", "sync", "macros"] }
-sha1 = "0.10.1"
-trust-dns-resolver = "0.21"
-log = "0.4"
-env_logger = "0.9"
-base32 = "0.4"
-libc = "0.2"
-
-[dev-dependencies]
-num-bigint = "0.4.3"
+[workspace]
+members = [
+    "client",
+    "utp_socket"
+]
