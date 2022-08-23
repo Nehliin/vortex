@@ -4,9 +4,8 @@ use bytes::Bytes;
 use tokio_uring::net::UdpSocket;
 
 use crate::{
-    reorder_buffer::ReorderBuffer,
     utp_packet::{get_microseconds, Packet, PacketHeader, PacketType},
-    utp_stream::{ConnectionState, StreamState, UtpStream},
+    utp_stream::{ConnectionState, UtpStream},
 };
 
 // Conceptually there is a single socket that handles multiple connections
@@ -78,57 +77,16 @@ impl UtpSocket {
             }
         }
 
-        let stream = UtpStream::new(StreamState {
-            connection_state: ConnectionState::Idle,
-            // start from 1 for compability with older clients but not as secure
-            seq_nr: rand::random::<u16>(),
-            conn_id_recv: stream_key.conn_id,
-            cur_window_packets: 0,
-            ack_nr: 0,
-            // mimic libutp without a callback set (default behavior)
-            // this is the receive buffer initial size
-            our_advertised_window: 1024 * 1024,
-            conn_id_send: stream_key.conn_id + 1,
-            reply_micro: 0,
-            eof_pkt: None,
-            addr,
-            // mtu
-            their_advertised_window: 1500,
-            incoming_buffer: ReorderBuffer::new(256),
-            receive_buf: Vec::with_capacity(1024 * 1024),
-        });
-
+        let stream = UtpStream::new(stream_key.conn_id, addr, Rc::downgrade(&self.socket));
         self.streams.borrow_mut().insert(stream_key, stream.clone());
 
-        let timestamp_microseconds = get_microseconds() as u32;
+        stream.connect().await?;
 
-        let (tx, rc) = tokio::sync::oneshot::channel();
-        let packet_header = {
-            let mut state = stream.state_mut();
-            state.connection_state = ConnectionState::SynSent {
-                connect_notifier: tx,
-            };
-
-            let header = PacketHeader {
-                seq_nr: state.seq_nr,
-                ack_nr: 0,
-                conn_id: state.conn_id_recv,
-                packet_type: PacketType::Syn,
-                timestamp_microseconds,
-                timestamp_difference_microseconds: state.reply_micro,
-                wnd_size: state.our_advertised_window,
-                extension: 0,
-            };
-            state.seq_nr += 1;
-            header
-        };
-
-        UtpSocket::send_packet(&self.socket, packet_header, &stream).await?;
-        rc.await?;
+        
         Ok(stream)
     }
 
-    async fn ack(socket: &UdpSocket, stream: &UtpStream) -> anyhow::Result<()> {
+/*    async fn ack(socket: &UdpSocket, stream: &UtpStream) -> anyhow::Result<()> {
         let timestamp_microseconds = get_microseconds();
         let packet_header = {
             let state = stream.state();
@@ -145,29 +103,7 @@ impl UtpSocket {
         };
         UtpSocket::send_packet(socket, packet_header, stream).await?;
         Ok(())
-    }
-
-    async fn send_packet(
-        socket: &UdpSocket,
-        packet: PacketHeader,
-        stream: &UtpStream,
-    ) -> anyhow::Result<()> {
-        let addr = stream.state().addr;
-        let packet_bytes = packet.to_bytes();
-        log::debug!(
-            "Sending {:?} bytes: {} to addr: {addr}",
-            packet.packet_type,
-            packet_bytes.len()
-        );
-        // TODO check how this relates to windows size and opt_sndbuf
-        let (result, _buf) = socket.send_to(packet_bytes, addr).await;
-        let _ = result?;
-        let mut state = stream.state_mut();
-        // Might be certain situations where this shouldn't be appended?
-        // seems like only ST_DATA and ST_FIN
-        state.cur_window_packets += 1;
-        Ok(())
-    }
+    }*/
 }
 
 impl Drop for UtpSocket {
@@ -210,8 +146,8 @@ async fn process_incomming(
 
                     if let Some(stream) = connections.borrow().get(&key) {
                         match stream.process_incoming(packet) {
-                            Ok(needs_ack) => {
-                                UtpSocket::ack(&socket, stream).await;
+                            Ok(_needs_ack) => {
+                                //UtpSocket::ack(&socket, stream).await;
                             }
                             Err(err) => {
                                 log::error!("Error: Failed processing incoming packet: {err}");
@@ -220,6 +156,10 @@ async fn process_incomming(
                     } else {
                         log::warn!("Connection not established prior");
                         // Can't handle incoming traffic yet
+                        // here the utp stream can be created if `accept` have
+                        // been called prior. Accept can create a oneshot channel that's
+                        // stored in the socket state and the sender can send the stream here
+                        // back to the `accept` method.
                     }
                 }
                 Err(err) => log::error!("Error parsing packet: {err}"),
