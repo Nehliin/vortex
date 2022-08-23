@@ -1,12 +1,16 @@
 use std::{
     cell::{Ref, RefCell, RefMut},
     net::SocketAddr,
-    rc::Rc,
+    rc::{Rc, Weak},
+    time::Duration,
 };
+
+use bytes::Bytes;
+use tokio_uring::net::UdpSocket;
 
 use crate::{
     reorder_buffer::ReorderBuffer,
-    utp_packet::{get_microseconds, Packet, PacketType},
+    utp_packet::{get_microseconds, Packet, PacketHeader, PacketType},
 };
 
 #[derive(Debug)]
@@ -51,25 +55,143 @@ pub(crate) struct StreamState {
     pub(crate) reply_micro: u32,
     // Last packet in sequence, taken from the FIN packet
     pub(crate) eof_pkt: Option<u16>,
-    // The adder the stream is connected to
-    pub(crate) addr: SocketAddr,
     // incoming buffer, used to reorder packets
     pub(crate) incoming_buffer: ReorderBuffer,
+    // outgoing buffer (TODO does this need to be an ReorderBuffer?)
+    pub(crate) outgoing_buffer: ReorderBuffer,
     // Receive buffer, used to store packet data before read requests
     // this is what's used to determine window size
     pub(crate) receive_buf: Vec<u8>,
+    shutdown_signal: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+// TODO should this really be publicly derived?
 #[derive(Clone)]
 pub struct UtpStream {
     inner: Rc<RefCell<StreamState>>,
+    // The adder the stream is connected to
+    addr: SocketAddr,
+    weak_socket: Weak<UdpSocket>,
 }
 
 impl UtpStream {
-    pub(crate) fn new(state: StreamState) -> Self {
-        UtpStream {
-            inner: Rc::new(RefCell::new(state)),
+    pub(crate) fn new(conn_id: u16, addr: SocketAddr, weak_socket: Weak<UdpSocket>) -> Self {
+        let (shutdown_signal, mut shutdown_receiver) = tokio::sync::oneshot::channel();
+        let stream = UtpStream {
+            inner: Rc::new(RefCell::new(StreamState {
+                connection_state: ConnectionState::Idle,
+                // start from 1 for compability with older clients but not as secure
+                seq_nr: rand::random::<u16>(),
+                conn_id_recv: conn_id,
+                cur_window_packets: 0,
+                ack_nr: 0,
+                // mimic libutp without a callback set (default behavior)
+                // this is the receive buffer initial size
+                our_advertised_window: 1024 * 1024,
+                conn_id_send: conn_id + 1,
+                reply_micro: 0,
+                eof_pkt: None,
+                // mtu
+                their_advertised_window: 1500,
+                incoming_buffer: ReorderBuffer::new(256),
+                outgoing_buffer: ReorderBuffer::new(256),
+                receive_buf: Vec::with_capacity(1024 * 1024),
+                shutdown_signal: Some(shutdown_signal),
+            })),
+            weak_socket,
+            addr,
+        };
+
+        let stream_clone = stream.clone();
+        // Send loop
+        tokio_uring::spawn(async move {
+            let mut tick_interval = tokio::time::interval(Duration::from_millis(250));
+            tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = tick_interval.tick() => {
+                        if let Err(err) = stream_clone.flush_outbuf().await {
+                            log::error!("Error: {err}, shutting down stream send loop");
+                            break;
+                        }
+                    },
+                    _ = &mut shutdown_receiver =>  {
+                        log::info!("Shutting down stream send loop");
+                        break;
+                    },
+                }
+            }
+        });
+        stream
+    }
+
+    async fn flush_outbuf(&self) -> anyhow::Result<()> {
+        // TODO avoid cloning here, perhaps an extra layer like "Outgoing packet"
+        // which could also help with keeping track of resends etc
+        let packets: Vec<Packet> = { self.state().outgoing_buffer.iter().cloned().collect() };
+        for packet in packets.into_iter() {
+            self.send_packet(&packet).await?;
         }
+        Ok(())
+    }
+
+    // Maybe take addr into this instead for a bit nicer api
+    pub(crate) async fn connect(&self) -> anyhow::Result<()> {
+        let (tx, rc) = tokio::sync::oneshot::channel();
+        let header = {
+            let mut state = self.state_mut();
+            // move to state method
+            state.connection_state = ConnectionState::SynSent {
+                connect_notifier: tx,
+            };
+
+            let header = PacketHeader {
+                seq_nr: state.seq_nr,
+                ack_nr: 0,
+                conn_id: state.conn_id_recv,
+                packet_type: PacketType::Syn,
+                timestamp_microseconds: get_microseconds() as u32,
+                timestamp_difference_microseconds: state.reply_micro,
+                wnd_size: state.our_advertised_window,
+                extension: 0,
+            };
+            state.seq_nr += 1;
+            header
+        };
+
+        self.send_packet(&Packet {
+            header,
+            data: Bytes::new(),
+        })
+        .await?;
+        rc.await?;
+        Ok(())
+    }
+
+    async fn send_packet(&self, packet: &Packet) -> anyhow::Result<()> {
+        // Check connection state to see if it's possbile to send or
+        // if it needs to be added to the outbuffer
+        if let Some(socket) = self.weak_socket.upgrade() {
+            // TODO ofc the entire packet and not only the header should be sent
+            let packet_bytes = packet.header.to_bytes();
+            log::debug!(
+                "Sending {:?} bytes: {} to addr: {}",
+                packet.header.packet_type,
+                packet_bytes.len(),
+                self.addr,
+            );
+            // reuse buf?
+            let (result, _buf) = socket.send_to(packet_bytes, self.addr).await;
+            let _ = result?;
+            let mut state = self.state_mut();
+            // Might be certain situations where this shouldn't be appended?
+            // seems like only ST_DATA and ST_FIN. Also count bytes instead of packets
+            state.cur_window_packets += 1;
+        } else {
+            anyhow::bail!("Failed to send packet, socket dropped");
+        }
+
+        Ok(())
     }
 
     pub(crate) fn process_incoming(&self, packet: Packet) -> anyhow::Result<bool> {
@@ -165,12 +287,10 @@ impl UtpStream {
 
     fn handle_inorder_packet(&self, packet: Packet) {
         let mut state = self.state_mut();
-        let addr = state.addr;
         let conn_state = std::mem::replace(&mut state.connection_state, ConnectionState::Idle);
         match (packet.header.packet_type, conn_state) {
             // Outgoing connection completion
             (PacketType::State, ConnectionState::SynSent { connect_notifier }) => {
-                let mut state = self.state_mut();
                 state.cur_window_packets -= 1;
                 state.connection_state = ConnectionState::Connected;
                 connect_notifier.send(()).unwrap();
@@ -178,9 +298,11 @@ impl UtpStream {
                 log::trace!("SYN_ACK");
             }
             (PacketType::State, conn_state) => {
-                log::trace!("Received ACK: {}", addr);
-                let mut state = self.state_mut();
-                state.cur_window_packets -= 1;
+                log::trace!("Received ACK: {}", self.addr);
+                if state.outgoing_buffer.remove(packet.header.ack_nr).is_none() {
+                    log::error!("Recevied ack for packet not inside the outgoing_buffer");
+                }
+                //state.cur_window_packets -= 1;
                 // Reset connection state if it wasn't modified
                 state.connection_state = conn_state;
             }
@@ -225,5 +347,15 @@ impl UtpStream {
 
     pub(crate) fn state(&self) -> Ref<'_, StreamState> {
         self.inner.borrow()
+    }
+}
+
+impl Drop for UtpStream {
+    fn drop(&mut self) {
+        // Only shutdown if this is the last clone
+        if Rc::strong_count(&self.inner) == 1 {
+            // TODO notify the socket so the stream can be removed from the stream map?
+            let _ = self.state_mut().shutdown_signal.take().unwrap().send(());
+        }
     }
 }
