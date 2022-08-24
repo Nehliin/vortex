@@ -6,6 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use tokio::sync::oneshot::Receiver;
 use tokio_uring::net::UdpSocket;
 
 use crate::{
@@ -32,6 +33,7 @@ impl PartialEq for ConnectionState {
 
 impl Eq for ConnectionState {}
 
+// Could be moved to separate module
 pub(crate) struct StreamState {
     // Current socket state
     pub(crate) connection_state: ConnectionState,
@@ -63,6 +65,43 @@ pub(crate) struct StreamState {
     // this is what's used to determine window size
     pub(crate) receive_buf: Vec<u8>,
     shutdown_signal: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl StreamState {
+    fn syn_header(&mut self) -> (PacketHeader, Receiver<()>) {
+        let (tx, rc) = tokio::sync::oneshot::channel();
+        // move to state method
+        self.connection_state = ConnectionState::SynSent {
+            connect_notifier: tx,
+        };
+
+        let header = PacketHeader {
+            seq_nr: self.seq_nr,
+            ack_nr: 0,
+            conn_id: self.conn_id_recv,
+            packet_type: PacketType::Syn,
+            timestamp_microseconds: get_microseconds() as u32,
+            timestamp_difference_microseconds: self.reply_micro,
+            wnd_size: self.our_advertised_window,
+            extension: 0,
+        };
+        self.seq_nr += 1;
+        (header, rc)
+    }
+
+    fn ack(&self) -> PacketHeader {
+        let timestamp_microseconds = get_microseconds();
+        PacketHeader {
+            seq_nr: self.seq_nr,
+            ack_nr: self.ack_nr,
+            conn_id: self.conn_id_send,
+            packet_type: PacketType::State,
+            timestamp_microseconds: timestamp_microseconds as u32,
+            timestamp_difference_microseconds: self.reply_micro,
+            wnd_size: self.our_advertised_window,
+            extension: 0,
+        }
+    }
 }
 
 // TODO should this really be publicly derived?
@@ -137,27 +176,8 @@ impl UtpStream {
 
     // Maybe take addr into this instead for a bit nicer api
     pub(crate) async fn connect(&self) -> anyhow::Result<()> {
-        let (tx, rc) = tokio::sync::oneshot::channel();
-        let header = {
-            let mut state = self.state_mut();
-            // move to state method
-            state.connection_state = ConnectionState::SynSent {
-                connect_notifier: tx,
-            };
-
-            let header = PacketHeader {
-                seq_nr: state.seq_nr,
-                ack_nr: 0,
-                conn_id: state.conn_id_recv,
-                packet_type: PacketType::Syn,
-                timestamp_microseconds: get_microseconds() as u32,
-                timestamp_difference_microseconds: state.reply_micro,
-                wnd_size: state.our_advertised_window,
-                extension: 0,
-            };
-            state.seq_nr += 1;
-            header
-        };
+        // Extra brackets to ensure state_mut is dropped pre .await
+        let (header, rc) = { self.state_mut().syn_header() };
 
         self.send_packet(&Packet {
             header,
@@ -194,7 +214,7 @@ impl UtpStream {
         Ok(())
     }
 
-    pub(crate) fn process_incoming(&self, packet: Packet) -> anyhow::Result<bool> {
+    pub(crate) async fn process_incoming(&self, packet: Packet) -> anyhow::Result<()> {
         let packet_header = packet.header;
         // Mismatching id
         if packet_header.conn_id != self.state().conn_id_recv {
@@ -264,33 +284,32 @@ impl UtpStream {
             packet_header.seq_nr - state.ack_nr - 1
         };
 
-        let need_to_ack = packet_header.packet_type == PacketType::Data
-            || packet_header.packet_type == PacketType::Syn // TODO handled elsewhere
-            || packet_header.packet_type == PacketType::Fin;
-
         if dist_from_expected != 0 {
             log::debug!("Got out of order packet");
             // Out of order packet
             self.state_mut().incoming_buffer.insert(packet);
-            return Ok(need_to_ack);
+            return Ok(());
         }
 
-        self.handle_inorder_packet(packet);
+        self.handle_inorder_packet(packet).await;
 
         let mut seq_nr = packet_header.seq_nr;
         while let Some(packet) = self.state_mut().incoming_buffer.remove(seq_nr) {
-            self.handle_inorder_packet(packet);
+            self.handle_inorder_packet(packet).await;
             seq_nr += 1;
         }
-        Ok(need_to_ack)
+        Ok(())
     }
 
-    fn handle_inorder_packet(&self, packet: Packet) {
-        let mut state = self.state_mut();
-        let conn_state = std::mem::replace(&mut state.connection_state, ConnectionState::Idle);
+    async fn handle_inorder_packet(&self, packet: Packet) {
+        let conn_state = std::mem::replace(
+            &mut self.state_mut().connection_state,
+            ConnectionState::Idle,
+        );
         match (packet.header.packet_type, conn_state) {
             // Outgoing connection completion
             (PacketType::State, ConnectionState::SynSent { connect_notifier }) => {
+                let mut state = self.state_mut();
                 state.cur_window_packets -= 1;
                 state.connection_state = ConnectionState::Connected;
                 connect_notifier.send(()).unwrap();
@@ -298,6 +317,7 @@ impl UtpStream {
                 log::trace!("SYN_ACK");
             }
             (PacketType::State, conn_state) => {
+                let mut state = self.state_mut();
                 log::trace!("Received ACK: {}", self.addr);
                 if state.outgoing_buffer.remove(packet.header.ack_nr).is_none() {
                     log::error!("Recevied ack for packet not inside the outgoing_buffer");
@@ -307,18 +327,29 @@ impl UtpStream {
                 state.connection_state = conn_state;
             }
             (PacketType::Data, conn_state) => {
-                // in order packet
-                state.ack_nr += 1;
-                log::trace!("Sending ACK (almost)");
+                let packet = {
+                    let mut state = self.state_mut();
+                    // in order packet
+                    state.ack_nr += 1;
+                    log::trace!("Sending ACK");
+
+                    let header = state.ack();
+                    state.connection_state = conn_state;
+                    Packet {
+                        header,
+                        data: Bytes::new(),
+                    }
+                };
+                self.send_packet(&packet).await.unwrap();
                 // TODOOO
                 // consume_incoming_data in libtorrent
                 // basically moves bytes over to receive buf until it's filled
                 // receive buf remaining space is our window
                 //
                 // Reset connection state if it wasn't modified
-                state.connection_state = conn_state;
             }
             (PacketType::Fin, conn_state) => {
+                let mut state = self.state_mut();
                 log::trace!("Received FIN: {}", self.addr);
                 state.eof_pkt = Some(packet.header.seq_nr);
                 log::info!("Connection closed: {}", self.addr);
@@ -329,6 +360,7 @@ impl UtpStream {
                 state.connection_state = conn_state;
             }
             (p_type, conn_state) => {
+                let mut state = self.state_mut();
                 log::error!("Unhandled packet type!: {:?}", p_type);
                 // Reset connection state if it wasn't modified
                 state.connection_state = conn_state;

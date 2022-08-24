@@ -4,8 +4,8 @@ use bytes::Bytes;
 use tokio_uring::net::UdpSocket;
 
 use crate::{
-    utp_packet::{get_microseconds, Packet, PacketHeader, PacketType},
-    utp_stream::{ConnectionState, UtpStream},
+    utp_packet::{Packet, PacketHeader},
+    utp_stream::UtpStream,
 };
 
 // Conceptually there is a single socket that handles multiple connections
@@ -82,28 +82,8 @@ impl UtpSocket {
 
         stream.connect().await?;
 
-        
         Ok(stream)
     }
-
-/*    async fn ack(socket: &UdpSocket, stream: &UtpStream) -> anyhow::Result<()> {
-        let timestamp_microseconds = get_microseconds();
-        let packet_header = {
-            let state = stream.state();
-            PacketHeader {
-                seq_nr: state.seq_nr,
-                ack_nr: state.ack_nr,
-                conn_id: state.conn_id_send,
-                packet_type: PacketType::State,
-                timestamp_microseconds: timestamp_microseconds as u32,
-                timestamp_difference_microseconds: state.reply_micro,
-                wnd_size: dbg!(state.our_advertised_window),
-                extension: 0,
-            }
-        };
-        UtpSocket::send_packet(socket, packet_header, stream).await?;
-        Ok(())
-    }*/
 }
 
 impl Drop for UtpSocket {
@@ -144,10 +124,11 @@ async fn process_incomming(
                         data: Bytes::copy_from_slice(&buf[recv..]),
                     };
 
-                    if let Some(stream) = connections.borrow().get(&key) {
-                        match stream.process_incoming(packet) {
-                            Ok(_needs_ack) => {
-                                //UtpSocket::ack(&socket, stream).await;
+                    let maybe_stream = { connections.borrow_mut().remove(&key) };
+                    if let Some(stream) = maybe_stream {
+                        match stream.process_incoming(packet).await {
+                            Ok(()) => {
+                                connections.borrow_mut().insert(key, stream);
                             }
                             Err(err) => {
                                 log::error!("Error: Failed processing incoming packet: {err}");
