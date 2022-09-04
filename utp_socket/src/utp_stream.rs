@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use tokio::sync::{oneshot::Receiver, Notify};
 use tokio_uring::net::UdpSocket;
 
@@ -106,6 +106,22 @@ impl StreamState {
             extension: 0,
         }
     }
+
+    fn data(&mut self) -> PacketHeader {
+        // Move this closer to send time?
+        let timestamp_microseconds = get_microseconds();
+        self.seq_nr += 1;
+        PacketHeader {
+            seq_nr: self.seq_nr,
+            ack_nr: self.ack_nr,
+            conn_id: self.conn_id_send,
+            packet_type: PacketType::Data,
+            timestamp_microseconds: timestamp_microseconds as u32,
+            timestamp_difference_microseconds: self.reply_micro,
+            wnd_size: self.our_advertised_window,
+            extension: 0,
+        }
+    }
 }
 
 // TODO should this really be publicly derived?
@@ -122,6 +138,7 @@ pub struct UtpStream {
 }
 
 const MTU: u32 = 1500;
+const HEADER_SIZE: usize = 20;
 
 impl UtpStream {
     pub(crate) fn new(conn_id: u16, addr: SocketAddr, weak_socket: Weak<UdpSocket>) -> Self {
@@ -201,7 +218,7 @@ impl UtpStream {
                 log::debug!("Not yet connected, holding on to outgoing buffer");
                 return Ok(());
             }
-            // TODO: Since there is no filtering based on rtt here we will 
+            // TODO: Since there is no filtering based on rtt here we will
             // spam the receiver until everything is acked
             state.outgoing_buffer.iter().cloned().collect()
         };
@@ -361,6 +378,23 @@ impl UtpStream {
         }
     }
 
+    pub async fn write(&self, data: Vec<u8>) -> anyhow::Result<()> {
+        if (data.len() - HEADER_SIZE) > MTU as usize {
+            log::warn!("Fragmentation is not supported yet");
+            Ok(())
+        } else {
+            let packet = {
+                let mut state = self.state_mut();
+                let header = state.data();
+                Packet {
+                    header,
+                    data: data.into(),
+                }
+            };
+            self.send_packet(packet).await
+        }
+    }
+
     async fn handle_inorder_packet(&self, packet: Packet) {
         let conn_state = std::mem::replace(
             &mut self.state_mut().connection_state,
@@ -415,7 +449,7 @@ impl UtpStream {
                     }
                 };
                 if let Some(packet) = packet {
-                    self.send_packet(&packet).await.unwrap();
+                    self.send_packet(packet).await.unwrap();
                 }
                 // TODOOO
                 // consume_incoming_data in libtorrent
