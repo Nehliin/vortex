@@ -93,6 +93,7 @@ impl StreamState {
     }
 
     fn ack(&self) -> PacketHeader {
+        // Move this closer to send time?
         let timestamp_microseconds = get_microseconds();
         PacketHeader {
             seq_nr: self.seq_nr,
@@ -120,6 +121,8 @@ pub struct UtpStream {
     data_available: Rc<Notify>,
 }
 
+const MTU: u32 = 1500;
+
 impl UtpStream {
     pub(crate) fn new(conn_id: u16, addr: SocketAddr, weak_socket: Weak<UdpSocket>) -> Self {
         let (shutdown_signal, mut shutdown_receiver) = tokio::sync::oneshot::channel();
@@ -138,7 +141,7 @@ impl UtpStream {
                 reply_micro: 0,
                 eof_pkt: None,
                 // mtu
-                their_advertised_window: 1500,
+                their_advertised_window: MTU,
                 incoming_buffer: ReorderBuffer::new(256),
                 outgoing_buffer: ReorderBuffer::new(256),
                 receive_buf: vec![0; 1024 * 1024].into_boxed_slice(),
@@ -191,7 +194,17 @@ impl UtpStream {
         // TODO avoid cloning here, perhaps an extra layer like "Outgoing packet"
         // which could also help with keeping track of resends etc. The reorder buffer needs
         // to support draining operations or a normal buffer is used instead
-        let packets: Vec<Packet> = { self.state().outgoing_buffer.iter().cloned().collect() };
+        let packets: Vec<Packet> = {
+            let state = self.state();
+            if state.connection_state != ConnectionState::Connected {
+                // not connected yet
+                log::debug!("Not yet connected, holding on to outgoing buffer");
+                return Ok(());
+            }
+            // TODO: Since there is no filtering based on rtt here we will 
+            // spam the receiver until everything is acked
+            state.outgoing_buffer.iter().cloned().collect()
+        };
         if let Some(socket) = self.weak_socket.upgrade() {
             for packet in packets.into_iter() {
                 // TODO ofc the entire packet and not only the header should be sent
