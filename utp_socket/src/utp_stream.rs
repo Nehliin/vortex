@@ -178,7 +178,7 @@ impl UtpStream {
         // Extra brackets to ensure state_mut is dropped pre .await
         let (header, rc) = { self.state_mut().syn_header() };
 
-        self.send_packet(&Packet {
+        self.send_packet(Packet {
             header,
             data: Bytes::new(),
         })
@@ -189,37 +189,36 @@ impl UtpStream {
 
     async fn flush_outbuf(&self) -> anyhow::Result<()> {
         // TODO avoid cloning here, perhaps an extra layer like "Outgoing packet"
-        // which could also help with keeping track of resends etc
+        // which could also help with keeping track of resends etc. The reorder buffer needs
+        // to support draining operations or a normal buffer is used instead
         let packets: Vec<Packet> = { self.state().outgoing_buffer.iter().cloned().collect() };
-        for packet in packets.into_iter() {
-            self.send_packet(&packet).await?;
+        if let Some(socket) = self.weak_socket.upgrade() {
+            for packet in packets.into_iter() {
+                // TODO ofc the entire packet and not only the header should be sent
+                let packet_bytes = packet.header.to_bytes();
+                log::debug!(
+                    "Sending {:?} bytes: {} to addr: {}",
+                    packet.header.packet_type,
+                    packet_bytes.len(),
+                    self.addr,
+                );
+                // reuse buf?
+                let (result, _buf) = socket.send_to(packet_bytes, self.addr).await;
+                let _ = result?;
+                let mut state = self.state_mut();
+                // Might be certain situations where this shouldn't be appended?
+                // seems like only ST_DATA and ST_FIN. Also count bytes instead of packets
+                state.cur_window_packets += 1;
+            }
+        } else {
+            anyhow::bail!("Failed to send packets, socket dropped");
         }
         Ok(())
     }
 
-    async fn send_packet(&self, packet: &Packet) -> anyhow::Result<()> {
-        // Check connection state to see if it's possbile to send or
-        // if it needs to be added to the outbuffer
-        if let Some(socket) = self.weak_socket.upgrade() {
-            // TODO ofc the entire packet and not only the header should be sent
-            let packet_bytes = packet.header.to_bytes();
-            log::debug!(
-                "Sending {:?} bytes: {} to addr: {}",
-                packet.header.packet_type,
-                packet_bytes.len(),
-                self.addr,
-            );
-            // reuse buf?
-            let (result, _buf) = socket.send_to(packet_bytes, self.addr).await;
-            let _ = result?;
-            let mut state = self.state_mut();
-            // Might be certain situations where this shouldn't be appended?
-            // seems like only ST_DATA and ST_FIN. Also count bytes instead of packets
-            state.cur_window_packets += 1;
-        } else {
-            anyhow::bail!("Failed to send packet, socket dropped");
-        }
-
+    async fn send_packet(&self, packet: Packet) -> anyhow::Result<()> {
+        self.state_mut().outgoing_buffer.insert(packet);
+        self.flush_outbuf().await?;
         Ok(())
     }
 
