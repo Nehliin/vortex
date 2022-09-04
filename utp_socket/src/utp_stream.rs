@@ -17,7 +17,6 @@ use crate::{
 #[derive(Debug)]
 pub(crate) enum ConnectionState {
     Idle,
-    // TODO syn received to handle incoming traffic
     SynSent {
         connect_notifier: tokio::sync::oneshot::Sender<()>,
     },
@@ -137,6 +136,16 @@ pub struct UtpStream {
     data_available: Rc<Notify>,
 }
 
+impl std::fmt::Debug for UtpStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UtpStream")
+            .field("state", &self.inner)
+            .field("addr", &self.addr)
+            .field("data_available", &self.data_available)
+            .finish()
+    }
+}
+
 const MTU: u32 = 1500;
 const HEADER_SIZE: usize = 20;
 
@@ -193,8 +202,65 @@ impl UtpStream {
         stream
     }
 
+    pub(crate) fn new_incoming(
+        seq_nr: u16,
+        conn_id: u16,
+        addr: SocketAddr,
+        weak_socket: Weak<UdpSocket>,
+    ) -> Self {
+        let (shutdown_signal, mut shutdown_receiver) = tokio::sync::oneshot::channel();
+        let stream = UtpStream {
+            inner: Rc::new(RefCell::new(StreamState {
+                connection_state: ConnectionState::SynReceived,
+                // start from 1 for compability with older clients but not as secure
+                seq_nr: rand::random::<u16>(),
+                conn_id_recv: conn_id + 1,
+                cur_window_packets: 0,
+                ack_nr: seq_nr,
+                // mimic libutp without a callback set (default behavior)
+                // this is the receive buffer initial size
+                our_advertised_window: 1024 * 1024,
+                conn_id_send: conn_id,
+                reply_micro: 0,
+                eof_pkt: None,
+                // mtu
+                their_advertised_window: MTU,
+                incoming_buffer: ReorderBuffer::new(256),
+                outgoing_buffer: ReorderBuffer::new(256),
+                receive_buf: vec![0; 1024 * 1024].into_boxed_slice(),
+                receive_buf_cursor: 0,
+                shutdown_signal: Some(shutdown_signal),
+            })),
+            weak_socket,
+            data_available: Rc::new(Notify::new()),
+            addr,
+        };
+
+        let stream_clone = stream.clone();
+        // Send loop
+        tokio_uring::spawn(async move {
+            let mut tick_interval = tokio::time::interval(Duration::from_millis(250));
+            tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = tick_interval.tick() => {
+                        if let Err(err) = stream_clone.flush_outbuf().await {
+                            log::error!("Error: {err}, shutting down stream send loop");
+                            break;
+                        }
+                    },
+                    _ = &mut shutdown_receiver =>  {
+                        log::info!("Shutting down stream send loop");
+                        break;
+                    },
+                }
+            }
+        });
+        stream
+    }
+
     // Maybe take addr into this instead for a bit nicer api
-    pub(crate) async fn connect(&self) -> anyhow::Result<()> {
+    pub async fn connect(&self) -> anyhow::Result<()> {
         // Extra brackets to ensure state_mut is dropped pre .await
         let (header, rc) = { self.state_mut().syn_header() };
 

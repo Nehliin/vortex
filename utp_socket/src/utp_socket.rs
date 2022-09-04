@@ -1,10 +1,11 @@
 use std::{cell::RefCell, collections::HashMap, net::SocketAddr, rc::Rc};
 
+use anyhow::Context;
 use bytes::Bytes;
 use tokio_uring::net::UdpSocket;
 
 use crate::{
-    utp_packet::{Packet, PacketHeader},
+    utp_packet::{Packet, PacketHeader, PacketType},
     utp_stream::UtpStream,
 };
 
@@ -15,6 +16,7 @@ use crate::{
 pub struct UtpSocket {
     socket: Rc<UdpSocket>,
     shutdown_signal: Option<tokio::sync::oneshot::Sender<()>>,
+    accept_chan: Rc<RefCell<Option<tokio::sync::oneshot::Sender<UtpStream>>>>,
     streams: Rc<RefCell<HashMap<StreamKey, UtpStream>>>,
 }
 
@@ -36,10 +38,12 @@ impl UtpSocket {
         let utp_socket = UtpSocket {
             socket,
             shutdown_signal: Some(shutdown_signal),
+            accept_chan: Default::default(),
             streams: Default::default(),
         };
 
         let streams_clone = utp_socket.streams.clone();
+        let accept_chan = utp_socket.accept_chan.clone();
         // Net loop
         tokio_uring::spawn(async move {
             // TODO check how this relates to windows size and opt_rcvbuf
@@ -48,7 +52,7 @@ impl UtpSocket {
                 // Double check if this is cancellation safe
                 // (I don't think it is but shouldn't matter anyways)
                 tokio::select! {
-                    buf = process_incomming(&net_loop_socket, &streams_clone, std::mem::take(&mut recv_buf)) => {
+                    buf = process_incomming(&net_loop_socket, &streams_clone, &accept_chan, std::mem::take(&mut recv_buf)) => {
                            recv_buf = buf;
                         }
                     _ = &mut shutdown_receiver =>  {
@@ -84,6 +88,15 @@ impl UtpSocket {
 
         Ok(stream)
     }
+
+    pub async fn accept(&self) -> anyhow::Result<UtpStream> {
+        let (tx, rc) = tokio::sync::oneshot::channel();
+        {
+            let mut chan = self.accept_chan.borrow_mut();
+            *chan = Some(tx);
+        }
+        rc.await.context("Net loop exited")
+    }
 }
 
 impl Drop for UtpSocket {
@@ -104,8 +117,9 @@ impl Drop for UtpSocket {
 // the packets can get stored in that task if they need to be resent?
 // the incoming task could keep a channel of acks received that can be removed from resend buf
 async fn process_incomming(
-    socket: &UdpSocket,
+    socket: &Rc<UdpSocket>,
     connections: &Rc<RefCell<HashMap<StreamKey, UtpStream>>>,
+    accept_chan: &Rc<RefCell<Option<tokio::sync::oneshot::Sender<UtpStream>>>>,
     recv_buf: Vec<u8>,
 ) -> Vec<u8> {
     let (result, buf) = socket.recv_from(recv_buf).await;
@@ -134,13 +148,26 @@ async fn process_incomming(
                                 log::error!("Error: Failed processing incoming packet: {err}");
                             }
                         }
+                    } else if packet_header.packet_type == PacketType::Syn {
+                        if let Some(chan) = accept_chan.borrow_mut().take() {
+                            log::info!("New incoming connection!");
+                            let stream = UtpStream::new_incoming(
+                                packet_header.seq_nr,
+                                packet_header.conn_id,
+                                addr,
+                                Rc::downgrade(socket),
+                            );
+                            connections.borrow_mut().insert(
+                                StreamKey {
+                                    conn_id: packet_header.conn_id,
+                                    addr,
+                                },
+                                stream.clone(),
+                            );
+                            chan.send(stream).unwrap();
+                        }
                     } else {
                         log::warn!("Connection not established prior");
-                        // Can't handle incoming traffic yet
-                        // here the utp stream can be created if `accept` have
-                        // been called prior. Accept can create a oneshot channel that's
-                        // stored in the socket state and the sender can send the stream here
-                        // back to the `accept` method.
                     }
                 }
                 Err(err) => log::error!("Error parsing packet: {err}"),
