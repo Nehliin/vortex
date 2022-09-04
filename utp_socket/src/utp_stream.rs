@@ -17,6 +17,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) enum ConnectionState {
     Idle,
+    SynReceived,
     SynSent {
         connect_notifier: tokio::sync::oneshot::Sender<()>,
     },
@@ -33,6 +34,7 @@ impl PartialEq for ConnectionState {
 impl Eq for ConnectionState {}
 
 // Could be moved to separate module
+#[derive(Debug)]
 pub(crate) struct StreamState {
     // Current socket state
     pub(crate) connection_state: ConnectionState,
@@ -264,6 +266,7 @@ impl UtpStream {
         // Extra brackets to ensure state_mut is dropped pre .await
         let (header, rc) = { self.state_mut().syn_header() };
 
+        log::debug!("Sending SYN");
         self.send_packet(Packet {
             header,
             data: Bytes::new(),
@@ -279,7 +282,9 @@ impl UtpStream {
         // to support draining operations or a normal buffer is used instead
         let packets: Vec<Packet> = {
             let state = self.state();
-            if state.connection_state != ConnectionState::Connected {
+            if state.connection_state != ConnectionState::Connected
+                && !matches!(state.connection_state, ConnectionState::SynSent { .. })
+            {
                 // not connected yet
                 log::debug!("Not yet connected, holding on to outgoing buffer");
                 return Ok(());
@@ -320,13 +325,17 @@ impl UtpStream {
 
     pub(crate) async fn process_incoming(&self, packet: Packet) -> anyhow::Result<()> {
         let packet_header = packet.header;
-        // Mismatching id
-        if packet_header.conn_id != self.state().conn_id_recv {
-            // sanity check
-            assert!(
-                packet_header.packet_type != PacketType::Syn,
-                "Syn packets should be handled elsewhere"
-            );
+        let matching_conn_id = {
+            let state = self.state();
+            // Special case where the initiator might resend the SYN packet 
+            // which will have conn_id - 1 of the expected id
+            if state.connection_state == ConnectionState::SynReceived {
+                packet_header.conn_id + 1 == state.conn_id_recv
+            } else {
+                packet_header.conn_id == state.conn_id_recv
+            }
+        };
+        if !matching_conn_id {
             anyhow::bail!(
                 "Received invalid packet connection id: {}, expected: {}",
                 packet_header.conn_id,

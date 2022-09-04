@@ -866,6 +866,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "env_logger",
  "libc",
  "log",
  "rand",
