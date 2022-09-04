@@ -5,8 +5,8 @@ use std::{
     time::Duration,
 };
 
-use bytes::Bytes;
-use tokio::sync::oneshot::Receiver;
+use bytes::{BufMut, Bytes};
+use tokio::sync::{oneshot::Receiver, Notify};
 use tokio_uring::net::UdpSocket;
 
 use crate::{
@@ -62,8 +62,11 @@ pub(crate) struct StreamState {
     // outgoing buffer (TODO does this need to be an ReorderBuffer?)
     pub(crate) outgoing_buffer: ReorderBuffer,
     // Receive buffer, used to store packet data before read requests
-    // this is what's used to determine window size
-    pub(crate) receive_buf: Vec<u8>,
+    // this is what's used to determine window size.
+    // Have the same size like the initial our_advertised_window
+    pub(crate) receive_buf: Box<[u8]>,
+    receive_buf_cursor: usize,
+
     shutdown_signal: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -111,6 +114,10 @@ pub struct UtpStream {
     // The adder the stream is connected to
     addr: SocketAddr,
     weak_socket: Weak<UdpSocket>,
+    // Used to notify pending readers that
+    // there is data available to read
+    // (This could be adapted to work single threaded but needs custom impl)
+    data_available: Rc<Notify>,
 }
 
 impl UtpStream {
@@ -134,10 +141,12 @@ impl UtpStream {
                 their_advertised_window: 1500,
                 incoming_buffer: ReorderBuffer::new(256),
                 outgoing_buffer: ReorderBuffer::new(256),
-                receive_buf: Vec::with_capacity(1024 * 1024),
+                receive_buf: vec![0; 1024 * 1024].into_boxed_slice(),
+                receive_buf_cursor: 0,
                 shutdown_signal: Some(shutdown_signal),
             })),
             weak_socket,
+            data_available: Rc::new(Notify::new()),
             addr,
         };
 
@@ -164,16 +173,6 @@ impl UtpStream {
         stream
     }
 
-    async fn flush_outbuf(&self) -> anyhow::Result<()> {
-        // TODO avoid cloning here, perhaps an extra layer like "Outgoing packet"
-        // which could also help with keeping track of resends etc
-        let packets: Vec<Packet> = { self.state().outgoing_buffer.iter().cloned().collect() };
-        for packet in packets.into_iter() {
-            self.send_packet(&packet).await?;
-        }
-        Ok(())
-    }
-
     // Maybe take addr into this instead for a bit nicer api
     pub(crate) async fn connect(&self) -> anyhow::Result<()> {
         // Extra brackets to ensure state_mut is dropped pre .await
@@ -185,6 +184,16 @@ impl UtpStream {
         })
         .await?;
         rc.await?;
+        Ok(())
+    }
+
+    async fn flush_outbuf(&self) -> anyhow::Result<()> {
+        // TODO avoid cloning here, perhaps an extra layer like "Outgoing packet"
+        // which could also help with keeping track of resends etc
+        let packets: Vec<Packet> = { self.state().outgoing_buffer.iter().cloned().collect() };
+        for packet in packets.into_iter() {
+            self.send_packet(&packet).await?;
+        }
         Ok(())
     }
 
@@ -291,14 +300,53 @@ impl UtpStream {
             return Ok(());
         }
 
+        // Did we receive new data?
+        let mut data_available = packet.header.packet_type == PacketType::Data;
         self.handle_inorder_packet(packet).await;
 
         let mut seq_nr = packet_header.seq_nr;
-        while let Some(packet) = self.state_mut().incoming_buffer.remove(seq_nr) {
+        // Avoid borrowing across await point
+        let get_next = |seq_nr: u16| self.state_mut().incoming_buffer.remove(seq_nr);
+        while let Some(packet) = get_next(seq_nr) {
+            data_available |= packet.header.packet_type == PacketType::Data;
             self.handle_inorder_packet(packet).await;
             seq_nr += 1;
         }
+        if data_available {
+            self.data_available.notify_waiters();
+        }
         Ok(())
+    }
+
+    // Perhaps take ownership here instead?
+    // Also since this risks reading one packet at a time a read_exact
+    // method or equivalent should probably also be added
+    pub async fn read(&self, buffer: &mut [u8]) -> usize {
+        // If there exists data in the recieve buffer we return it
+        // otherwise this should block until either a FIN, RESET or
+        // new data is received.
+        loop {
+            let data_available = { self.state().receive_buf_cursor };
+            if data_available == 0 {
+                self.data_available.notified().await;
+            } else {
+                break;
+            }
+        }
+
+        let mut state = self.state_mut();
+        if buffer.len() <= state.receive_buf_cursor {
+            let len = buffer.len();
+            buffer[..].copy_from_slice(&state.receive_buf[..len]);
+            state.receive_buf.copy_within(len.., 0);
+            state.receive_buf_cursor -= len;
+            buffer.len()
+        } else {
+            let data_read = state.receive_buf_cursor;
+            buffer[0..state.receive_buf_cursor].copy_from_slice(&state.receive_buf[..]);
+            state.receive_buf_cursor = 0;
+            data_read
+        }
     }
 
     async fn handle_inorder_packet(&self, packet: Packet) {
@@ -330,17 +378,33 @@ impl UtpStream {
                 let packet = {
                     let mut state = self.state_mut();
                     // in order packet
-                    state.ack_nr += 1;
-                    log::trace!("Sending ACK");
+                    state.ack_nr = packet.header.seq_nr;
+                    // Does the packet fit witin the receive buffer? otherwise drop it
+                    if packet.data.len() <= (state.receive_buf.len() - state.receive_buf_cursor) {
+                        let cursor = state.receive_buf_cursor;
+                        // TODO perhaps more of a io_uring kind of approach would make sense
+                        // so copies can be avoided either here or in the read method
+                        state.receive_buf[cursor..cursor + packet.data.len()]
+                            .copy_from_slice(&packet.data);
+                        state.receive_buf_cursor += packet.data.len();
+                        state.our_advertised_window =
+                            (state.receive_buf.len() - state.receive_buf_cursor) as u32;
 
-                    let header = state.ack();
-                    state.connection_state = conn_state;
-                    Packet {
-                        header,
-                        data: Bytes::new(),
+                        log::trace!("Sending ACK");
+                        let header = state.ack();
+                        state.connection_state = conn_state;
+                        Some(Packet {
+                            header,
+                            data: Bytes::new(),
+                        })
+                    } else {
+                        log::warn!("Receiv buf full, packet dropped");
+                        None
                     }
                 };
-                self.send_packet(&packet).await.unwrap();
+                if let Some(packet) = packet {
+                    self.send_packet(&packet).await.unwrap();
+                }
                 // TODOOO
                 // consume_incoming_data in libtorrent
                 // basically moves bytes over to receive buf until it's filled
