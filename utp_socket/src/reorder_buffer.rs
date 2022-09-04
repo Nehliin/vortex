@@ -1,5 +1,6 @@
 use crate::utp_packet::Packet;
 
+#[derive(Debug)]
 pub struct ReorderBuffer {
     buffer: Box<[Option<Packet>]>,
     first: usize,
@@ -177,7 +178,7 @@ impl ReorderBuffer {
     pub fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Packet> + 'a> {
         if self.first <= self.last {
             Box::new(
-                self.buffer[self.first..self.last]
+                self.buffer[self.first..self.last + 1]
                     .iter()
                     .filter(|maybe_packet| maybe_packet.is_some())
                     .map(|maybe_packet| maybe_packet.as_ref().unwrap()),
