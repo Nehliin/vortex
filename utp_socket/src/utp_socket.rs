@@ -149,22 +149,35 @@ async fn process_incomming(
                             }
                         }
                     } else if packet_header.packet_type == PacketType::Syn {
-                        if let Some(chan) = accept_chan.borrow_mut().take() {
-                            log::info!("New incoming connection!");
+                        let maybe_chan = { accept_chan.borrow_mut().take() };
+                        if let Some(chan) = maybe_chan {
                             let stream = UtpStream::new_incoming(
                                 packet_header.seq_nr,
                                 packet_header.conn_id,
                                 addr,
                                 Rc::downgrade(socket),
                             );
-                            connections.borrow_mut().insert(
-                                StreamKey {
-                                    conn_id: packet_header.conn_id,
-                                    addr,
-                                },
-                                stream.clone(),
-                            );
-                            chan.send(stream).unwrap();
+                            // Ensure the initial packet can be processed 
+                            // before inserting the stream in the connections table.
+                            // This is primarily here so that the ACK for the initial syn 
+                            // can be sent back
+                            if let Ok(()) = stream.process_incoming(packet).await {
+                                log::info!("New incoming connection!");
+                                connections.borrow_mut().insert(
+                                    StreamKey {
+                                        // Special case for initial stream setup
+                                        // Same as stream recv conn id
+                                        conn_id: packet_header.conn_id + 1,
+                                        addr,
+                                    },
+                                    stream.clone(),
+                                );
+                                chan.send(stream).unwrap();
+                            } else {
+                                // If the packet couldn't be processed
+                                // we the accept chan is reset
+                                *accept_chan.borrow_mut() = Some(chan);
+                            }
                         }
                     } else {
                         log::warn!("Connection not established prior");
