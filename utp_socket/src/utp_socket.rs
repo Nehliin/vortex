@@ -157,26 +157,30 @@ async fn process_incomming(
                                 addr,
                                 Rc::downgrade(socket),
                             );
-                            // Ensure the initial packet can be processed 
+                            // Ensure the initial packet can be processed
                             // before inserting the stream in the connections table.
-                            // This is primarily here so that the ACK for the initial syn 
+                            // This is primarily here so that the ACK for the initial syn
                             // can be sent back
-                            if let Ok(()) = stream.process_incoming(packet).await {
-                                log::info!("New incoming connection!");
-                                connections.borrow_mut().insert(
-                                    StreamKey {
-                                        // Special case for initial stream setup
-                                        // Same as stream recv conn id
-                                        conn_id: packet_header.conn_id + 1,
-                                        addr,
-                                    },
-                                    stream.clone(),
-                                );
-                                chan.send(stream).unwrap();
-                            } else {
-                                // If the packet couldn't be processed
-                                // we the accept chan is reset
-                                *accept_chan.borrow_mut() = Some(chan);
+                            match stream.process_incoming(packet).await {
+                                Ok(()) => {
+                                    log::info!("New incoming connection!");
+                                    connections.borrow_mut().insert(
+                                        StreamKey {
+                                            // Special case for initial stream setup
+                                            // Same as stream recv conn id
+                                            conn_id: packet_header.conn_id + 1,
+                                            addr,
+                                        },
+                                        stream.clone(),
+                                    );
+                                    chan.send(stream).unwrap();
+                                }
+                                Err(err) => {
+                                    log::error!("Error accepting connection: {err}");
+                                    // If the packet couldn't be processed
+                                    // we the accept chan is reset
+                                    *accept_chan.borrow_mut() = Some(chan);
+                                }
                             }
                         }
                     } else {

@@ -122,6 +122,23 @@ impl StreamState {
             extension: 0,
         }
     }
+
+    fn try_consume(&mut self, data: &[u8]) -> bool {
+        // Does the packet fit witin the receive buffer? otherwise drop it
+        if data.len() <= (self.receive_buf.len() - self.receive_buf_cursor) {
+            let cursor = self.receive_buf_cursor;
+            // TODO perhaps more of a io_uring kind of approach would make sense
+            // so copies can be avoided either here or in the read method
+            self.receive_buf[cursor..cursor + data.len()].copy_from_slice(data);
+            self.receive_buf_cursor += data.len();
+            self.our_advertised_window = (self.receive_buf.len() - self.receive_buf_cursor) as u32;
+
+            true
+        } else {
+            log::warn!("Receive buf full, packet dropped");
+            false
+        }
+    }
 }
 
 // TODO should this really be publicly derived?
@@ -545,34 +562,10 @@ impl UtpStream {
                 state.connection_state = conn_state;
             }
             (PacketType::Data, ConnectionState::Connected) => {
-                let should_ack = {
-                    let mut state = self.state_mut();
-                    // Does the packet fit witin the receive buffer? otherwise drop it
-                    if packet.data.len() <= (state.receive_buf.len() - state.receive_buf_cursor) {
-                        let cursor = state.receive_buf_cursor;
-                        // TODO perhaps more of a io_uring kind of approach would make sense
-                        // so copies can be avoided either here or in the read method
-                        state.receive_buf[cursor..cursor + packet.data.len()]
-                            .copy_from_slice(&packet.data);
-                        state.receive_buf_cursor += packet.data.len();
-                        state.our_advertised_window =
-                            (state.receive_buf.len() - state.receive_buf_cursor) as u32;
-
-                        true
-                    } else {
-                        log::warn!("Receiv buf full, packet dropped");
-                        false
-                    }
-                };
+                let should_ack = self.state_mut().try_consume(&packet.data);
                 if should_ack {
-                    log::trace!("Sending ACK");
                     self.ack_packet(packet.header.seq_nr).await?;
                 }
-                // TODOOO
-                // consume_incoming_data in libtorrent
-                // basically moves bytes over to receive buf until it's filled
-                // receive buf remaining space is our window
-                //
                 // Reset connection state if it wasn't modified
                 self.state_mut().connection_state = ConnectionState::Connected;
             }
@@ -595,6 +588,30 @@ impl UtpStream {
                 self.ack_packet(packet.header.seq_nr).await?;
                 // Reset connection state if it wasn't modified
                 self.state_mut().connection_state = ConnectionState::SynReceived;
+            }
+            (PacketType::Data, ConnectionState::SynReceived) => {
+                // At this point we have received an _inorder_ data
+                // packet which means the initial SYN (current seq_nr - 1) already has been
+                // acked and presumably been received by the sender so we can now
+                // transition into Connected state
+                let should_ack = {
+                    let mut state = self.state_mut();
+                    if state.try_consume(&packet.data) {
+                        // We are now connected!
+                        log::info!("Incoming connection established!");
+                        state.connection_state = ConnectionState::Connected;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if should_ack {
+                    self.ack_packet(packet.header.seq_nr).await?;
+                } else {
+                    anyhow::bail!(
+                        "Initial data packet doesn't fit receive buffer, stream is misconfigured"
+                    );
+                }
             }
             (p_type, conn_state) => {
                 let mut state = self.state_mut();
