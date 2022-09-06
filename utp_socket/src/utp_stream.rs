@@ -148,7 +148,7 @@ impl std::fmt::Debug for UtpStream {
 }
 
 const MTU: u32 = 1500;
-const HEADER_SIZE: usize = 20;
+const HEADER_SIZE: i32 = 20;
 
 impl UtpStream {
     pub(crate) fn new(conn_id: u16, addr: SocketAddr, weak_socket: Weak<UdpSocket>) -> Self {
@@ -268,10 +268,13 @@ impl UtpStream {
         let (header, rc) = { self.state_mut().syn_header() };
 
         log::debug!("Sending SYN");
-        self.send_packet(Packet {
-            header,
-            data: Bytes::new(),
-        })
+        self.send_packet(
+            Packet {
+                header,
+                data: Bytes::new(),
+            },
+            true,
+        )
         .await?;
         rc.await?;
         Ok(())
@@ -321,9 +324,14 @@ impl UtpStream {
         Ok(())
     }
 
-    async fn send_packet(&self, packet: Packet) -> anyhow::Result<()> {
+    async fn send_packet(&self, packet: Packet, only_once: bool) -> anyhow::Result<()> {
+        let seq_nr = packet.header.seq_nr;
         self.state_mut().outgoing_buffer.insert(packet);
         self.flush_outbuf().await?;
+        // only used for sending initial syn so far
+        if only_once {
+            self.state_mut().outgoing_buffer.remove(seq_nr);
+        }
         Ok(())
     }
 
@@ -458,7 +466,7 @@ impl UtpStream {
     }
 
     pub async fn write(&self, data: Vec<u8>) -> anyhow::Result<()> {
-        if (data.len() - HEADER_SIZE) > MTU as usize {
+        if (data.len() as i32 - HEADER_SIZE) > MTU as i32 {
             log::warn!("Fragmentation is not supported yet");
             Ok(())
         } else {
@@ -470,7 +478,7 @@ impl UtpStream {
                     data: data.into(),
                 }
             };
-            self.send_packet(packet).await
+            self.send_packet(packet, false).await
         }
     }
 
