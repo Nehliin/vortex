@@ -164,6 +164,9 @@ async fn process_incomming(
                             match stream.process_incoming(packet).await {
                                 Ok(()) => {
                                     log::info!("New incoming connection!");
+                                    // TODO: This will break silently when 
+                                    // a SYN is resent to a connection not yet 
+                                    // fully established
                                     connections.borrow_mut().insert(
                                         StreamKey {
                                             // Special case for initial stream setup

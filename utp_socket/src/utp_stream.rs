@@ -126,10 +126,11 @@ impl StreamState {
     fn try_consume(&mut self, data: &[u8]) -> bool {
         // Does the packet fit witin the receive buffer? otherwise drop it
         if data.len() <= (self.receive_buf.len() - self.receive_buf_cursor) {
-            let cursor = self.receive_buf_cursor;
+            let cursor = dbg!(self.receive_buf_cursor);
             // TODO perhaps more of a io_uring kind of approach would make sense
             // so copies can be avoided either here or in the read method
             self.receive_buf[cursor..cursor + data.len()].copy_from_slice(data);
+            dbg!(data.len());
             self.receive_buf_cursor += data.len();
             self.our_advertised_window = (self.receive_buf.len() - self.receive_buf_cursor) as u32;
 
@@ -383,17 +384,16 @@ impl UtpStream {
 
     pub(crate) async fn process_incoming(&self, packet: Packet) -> anyhow::Result<()> {
         let packet_header = packet.header;
-        let matching_conn_id = {
-            let state = self.state();
-            // Special case where the initiator might resend the SYN packet
-            // which will have conn_id - 1 of the expected id
-            if state.connection_state == ConnectionState::SynReceived {
-                packet_header.conn_id + 1 == state.conn_id_recv
-            } else {
-                packet_header.conn_id == state.conn_id_recv
-            }
+
+        // Special case where the connection have not yet 
+        // been fully established so the conn_id will be -1 
+        // for the initial SYN packet.
+        let conn_id = if packet_header.packet_type == PacketType::Syn {
+            packet_header.conn_id + 1
+        } else {
+            packet_header.conn_id
         };
-        if !matching_conn_id {
+        if self.state().conn_id_recv != conn_id && packet_header.packet_type != PacketType::Syn {
             anyhow::bail!(
                 "Received invalid packet connection id: {}, expected: {}",
                 packet_header.conn_id,
@@ -512,8 +512,10 @@ impl UtpStream {
             state.receive_buf_cursor -= len;
             buffer.len()
         } else {
+            dbg!(state.receive_buf_cursor);
+            dbg!(&state.receive_buf);
             let data_read = state.receive_buf_cursor;
-            buffer[0..state.receive_buf_cursor].copy_from_slice(&state.receive_buf[..]);
+            buffer[0..state.receive_buf_cursor].copy_from_slice(&state.receive_buf[..state.receive_buf_cursor]);
             state.receive_buf_cursor = 0;
             data_read
         }
