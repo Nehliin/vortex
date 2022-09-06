@@ -89,7 +89,6 @@ impl StreamState {
             wnd_size: self.our_advertised_window,
             extension: 0,
         };
-        self.seq_nr += 1;
         (header, rc)
     }
 
