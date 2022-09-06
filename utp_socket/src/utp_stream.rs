@@ -218,7 +218,8 @@ impl UtpStream {
                 seq_nr: rand::random::<u16>(),
                 conn_id_recv: conn_id + 1,
                 cur_window_packets: 0,
-                ack_nr: seq_nr,
+                // We have yet to ack the SYN packet
+                ack_nr: seq_nr - 1,
                 // mimic libutp without a callback set (default behavior)
                 // this is the receive buffer initial size
                 our_advertised_window: 1024 * 1024,
@@ -258,6 +259,7 @@ impl UtpStream {
                 }
             }
         });
+
         stream
     }
 
