@@ -281,18 +281,21 @@ impl UtpStream {
         // TODO avoid cloning here, perhaps an extra layer like "Outgoing packet"
         // which could also help with keeping track of resends etc. The reorder buffer needs
         // to support draining operations or a normal buffer is used instead
-        let packets: Vec<Packet> = {
+        let packets = {
             let state = self.state();
             if state.connection_state != ConnectionState::Connected
+                // (Allow for initial syn to go out) 
                 && !matches!(state.connection_state, ConnectionState::SynSent { .. })
             {
                 // not connected yet
                 log::debug!("Not yet connected, holding on to outgoing buffer");
                 return Ok(());
             }
+            let packets: Vec<Packet> = state.outgoing_buffer.iter().cloned().collect();
+            log::debug!("Flushing outgoing buffer len: {}", packets.len());
             // TODO: Since there is no filtering based on rtt here we will
             // spam the receiver until everything is acked
-            state.outgoing_buffer.iter().cloned().collect()
+            packets
         };
         if let Some(socket) = self.weak_socket.upgrade() {
             for packet in packets.into_iter() {
