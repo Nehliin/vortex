@@ -339,7 +339,7 @@ impl UtpStream {
         let packet_header = packet.header;
         let matching_conn_id = {
             let state = self.state();
-            // Special case where the initiator might resend the SYN packet 
+            // Special case where the initiator might resend the SYN packet
             // which will have conn_id - 1 of the expected id
             if state.connection_state == ConnectionState::SynReceived {
                 packet_header.conn_id + 1 == state.conn_id_recv
@@ -406,32 +406,40 @@ impl UtpStream {
             // The number of packets past the expected packet. Diff between acked
             // up until and current -1 gives 0 the meaning of this being the next
             // expected packet in the sequence.
-            packet_header.seq_nr - state.ack_nr - 1
+            packet_header.seq_nr as i32 - state.ack_nr as i32 - 1
         };
 
-        if dist_from_expected != 0 {
-            log::debug!("Got out of order packet");
-            // Out of order packet
-            self.state_mut().incoming_buffer.insert(packet);
-            return Ok(());
-        }
+        match dist_from_expected.cmp(&0) {
+            std::cmp::Ordering::Less => {
+                log::info!("Got packet already acked: {:?}", packet.header.packet_type);
+                Ok(())
+            }
+            std::cmp::Ordering::Equal => {
+                // In order data
+                // Did we receive new data?
+                let mut data_available = packet.header.packet_type == PacketType::Data;
+                self.handle_inorder_packet(packet).await?;
 
-        // Did we receive new data?
-        let mut data_available = packet.header.packet_type == PacketType::Data;
-        self.handle_inorder_packet(packet).await;
-
-        let mut seq_nr = packet_header.seq_nr;
-        // Avoid borrowing across await point
-        let get_next = |seq_nr: u16| self.state_mut().incoming_buffer.remove(seq_nr);
-        while let Some(packet) = get_next(seq_nr) {
-            data_available |= packet.header.packet_type == PacketType::Data;
-            self.handle_inorder_packet(packet).await;
-            seq_nr += 1;
+                let mut seq_nr = packet_header.seq_nr;
+                // Avoid borrowing across await point
+                let get_next = |seq_nr: u16| self.state_mut().incoming_buffer.remove(seq_nr);
+                while let Some(packet) = get_next(seq_nr) {
+                    data_available |= packet.header.packet_type == PacketType::Data;
+                    self.handle_inorder_packet(packet).await?;
+                    seq_nr += 1;
+                }
+                if data_available {
+                    self.data_available.notify_waiters();
+                }
+                Ok(())
+            }
+            std::cmp::Ordering::Greater => {
+                log::debug!("Got out of order packet");
+                // Out of order packet
+                self.state_mut().incoming_buffer.insert(packet);
+                Ok(())
+            }
         }
-        if data_available {
-            self.data_available.notify_waiters();
-        }
-        Ok(())
     }
 
     // Perhaps take ownership here instead?
@@ -482,7 +490,7 @@ impl UtpStream {
         }
     }
 
-    async fn handle_inorder_packet(&self, packet: Packet) {
+    async fn handle_inorder_packet(&self, packet: Packet) -> anyhow::Result<()> {
         let conn_state = std::mem::replace(
             &mut self.state_mut().connection_state,
             ConnectionState::Idle,
@@ -494,12 +502,12 @@ impl UtpStream {
                 state.cur_window_packets -= 1;
                 state.connection_state = ConnectionState::Connected;
                 connect_notifier.send(()).unwrap();
-
-                log::trace!("SYN_ACK");
+                // Syn is only sent once so not currently present in outgoing buffer
+                log::debug!("SYN_ACK");
             }
             (PacketType::State, conn_state) => {
                 let mut state = self.state_mut();
-                log::trace!("Received ACK: {}", self.addr);
+                log::debug!("Received ACK: {}", self.addr);
                 if state.outgoing_buffer.remove(packet.header.ack_nr).is_none() {
                     log::error!("Recevied ack for packet not inside the outgoing_buffer");
                 }
@@ -507,11 +515,9 @@ impl UtpStream {
                 // Reset connection state if it wasn't modified
                 state.connection_state = conn_state;
             }
-            (PacketType::Data, conn_state) => {
-                let packet = {
+            (PacketType::Data, ConnectionState::Connected) => {
+                let should_ack = {
                     let mut state = self.state_mut();
-                    // in order packet
-                    state.ack_nr = packet.header.seq_nr;
                     // Does the packet fit witin the receive buffer? otherwise drop it
                     if packet.data.len() <= (state.receive_buf.len() - state.receive_buf_cursor) {
                         let cursor = state.receive_buf_cursor;
@@ -523,20 +529,15 @@ impl UtpStream {
                         state.our_advertised_window =
                             (state.receive_buf.len() - state.receive_buf_cursor) as u32;
 
-                        log::trace!("Sending ACK");
-                        let header = state.ack();
-                        state.connection_state = conn_state;
-                        Some(Packet {
-                            header,
-                            data: Bytes::new(),
-                        })
+                        true
                     } else {
                         log::warn!("Receiv buf full, packet dropped");
-                        None
+                        false
                     }
                 };
-                if let Some(packet) = packet {
-                    self.send_packet(packet).await.unwrap();
+                if should_ack {
+                    log::trace!("Sending ACK");
+                    self.ack_packet(packet.header.seq_nr).await?;
                 }
                 // TODOOO
                 // consume_incoming_data in libtorrent
@@ -544,6 +545,7 @@ impl UtpStream {
                 // receive buf remaining space is our window
                 //
                 // Reset connection state if it wasn't modified
+                self.state_mut().connection_state = ConnectionState::Connected;
             }
             (PacketType::Fin, conn_state) => {
                 let mut state = self.state_mut();
@@ -563,6 +565,7 @@ impl UtpStream {
                 state.connection_state = conn_state;
             }
         }
+        Ok(())
     }
 
     pub(crate) fn state_mut(&self) -> RefMut<'_, StreamState> {
