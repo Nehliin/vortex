@@ -335,6 +335,35 @@ impl UtpStream {
         Ok(())
     }
 
+    async fn ack_packet(&self, seq_nr: u16) -> anyhow::Result<()> {
+        if let Some(socket) = self.weak_socket.upgrade() {
+            // TODO: potentially have an buffer of pending acks here and send
+            // at once much like in the flush outbuf impl, perhaps possible
+            // to then also share more code.
+            // TODO ofc the entire packet and not only the header should be sent
+
+            // No need to wrap the header in a packet struct
+            // since the body is always empty here
+            let ack_header = {
+                let mut state = self.state_mut();
+                state.ack_nr = seq_nr;
+                state.ack()
+            };
+            let packet_bytes = ack_header.to_bytes();
+            log::debug!(
+                "Sending Ack bytes: {} to addr: {}",
+                packet_bytes.len(),
+                self.addr,
+            );
+            // reuse buf?
+            let (result, _buf) = socket.send_to(packet_bytes, self.addr).await;
+            let _ = result?;
+        } else {
+            anyhow::bail!("Failed to ack packets, socket dropped");
+        }
+        Ok(())
+    }
+
     pub(crate) async fn process_incoming(&self, packet: Packet) -> anyhow::Result<()> {
         let packet_header = packet.header;
         let matching_conn_id = {
