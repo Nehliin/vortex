@@ -587,6 +587,15 @@ impl UtpStream {
                 // Reset connection state if it wasn't modified
                 state.connection_state = conn_state;
             }
+            (PacketType::Syn, ConnectionState::SynReceived) => {
+                // A bit confusing but SynReceived is the state
+                // set when creating the stream because a syn was received
+                // even though it has yet to be handled (acked)
+                log::debug!("Acking received SYN");
+                self.ack_packet(packet.header.seq_nr).await?;
+                // Reset connection state if it wasn't modified
+                self.state_mut().connection_state = ConnectionState::SynReceived;
+            }
             (p_type, conn_state) => {
                 let mut state = self.state_mut();
                 log::error!("Unhandled packet type!: {:?}", p_type);
