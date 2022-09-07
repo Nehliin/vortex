@@ -6,7 +6,7 @@ use tokio_uring::net::UdpSocket;
 
 use crate::{
     utp_packet::{Packet, PacketHeader, PacketType},
-    utp_stream::UtpStream,
+    utp_stream::{UtpStream, HEADER_SIZE},
 };
 
 // Conceptually there is a single socket that handles multiple connections
@@ -135,7 +135,7 @@ async fn process_incomming(
 
                     let packet = Packet {
                         header: packet_header,
-                        data: Bytes::copy_from_slice(&buf[recv..]),
+                        data: Bytes::copy_from_slice(&buf[HEADER_SIZE as usize..recv]),
                     };
 
                     let maybe_stream = { connections.borrow_mut().remove(&key) };

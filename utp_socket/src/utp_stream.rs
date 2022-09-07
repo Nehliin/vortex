@@ -126,14 +126,12 @@ impl StreamState {
     fn try_consume(&mut self, data: &[u8]) -> bool {
         // Does the packet fit witin the receive buffer? otherwise drop it
         if data.len() <= (self.receive_buf.len() - self.receive_buf_cursor) {
-            let cursor = dbg!(self.receive_buf_cursor);
+            let cursor = self.receive_buf_cursor;
             // TODO perhaps more of a io_uring kind of approach would make sense
             // so copies can be avoided either here or in the read method
             self.receive_buf[cursor..cursor + data.len()].copy_from_slice(data);
-            dbg!(data.len());
             self.receive_buf_cursor += data.len();
             self.our_advertised_window = (self.receive_buf.len() - self.receive_buf_cursor) as u32;
-
             true
         } else {
             log::warn!("Receive buf full, packet dropped");
@@ -166,7 +164,7 @@ impl std::fmt::Debug for UtpStream {
 }
 
 const MTU: u32 = 1500;
-const HEADER_SIZE: i32 = 20;
+pub const HEADER_SIZE: i32 = 20;
 
 impl UtpStream {
     pub(crate) fn new(conn_id: u16, addr: SocketAddr, weak_socket: Weak<UdpSocket>) -> Self {
@@ -320,8 +318,9 @@ impl UtpStream {
         };
         if let Some(socket) = self.weak_socket.upgrade() {
             for packet in packets.into_iter() {
-                // TODO ofc the entire packet and not only the header should be sent
-                let packet_bytes = packet.header.to_bytes();
+                let mut packet_bytes = vec![0; HEADER_SIZE as usize + packet.data.len()];
+                packet_bytes[..HEADER_SIZE as usize].copy_from_slice(&packet.header.to_bytes());
+                packet_bytes[HEADER_SIZE as usize..].copy_from_slice(&packet.data);
                 log::debug!(
                     "Sending {:?} bytes: {} to addr: {}",
                     packet.header.packet_type,
@@ -385,8 +384,8 @@ impl UtpStream {
     pub(crate) async fn process_incoming(&self, packet: Packet) -> anyhow::Result<()> {
         let packet_header = packet.header;
 
-        // Special case where the connection have not yet 
-        // been fully established so the conn_id will be -1 
+        // Special case where the connection have not yet
+        // been fully established so the conn_id will be -1
         // for the initial SYN packet.
         let conn_id = if packet_header.packet_type == PacketType::Syn {
             packet_header.conn_id + 1
@@ -497,6 +496,8 @@ impl UtpStream {
         // new data is received.
         loop {
             let data_available = { self.state().receive_buf_cursor };
+            // Check connection state here as well so connections can 
+            // be properly terminated 
             if data_available == 0 {
                 self.data_available.notified().await;
             } else {
@@ -512,10 +513,9 @@ impl UtpStream {
             state.receive_buf_cursor -= len;
             buffer.len()
         } else {
-            dbg!(state.receive_buf_cursor);
-            dbg!(&state.receive_buf);
             let data_read = state.receive_buf_cursor;
-            buffer[0..state.receive_buf_cursor].copy_from_slice(&state.receive_buf[..state.receive_buf_cursor]);
+            buffer[0..state.receive_buf_cursor]
+                .copy_from_slice(&state.receive_buf[..state.receive_buf_cursor]);
             state.receive_buf_cursor = 0;
             data_read
         }
