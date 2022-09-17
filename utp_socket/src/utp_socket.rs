@@ -6,7 +6,7 @@ use tokio_uring::net::UdpSocket;
 
 use crate::{
     utp_packet::{Packet, PacketHeader, PacketType},
-    utp_stream::{UtpStream, HEADER_SIZE},
+    utp_stream::{UtpStream, WeakUtpStream, HEADER_SIZE},
 };
 
 // Conceptually there is a single socket that handles multiple connections
@@ -17,7 +17,7 @@ pub struct UtpSocket {
     socket: Rc<UdpSocket>,
     shutdown_signal: Option<tokio::sync::oneshot::Sender<()>>,
     accept_chan: Rc<RefCell<Option<tokio::sync::oneshot::Sender<UtpStream>>>>,
-    streams: Rc<RefCell<HashMap<StreamKey, UtpStream>>>,
+    streams: Rc<RefCell<HashMap<StreamKey, WeakUtpStream>>>,
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
@@ -82,7 +82,9 @@ impl UtpSocket {
         }
 
         let stream = UtpStream::new(stream_key.conn_id, addr, Rc::downgrade(&self.socket));
-        self.streams.borrow_mut().insert(stream_key, stream.clone());
+        self.streams
+            .borrow_mut()
+            .insert(stream_key, stream.clone().into());
 
         stream.connect().await?;
 
@@ -101,7 +103,6 @@ impl UtpSocket {
 
 impl Drop for UtpSocket {
     fn drop(&mut self) {
-        log::debug!("Shutting down socket net noop");
         let _ = self.shutdown_signal.take().unwrap().send(());
     }
 }
@@ -118,7 +119,7 @@ impl Drop for UtpSocket {
 // the incoming task could keep a channel of acks received that can be removed from resend buf
 async fn process_incomming(
     socket: &Rc<UdpSocket>,
-    connections: &Rc<RefCell<HashMap<StreamKey, UtpStream>>>,
+    connections: &Rc<RefCell<HashMap<StreamKey, WeakUtpStream>>>,
     accept_chan: &Rc<RefCell<Option<tokio::sync::oneshot::Sender<UtpStream>>>>,
     recv_buf: Vec<u8>,
 ) -> Vec<u8> {
@@ -139,13 +140,15 @@ async fn process_incomming(
                     };
 
                     let maybe_stream = { connections.borrow_mut().remove(&key) };
-                    if let Some(stream) = maybe_stream {
-                        match stream.process_incoming(packet).await {
-                            Ok(()) => {
-                                connections.borrow_mut().insert(key, stream);
-                            }
-                            Err(err) => {
-                                log::error!("Error: Failed processing incoming packet: {err}");
+                    if let Some(weak_stream) = maybe_stream {
+                        if let Some(stream) = weak_stream.try_upgrade() {
+                            match stream.process_incoming(packet).await {
+                                Ok(()) => {
+                                    connections.borrow_mut().insert(key, stream.into());
+                                }
+                                Err(err) => {
+                                    log::error!("Error: Failed processing incoming packet: {err}");
+                                }
                             }
                         }
                     } else if packet_header.packet_type == PacketType::Syn {
@@ -164,8 +167,8 @@ async fn process_incomming(
                             match stream.process_incoming(packet).await {
                                 Ok(()) => {
                                     log::info!("New incoming connection!");
-                                    // TODO: This will break silently when 
-                                    // a SYN is resent to a connection not yet 
+                                    // TODO: This will break silently when
+                                    // a SYN is resent to a connection not yet
                                     // fully established
                                     connections.borrow_mut().insert(
                                         StreamKey {
@@ -174,7 +177,7 @@ async fn process_incomming(
                                             conn_id: packet_header.conn_id + 1,
                                             addr,
                                         },
-                                        stream.clone(),
+                                        stream.clone().into(),
                                     );
                                     chan.send(stream).unwrap();
                                 }

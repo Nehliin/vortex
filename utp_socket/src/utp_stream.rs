@@ -153,6 +153,43 @@ pub struct UtpStream {
     data_available: Rc<Notify>,
 }
 
+// Used in UtpSocket so that dropped streams
+// can be detected and everything can properly
+// be destroyed.
+pub(crate) struct WeakUtpStream {
+    inner: Weak<RefCell<StreamState>>,
+    // The adder the stream is connected to
+    addr: SocketAddr,
+    weak_socket: Weak<UdpSocket>,
+    // Used to notify pending readers that
+    // there is data available to read
+    // (This could be adapted to work single threaded but needs custom impl)
+    data_available: Rc<Notify>,
+}
+
+impl WeakUtpStream {
+    pub(crate) fn try_upgrade(&self) -> Option<UtpStream> {
+        self.inner.upgrade().map(|inner| UtpStream {
+            inner,
+            addr: self.addr,
+            weak_socket: self.weak_socket.clone(),
+            data_available: self.data_available.clone(),
+        })
+    }
+}
+
+impl From<UtpStream> for WeakUtpStream {
+    fn from(stream: UtpStream) -> Self {
+        WeakUtpStream {
+            inner: Rc::downgrade(&stream.inner),
+            addr: stream.addr,
+            // Can't move because of drop impl
+            weak_socket: stream.weak_socket.clone(),
+            data_available: stream.data_available.clone(),
+        }
+    }
+}
+
 impl std::fmt::Debug for UtpStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UtpStream")
@@ -636,9 +673,10 @@ impl UtpStream {
 
 impl Drop for UtpStream {
     fn drop(&mut self) {
-        // Only shutdown if this is the last clone
-        if Rc::strong_count(&self.inner) == 1 {
-            // TODO notify the socket so the stream can be removed from the stream map?
+        // Only shutdown if this + the stream used in the send loop are the last clone
+        if dbg!(Rc::strong_count(&self.inner)) == 2 {
+            // The socket will detect that the inner state have been dropped
+            // after the send loop have shutdown and remove it from the map
             let _ = self.state_mut().shutdown_signal.take().unwrap().send(());
         }
     }
