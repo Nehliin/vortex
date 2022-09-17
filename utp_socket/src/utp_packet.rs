@@ -1,5 +1,7 @@
 use bytes::{Buf, Bytes, BytesMut};
 
+pub const HEADER_SIZE: i32 = 20;
+
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PacketType {
@@ -97,6 +99,11 @@ impl Packet {
         self.header.packet_type == PacketType::Data
             || self.header.packet_type == PacketType::Fin
             || self.header.packet_type == PacketType::Syn
+    }
+
+    pub fn size(&self) -> u32 {
+        debug_assert!(self.data.len() < u32::MAX as usize);
+        HEADER_SIZE as u32 + self.data.len() as u32
     }
 }
 

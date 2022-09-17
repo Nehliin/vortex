@@ -5,8 +5,8 @@ use bytes::Bytes;
 use tokio_uring::net::UdpSocket;
 
 use crate::{
-    utp_packet::{Packet, PacketHeader, PacketType},
-    utp_stream::{UtpStream, WeakUtpStream, HEADER_SIZE},
+    utp_packet::{Packet, PacketHeader, PacketType, HEADER_SIZE},
+    utp_stream::{UtpStream, WeakUtpStream },
 };
 
 // Conceptually there is a single socket that handles multiple connections

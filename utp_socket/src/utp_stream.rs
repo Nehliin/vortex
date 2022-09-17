@@ -11,7 +11,7 @@ use tokio_uring::net::UdpSocket;
 
 use crate::{
     reorder_buffer::ReorderBuffer,
-    utp_packet::{get_microseconds, Packet, PacketHeader, PacketType},
+    utp_packet::{get_microseconds, Packet, PacketHeader, PacketType, HEADER_SIZE},
 };
 
 #[derive(Debug)]
@@ -47,9 +47,10 @@ pub(crate) struct StreamState {
     pub(crate) conn_id_recv: u16,
     // Connection id for packets I send
     pub(crate) conn_id_send: u16,
-    // Current amount of packets sent but not acked
-    pub(crate) cur_window_packets: u16,
+    // Current amount of bytes sent but not acked
+    pub(crate) cur_window: u32,
     // Last received window this socket advertised in bytes
+    pub(crate) max_window: u32,
     pub(crate) our_advertised_window: u32,
     pub(crate) their_advertised_window: u32,
     // Last delay measurement from other endpoint
@@ -138,6 +139,11 @@ impl StreamState {
             false
         }
     }
+
+    #[inline(always)]
+    fn stream_window_size(&self) -> u32 {
+        std::cmp::min(self.max_window, self.their_advertised_window)
+    }
 }
 
 // TODO should this really be publicly derived?
@@ -201,7 +207,6 @@ impl std::fmt::Debug for UtpStream {
 }
 
 const MTU: u32 = 1250;
-pub const HEADER_SIZE: i32 = 20;
 
 impl UtpStream {
     pub(crate) fn new(conn_id: u16, addr: SocketAddr, weak_socket: Weak<UdpSocket>) -> Self {
@@ -212,7 +217,8 @@ impl UtpStream {
                 // start from 1 for compability with older clients but not as secure
                 seq_nr: rand::random::<u16>(),
                 conn_id_recv: conn_id,
-                cur_window_packets: 0,
+                cur_window: 0,
+                max_window: MTU,
                 ack_nr: 0,
                 // mimic libutp without a callback set (default behavior)
                 // this is the receive buffer initial size
@@ -269,7 +275,8 @@ impl UtpStream {
                 // start from 1 for compability with older clients but not as secure
                 seq_nr: rand::random::<u16>(),
                 conn_id_recv: conn_id + 1,
-                cur_window_packets: 0,
+                cur_window: 0,
+                max_window: MTU,
                 // We have yet to ack the SYN packet
                 ack_nr: seq_nr - 1,
                 // mimic libutp without a callback set (default behavior)
@@ -355,13 +362,21 @@ impl UtpStream {
         };
         if let Some(socket) = self.weak_socket.upgrade() {
             for packet in packets.into_iter() {
+                {
+                    let state = self.state();
+                    if state.cur_window + packet.size() > state.stream_window_size()  {
+                        log::warn!("Window to small to send packet, skipping");
+                        continue;
+                    }
+                }
                 let mut packet_bytes = vec![0; HEADER_SIZE as usize + packet.data.len()];
                 packet_bytes[..HEADER_SIZE as usize].copy_from_slice(&packet.header.to_bytes());
                 packet_bytes[HEADER_SIZE as usize..].copy_from_slice(&packet.data);
+                let bytes_sent = packet_bytes.len();
                 log::debug!(
                     "Sending {:?} bytes: {} to addr: {}",
                     packet.header.packet_type,
-                    packet_bytes.len(),
+                    bytes_sent,
                     self.addr,
                 );
                 // reuse buf?
@@ -370,7 +385,8 @@ impl UtpStream {
                 let mut state = self.state_mut();
                 // Might be certain situations where this shouldn't be appended?
                 // seems like only ST_DATA and ST_FIN. Also count bytes instead of packets
-                state.cur_window_packets += 1;
+                debug_assert!(bytes_sent < u32::MAX as usize);
+                state.cur_window += bytes_sent as u32;
             }
         } else {
             anyhow::bail!("Failed to send packets, socket dropped");
@@ -417,6 +433,9 @@ impl UtpStream {
         }
         Ok(())
     }
+
+    // TODO (do_ledbat)
+    fn adjust_max_window(&mut self) {}
 
     pub(crate) async fn process_incoming(&self, packet: Packet) -> anyhow::Result<()> {
         let packet_header = packet.header;
@@ -584,7 +603,7 @@ impl UtpStream {
             // Outgoing connection completion
             (PacketType::State, ConnectionState::SynSent { connect_notifier }) => {
                 let mut state = self.state_mut();
-                state.cur_window_packets -= 1;
+                state.cur_window -= packet.size();
                 state.connection_state = ConnectionState::Connected;
                 connect_notifier.send(()).unwrap();
                 // Syn is only sent once so not currently present in outgoing buffer
@@ -593,10 +612,10 @@ impl UtpStream {
             (PacketType::State, conn_state) => {
                 let mut state = self.state_mut();
                 log::debug!("Received ACK: {}", self.addr);
+                state.cur_window -= packet.size();
                 if state.outgoing_buffer.remove(packet.header.ack_nr).is_none() {
                     log::error!("Recevied ack for packet not inside the outgoing_buffer");
                 }
-                //state.cur_window_packets -= 1;
                 // Reset connection state if it wasn't modified
                 state.connection_state = conn_state;
             }
