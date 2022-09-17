@@ -200,7 +200,7 @@ impl std::fmt::Debug for UtpStream {
     }
 }
 
-const MTU: u32 = 1500;
+const MTU: u32 = 1250;
 pub const HEADER_SIZE: i32 = 20;
 
 impl UtpStream {
@@ -533,8 +533,8 @@ impl UtpStream {
         // new data is received.
         loop {
             let data_available = { self.state().receive_buf_cursor };
-            // Check connection state here as well so connections can 
-            // be properly terminated 
+            // Check connection state here as well so connections can
+            // be properly terminated
             if data_available == 0 {
                 self.data_available.notified().await;
             } else {
