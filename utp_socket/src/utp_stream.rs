@@ -696,7 +696,27 @@ impl Drop for UtpStream {
         if dbg!(Rc::strong_count(&self.inner)) == 2 {
             // The socket will detect that the inner state have been dropped
             // after the send loop have shutdown and remove it from the map
-            let _ = self.state_mut().shutdown_signal.take().unwrap().send(());
+            self.state_mut()
+                .shutdown_signal
+                .take()
+                .unwrap()
+                .send(())
+                .unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tokio_uring::net::UdpSocket;
+
+    #[test]
+    fn does_shutdown() {
+        tokio_uring::start(async move {
+            let socket = Rc::new(UdpSocket::bind("0.0.0.0:1336".parse().unwrap()).await.unwrap());
+            let stream = UtpStream::new(1, "0.0.0.0:1337".parse().unwrap(), Rc::downgrade(&socket));
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        });
     }
 }
