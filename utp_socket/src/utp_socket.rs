@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::HashMap, net::SocketAddr, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{hash_map::Entry, HashMap},
+    net::SocketAddr,
+    rc::Rc,
+};
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -6,7 +11,7 @@ use tokio_uring::net::UdpSocket;
 
 use crate::{
     utp_packet::{Packet, PacketHeader, PacketType, HEADER_SIZE},
-    utp_stream::{UtpStream, WeakUtpStream },
+    utp_stream::{UtpStream, WeakUtpStream},
 };
 
 // Conceptually there is a single socket that handles multiple connections
@@ -103,7 +108,8 @@ impl UtpSocket {
 
 impl Drop for UtpSocket {
     fn drop(&mut self) {
-        let _ = self.shutdown_signal.take().unwrap().send(());
+        println!("dropping");
+        self.shutdown_signal.take().unwrap().send(()).unwrap();
     }
 }
 
@@ -160,33 +166,41 @@ async fn process_incomming(
                                 addr,
                                 Rc::downgrade(socket),
                             );
-                            // Ensure the initial packet can be processed
-                            // before inserting the stream in the connections table.
-                            // This is primarily here so that the ACK for the initial syn
-                            // can be sent back
-                            match stream.process_incoming(packet).await {
-                                Ok(()) => {
-                                    log::info!("New incoming connection!");
-                                    // TODO: This will break silently when
-                                    // a SYN is resent to a connection not yet
-                                    // fully established
-                                    connections.borrow_mut().insert(
-                                        StreamKey {
-                                            // Special case for initial stream setup
-                                            // Same as stream recv conn id
-                                            conn_id: packet_header.conn_id + 1,
-                                            addr,
-                                        },
-                                        stream.clone().into(),
-                                    );
-                                    chan.send(stream).unwrap();
+                            let stream_key = StreamKey {
+                                // Special case for initial stream setup
+                                // Same as stream recv conn id
+                                conn_id: packet_header.conn_id + 1,
+                                addr,
+                            };
+                            // Ensure the connection doesn't conflict with an already 
+                            // existing connection before accepting it.
+                            {
+                                let mut connections = connections.borrow_mut();
+                                let entry = connections.entry(stream_key);
+                                match entry {
+                                    Entry::Occupied(_) => {
+                                        log::warn!("Connection with id: {} already exists. Dropping connection",
+                                            packet_header.conn_id + 1
+                                        );
+                                        return buf;
+                                    }
+                                    Entry::Vacant(entry) => {
+                                        log::info!("New incoming connection!");
+                                        entry.insert(stream.clone().into());
+                                    }
                                 }
-                                Err(err) => {
-                                    log::error!("Error accepting connection: {err}");
-                                    // If the packet couldn't be processed
-                                    // we the accept chan is reset
-                                    *accept_chan.borrow_mut() = Some(chan);
-                                }
+                            }
+
+                            // Remove the connection if the inital syn couldn't be processed 
+                            if let Err(err) = stream.process_incoming(packet).await {
+                                log::error!("Error accepting connection: {err}");
+                                // If the packet couldn't be processed
+                                // we the accept chan is reset and the stream is removed from
+                                // the connection map
+                                *accept_chan.borrow_mut() = Some(chan);
+                                connections.borrow_mut().remove(&stream_key);
+                            } else {
+                                chan.send(stream).unwrap();
                             }
                         }
                     } else {
