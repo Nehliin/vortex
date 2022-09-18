@@ -364,7 +364,7 @@ impl UtpStream {
             for packet in packets.into_iter() {
                 {
                     let state = self.state();
-                    if state.cur_window + packet.size() > state.stream_window_size()  {
+                    if state.cur_window + packet.size() > state.stream_window_size() {
                         log::warn!("Window to small to send packet, skipping");
                         continue;
                     }
