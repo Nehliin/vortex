@@ -170,7 +170,9 @@ impl ReorderBuffer {
     pub fn is_empty(&self) -> bool {
         let empty = self.buffer[self.first].is_none();
         // santiy check
-        debug_assert!(self.buffer[self.last].is_none());
+        if empty {
+            debug_assert!(self.buffer[self.last].is_none());
+        }
         empty
     }
 
@@ -180,16 +182,14 @@ impl ReorderBuffer {
             Box::new(
                 self.buffer[self.first..self.last + 1]
                     .iter()
-                    .filter(|maybe_packet| maybe_packet.is_some())
-                    .map(|maybe_packet| maybe_packet.as_ref().unwrap()),
+                    .filter_map(|maybe_packet| maybe_packet.as_ref()),
             )
         } else {
             Box::new(
                 self.buffer[self.first..]
                     .iter()
-                    .chain(self.buffer[..self.last].iter())
-                    .filter(|maybe_packet| maybe_packet.is_some())
-                    .map(|maybe_packet| maybe_packet.as_ref().unwrap()),
+                    .chain(self.buffer[..self.last + 1].iter())
+                    .filter_map(|maybe_packet| maybe_packet.as_ref()),
             )
         }
     }
