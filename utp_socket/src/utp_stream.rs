@@ -482,18 +482,6 @@ impl UtpStream {
 
             // TODO: handle eof
 
-            if syn_sent {
-                // This must be a syn-ack and the state ack_nr is initialzied here
-                // to match the seq_nr received from the other end since this is the first
-                // nr of the connection. I suspect this is initialzied early because
-                // packets may be received out of order.
-                //
-                // Ah yes the ack_nr just indicates that we've (since this is the state
-                // ack_nr) acked up until and including the SYN
-                // packet since we don't always start from 1
-                state.ack_nr = packet_header.seq_nr - 1;
-            }
-
             let their_delay = if packet_header.timestamp_microseconds == 0 {
                 // I supose this is for incoming traffic that wants to open
                 // new connections?
@@ -504,10 +492,17 @@ impl UtpStream {
             };
             state.reply_micro = their_delay as u32;
             state.their_advertised_window = packet_header.wnd_size;
-            // The number of packets past the expected packet. Diff between acked
-            // up until and current -1 gives 0 the meaning of this being the next
-            // expected packet in the sequence.
-            packet_header.seq_nr as i32 - state.ack_nr as i32 - 1
+
+            if syn_sent {
+                // If we have sent a syn packet and are awaiting responses all packet header
+                // sequence numbers are "expected" since connection have yet to be established
+                0
+            } else {
+                // The number of packets past the expected packet. Diff between acked
+                // up until and current -1 gives 0 the meaning of this being the next
+                // expected packet in the sequence.
+                packet_header.seq_nr as i32 - state.ack_nr as i32 - 1
+            }
         };
 
         match dist_from_expected.cmp(&0) {
@@ -601,23 +596,23 @@ impl UtpStream {
         );
         match (packet.header.packet_type, conn_state) {
             // Outgoing connection completion
-            (PacketType::State, ConnectionState::SynSent { connect_notifier }) => {
-                let mut state = self.state_mut();
-                state.cur_window -= packet.size();
-                state.connection_state = ConnectionState::Connected;
-                connect_notifier.send(()).unwrap();
-                // Syn is only sent once so not currently present in outgoing buffer
-                log::debug!("SYN_ACK");
-            }
             (PacketType::State, conn_state) => {
                 let mut state = self.state_mut();
-                log::debug!("Received ACK: {}", self.addr);
                 state.cur_window -= packet.size();
-                if state.outgoing_buffer.remove(packet.header.ack_nr).is_none() {
-                    log::error!("Recevied ack for packet not inside the outgoing_buffer");
+                state.ack_nr = packet.header.seq_nr;
+
+                if let ConnectionState::SynSent { connect_notifier } = conn_state {
+                    state.connection_state = ConnectionState::Connected;
+                    connect_notifier.send(()).unwrap();
+                    // Syn is only sent once so not currently present in outgoing buffer
+                    log::debug!("SYN_ACK");
+                } else {
+                    if state.outgoing_buffer.remove(packet.header.ack_nr).is_none() {
+                        log::error!("Recevied ack for packet not inside the outgoing_buffer");
+                    }
+                    // Reset connection state if it wasn't modified
+                    state.connection_state = conn_state;
                 }
-                // Reset connection state if it wasn't modified
-                state.connection_state = conn_state;
             }
             (PacketType::Data, ConnectionState::Connected) => {
                 let should_ack = self.state_mut().try_consume(&packet.data);
