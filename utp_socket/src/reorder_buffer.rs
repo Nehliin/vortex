@@ -176,6 +176,15 @@ impl ReorderBuffer {
         empty
     }
 
+    pub fn len(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            self.iter().count()
+        }
+
+    }
+
     // TODO remove allocations from this
     pub fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Packet> + 'a> {
         if self.first <= self.last {
@@ -316,6 +325,7 @@ mod test {
         assert_eq!(packet.header.seq_nr as usize, 3);
         let packet = buffer.get(4).unwrap();
         assert_eq!(packet.header.seq_nr as usize, 4);
+        assert_eq!(buffer.len(), 3);
     }
 
     #[test]
@@ -374,6 +384,7 @@ mod test {
         assert_eq!(packet.header.seq_nr as usize, 253);
         let packet = buffer.get(747).unwrap();
         assert_eq!(packet.header.seq_nr as usize, 747);
+        assert_eq!(buffer.len(), 3);
     }
 
     #[test]
@@ -417,6 +428,7 @@ mod test {
         assert_eq!(packet.header.seq_nr as usize, 245);
         let packet = buffer.get(922).unwrap();
         assert_eq!(packet.header.seq_nr as usize, 922);
+        assert_eq!(buffer.len(), 2);
     }
 
     #[test]
@@ -456,6 +468,7 @@ mod test {
         assert_eq!(packet.header.seq_nr, 2570);
         let packet = buffer.get(2698).unwrap();
         assert_eq!(packet.header.seq_nr, 2698);
+        assert_eq!(buffer.len(), 2);
     }
 
     #[test]
@@ -485,6 +498,7 @@ mod test {
             let packet = buffer.get(*seq_nr).unwrap();
             assert_eq!(packet.header.seq_nr, *seq_nr as u16);
         }
+        assert_eq!(buffer.len(), 4);
     }
 
     #[test]
@@ -510,12 +524,14 @@ mod test {
 
         assert!(buffer.get(8).is_none());
         assert!(buffer.get(5).is_none());
+        assert_eq!(buffer.len(), 3);
 
         for seq_nr in input.iter() {
             let packet = buffer.remove(*seq_nr).unwrap();
             assert_eq!(packet.header.seq_nr, *seq_nr as u16);
         }
 
+        assert_eq!(buffer.len(), 0);
         for seq_nr in input.iter() {
             assert!(buffer.get(*seq_nr).is_none());
         }
@@ -544,12 +560,13 @@ mod test {
                 data: Bytes::new(),
             });
         }
-
+        assert_eq!(buffer.len(), 2);
         for seq_nr in input.iter() {
             let packet = buffer.remove(*seq_nr).unwrap();
             assert_eq!(packet.header.seq_nr, *seq_nr as u16);
         }
 
+        assert_eq!(buffer.len(), 0);
         for seq_nr in input.iter() {
             assert!(buffer.get(*seq_nr).is_none());
         }
@@ -579,11 +596,13 @@ mod test {
             });
         }
 
+        assert_eq!(buffer.len(), 3);
         for seq_nr in input.iter() {
             let packet = buffer.remove(*seq_nr).unwrap();
             assert_eq!(packet.header.seq_nr, *seq_nr as u16);
         }
 
+        assert_eq!(buffer.len(), 0);
         for seq_nr in input.iter() {
             assert!(buffer.get(*seq_nr).is_none());
         }
