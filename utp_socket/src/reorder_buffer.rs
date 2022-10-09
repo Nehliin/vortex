@@ -182,7 +182,6 @@ impl ReorderBuffer {
         } else {
             self.iter().count()
         }
-
     }
 
     // TODO remove allocations from this

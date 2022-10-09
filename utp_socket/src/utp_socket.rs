@@ -172,7 +172,7 @@ async fn process_incomming(
                                 conn_id: packet_header.conn_id + 1,
                                 addr,
                             };
-                            // Ensure the connection doesn't conflict with an already 
+                            // Ensure the connection doesn't conflict with an already
                             // existing connection before accepting it.
                             {
                                 let mut connections = connections.borrow_mut();
@@ -191,7 +191,7 @@ async fn process_incomming(
                                 }
                             }
 
-                            // Remove the connection if the inital syn couldn't be processed 
+                            // Remove the connection if the inital syn couldn't be processed
                             if let Err(err) = stream.process_incoming(packet).await {
                                 log::error!("Error accepting connection: {err}");
                                 // If the packet couldn't be processed
