@@ -207,6 +207,80 @@ fn basic_acking() {
     });
 }
 
+#[test]
+fn out_of_order_acks() {
+    tokio_uring::start(async move {
+        let (_socket, stream, pkt_rc) = setup_connected_stream(200).await;
+        // The id used to send data back to the stream after SYN-ACK
+        let conn_id_send = stream.state().conn_id_recv;
+        let rc_seq_nr = stream.state().ack_nr;
+        let old_seq_nr = stream.state().seq_nr;
+
+        // Connected -----------------------------------
+        stream.write(vec![1; 30]).await.unwrap();
+        assert_eq!(stream.state().outgoing_buffer.len(), 1);
+        assert_eq!(stream.state().seq_nr, old_seq_nr + 1);
+        stream.write(vec![2; 30]).await.unwrap();
+        assert_eq!(stream.state().outgoing_buffer.len(), 2);
+        assert_eq!(stream.state().seq_nr, old_seq_nr + 2);
+
+        let mut pkt_stream = ReceiverStream::new(pkt_rc);
+        let pkt = pkt_stream.next().await.unwrap();
+        assert_eq!(pkt.header.seq_nr, old_seq_nr + 1);
+        assert_eq!(pkt.data, vec![1; 30]);
+        // The first packet might have been resent since it has yet to have been acked
+        // TODO this should be fixed by rtt calculation
+        let pkt_2 = pkt_stream
+            .filter(|pkt| pkt.header.seq_nr != old_seq_nr + 1)
+            .next()
+            .await
+            .unwrap();
+        assert_eq!(pkt_2.header.seq_nr, old_seq_nr + 2);
+        assert_eq!(pkt_2.data, vec![2; 30]);
+
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr,
+                    ack_nr: pkt_2.header.seq_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::State,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: get_microseconds() as u32
+                        - pkt.header.timestamp_microseconds,
+                    wnd_size: 123,
+                    extension: 0,
+                },
+                data: Bytes::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(stream.state().outgoing_buffer.len(), 1);
+        assert!(stream.state().outgoing_buffer.get(old_seq_nr + 1).is_some());
+
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr,
+                    ack_nr: pkt.header.seq_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::State,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: get_microseconds() as u32
+                        - pkt.header.timestamp_microseconds,
+                    wnd_size: 123,
+                    extension: 0,
+                },
+                data: Bytes::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(stream.state().outgoing_buffer.len(), 0);
+    });
+}
+
 const LOREM_IPSUM: &[u8] = br#"
       Lorem ipsum dolor sit amet, consectetur adipiscing elit, 
       sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. 
@@ -216,9 +290,9 @@ const LOREM_IPSUM: &[u8] = br#"
       cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum"#;
 
 #[test]
-fn respects_stream_window_size() {
+fn handles_increasing_window_size() {
     tokio_uring::start(async move {
-        let (_socket, stream, pkt_rc) = setup_connected_stream().await;
+        let (_socket, stream, pkt_rc) = setup_connected_stream(90).await;
         // The id used to send data back to the stream after SYN-ACK
         let conn_id_send = stream.state().conn_id_recv;
         let rc_seq_nr = stream.state().ack_nr;
@@ -251,16 +325,67 @@ fn respects_stream_window_size() {
                     timestamp_microseconds: get_microseconds() as u32,
                     timestamp_difference_microseconds: get_microseconds() as u32
                         - pkt.header.timestamp_microseconds,
-                    wnd_size: 500,
+                    // Fits LOREM_IPSUM
+                    wnd_size: 700,
                     extension: 0,
                 },
                 data: Bytes::new(),
             })
             .await
             .unwrap();
-        // TODO fix after ack test
+        assert_eq!(stream.state().outgoing_buffer.len(), 2);
+        assert!(stream.state().outgoing_buffer.get(old_seq_nr + 2).is_none());
+
         let pkt = pkt_stream.next().await.unwrap();
         assert_eq!(pkt.header.seq_nr, old_seq_nr + 1);
         assert_eq!(pkt.data, LOREM_IPSUM.to_vec());
+
+        println!("hello: {}", LOREM_IPSUM.len());
+        // Window size is increased
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr,
+                    ack_nr: pkt.header.seq_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::State,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: get_microseconds() as u32
+                        - pkt.header.timestamp_microseconds,
+                    // FITS the final packet
+                    wnd_size: 1200,
+                    extension: 0,
+                },
+                data: Bytes::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(stream.state().outgoing_buffer.len(), 1);
+
+        println!("hello2");
+        let pkt = pkt_stream.next().await.unwrap();
+        assert_eq!(pkt.header.seq_nr, old_seq_nr + 3);
+        assert_eq!(pkt.data, vec![2; 1000]);
+        println!("hello3");
+
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr,
+                    ack_nr: pkt.header.seq_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::State,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: get_microseconds() as u32
+                        - pkt.header.timestamp_microseconds,
+                    wnd_size: 1200,
+                    extension: 0,
+                },
+                data: Bytes::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(stream.state().outgoing_buffer.len(), 0);
     });
 }
