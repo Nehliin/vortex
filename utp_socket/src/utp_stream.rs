@@ -448,7 +448,7 @@ impl UtpStream {
     }
 
     // TODO (do_ledbat)
-    fn adjust_max_window(&mut self) {}
+    //fn adjust_max_window(&mut self) {}
 
     pub(crate) async fn process_incoming(&self, packet: Packet) -> anyhow::Result<()> {
         let packet_header = packet.header;
@@ -535,8 +535,13 @@ impl UtpStream {
             }
             std::cmp::Ordering::Greater => {
                 log::debug!("Got out of order packet");
+                let mut state = self.state_mut();
+                if packet.data.len() <= state.our_advertised_window() as usize {
+                    state.incoming_buffer.insert(packet);
+                } else {
+                    log::warn!("Stream window not respected, packet dropped");
+                }
                 // Out of order packet
-                self.state_mut().incoming_buffer.insert(packet);
                 Ok(())
             }
         }
@@ -623,8 +628,8 @@ impl UtpStream {
                 }
             }
             (PacketType::Data, ConnectionState::Connected) => {
-                let should_ack = self.state_mut().try_consume(&packet.data);
-                if should_ack {
+                let was_consumed = self.state_mut().try_consume(&packet.data);
+                if was_consumed {
                     self.ack_packet(packet.header.seq_nr).await?;
                 }
                 // Reset connection state if it wasn't modified
@@ -655,7 +660,7 @@ impl UtpStream {
                 // packet which means the initial SYN (current seq_nr - 1) already has been
                 // acked and presumably been received by the sender so we can now
                 // transition into Connected state
-                let should_ack = {
+                let was_consumed = {
                     let mut state = self.state_mut();
                     if state.try_consume(&packet.data) {
                         // We are now connected!
@@ -666,7 +671,7 @@ impl UtpStream {
                         false
                     }
                 };
-                if should_ack {
+                if was_consumed {
                     self.ack_packet(packet.header.seq_nr).await?;
                 } else {
                     anyhow::bail!(
