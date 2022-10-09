@@ -51,7 +51,6 @@ pub(crate) struct StreamState {
     pub(crate) cur_window: u32,
     // Last received window this socket advertised in bytes
     pub(crate) max_window: u32,
-    pub(crate) our_advertised_window: u32,
     pub(crate) their_advertised_window: u32,
     // Last delay measurement from other endpoint
     // whenever a packet is received this state is updated
@@ -87,7 +86,8 @@ impl StreamState {
             packet_type: PacketType::Syn,
             timestamp_microseconds: get_microseconds() as u32,
             timestamp_difference_microseconds: self.reply_micro,
-            wnd_size: self.our_advertised_window,
+            // Mimics libtorrent behavior
+            wnd_size: 0,
             extension: 0,
         };
         (header, rc)
@@ -103,7 +103,7 @@ impl StreamState {
             packet_type: PacketType::State,
             timestamp_microseconds: timestamp_microseconds as u32,
             timestamp_difference_microseconds: self.reply_micro,
-            wnd_size: self.our_advertised_window,
+            wnd_size: self.our_advertised_window(),
             extension: 0,
         }
     }
@@ -119,7 +119,7 @@ impl StreamState {
             packet_type: PacketType::Data,
             timestamp_microseconds: timestamp_microseconds as u32,
             timestamp_difference_microseconds: self.reply_micro,
-            wnd_size: self.our_advertised_window,
+            wnd_size: self.our_advertised_window(),
             extension: 0,
         }
     }
@@ -132,12 +132,16 @@ impl StreamState {
             // so copies can be avoided either here or in the read method
             self.receive_buf[cursor..cursor + data.len()].copy_from_slice(data);
             self.receive_buf_cursor += data.len();
-            self.our_advertised_window = (self.receive_buf.len() - self.receive_buf_cursor) as u32;
             true
         } else {
             log::warn!("Receive buf full, packet dropped");
             false
         }
+    }
+
+    #[inline(always)]
+    fn our_advertised_window(&self) -> u32 {
+        (self.receive_buf.len() - self.receive_buf_cursor) as u32
     }
 
     #[inline(always)]
@@ -220,9 +224,6 @@ impl UtpStream {
                 cur_window: 0,
                 max_window: MTU,
                 ack_nr: 0,
-                // mimic libutp without a callback set (default behavior)
-                // this is the receive buffer initial size
-                our_advertised_window: 1024 * 1024,
                 conn_id_send: conn_id + 1,
                 reply_micro: 0,
                 eof_pkt: None,
@@ -279,9 +280,6 @@ impl UtpStream {
                 max_window: MTU,
                 // We have yet to ack the SYN packet
                 ack_nr: seq_nr - 1,
-                // mimic libutp without a callback set (default behavior)
-                // this is the receive buffer initial size
-                our_advertised_window: 1024 * 1024,
                 conn_id_send: conn_id,
                 reply_micro: 0,
                 eof_pkt: None,

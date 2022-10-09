@@ -58,7 +58,7 @@ async fn setup_connected_stream(
         assert_eq!(syn_pkt.header.ack_nr, 0);
         assert_eq!(syn_pkt.header.packet_type, PacketType::Syn);
         assert_eq!(syn_pkt.header.timestamp_difference_microseconds, 0);
-        assert!(syn_pkt.header.wnd_size > 0);
+        assert!(syn_pkt.header.wnd_size == 0);
 
         let header = PacketHeader {
             seq_nr: response_ack_nr,
@@ -427,3 +427,104 @@ fn handles_decreasing_window_size() {
         assert_eq!(stream.state().outgoing_buffer.len(), 0);
     });
 }
+
+// TODO Handle and test 0 size window size after rtt calculaion is working
+
+#[test]
+fn our_advertised_window_size() {
+    tokio_uring::start(async move {
+        let (_socket, stream, pkt_rc) = setup_connected_stream(1000).await;
+        // The id used to send data back to the stream after SYN-ACK
+        let conn_id_send = stream.state().conn_id_recv;
+        let rc_seq_nr = stream.state().ack_nr;
+
+        // Connected -----------------------------------
+        stream.write(LOREM_IPSUM.to_vec()).await.unwrap();
+        assert_eq!(stream.state().outgoing_buffer.len(), 1);
+
+        let mut pkt_stream = ReceiverStream::new(pkt_rc);
+        let pkt = pkt_stream.next().await.unwrap();
+        // Default window size
+        assert_eq!(pkt.header.wnd_size, 1024 * 1024);
+        assert_eq!(pkt.data, LOREM_IPSUM.to_vec());
+
+        // Window size is decreased
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr,
+                    ack_nr: pkt.header.seq_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::State,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: get_microseconds() as u32
+                        - pkt.header.timestamp_microseconds,
+                    wnd_size: 200,
+                    extension: 0,
+                },
+                data: Bytes::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(stream.state().outgoing_buffer.len(), 0);
+
+        for i in 1..4 {
+            // Receive data!
+            stream
+                .process_incoming(Packet {
+                    header: PacketHeader {
+                        seq_nr: rc_seq_nr + i,
+                        ack_nr: pkt.header.seq_nr,
+                        conn_id: conn_id_send,
+                        packet_type: PacketType::Data,
+                        timestamp_microseconds: get_microseconds() as u32,
+                        timestamp_difference_microseconds: get_microseconds() as u32
+                            - pkt.header.timestamp_microseconds,
+                        wnd_size: 1200,
+                        extension: 0,
+                    },
+                    data: vec![2; 1000].into(),
+                })
+                .await
+                .unwrap();
+
+            let ack_pkt = pkt_stream.next().await.unwrap();
+            assert_eq!(ack_pkt.header.ack_nr, rc_seq_nr + i);
+            assert_eq!(ack_pkt.header.packet_type, PacketType::State);
+            // Window size has decreased
+            assert_eq!(ack_pkt.header.wnd_size, (1024 * 1024) - 1000 * i as u32);
+        }
+
+        // read data to increase window size again
+        let mut buf = vec![0; 2500];
+        let bytes_read = stream.read(&mut buf).await;
+        assert_eq!(bytes_read, 2500);
+        assert_eq!(buf, vec![2; 2500]);
+
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr + 4,
+                    ack_nr: pkt.header.seq_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::Data,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: get_microseconds() as u32
+                        - pkt.header.timestamp_microseconds,
+                    wnd_size: 1200,
+                    extension: 0,
+                },
+                data: vec![2; 1000].into(),
+            })
+            .await
+            .unwrap();
+
+        let ack_pkt = pkt_stream.next().await.unwrap();
+        assert_eq!(ack_pkt.header.ack_nr, rc_seq_nr + 4);
+        assert_eq!(ack_pkt.header.packet_type, PacketType::State);
+        // window size is now 3000 - 2500 + 1000  
+        assert_eq!(ack_pkt.header.wnd_size, (1024 * 1024) - 1500);
+    });
+}
+
+// TODO take packets that are in the reorder buffer is taken into account
