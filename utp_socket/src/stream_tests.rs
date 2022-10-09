@@ -106,63 +106,7 @@ fn does_shutdown() {
 #[test]
 fn connect_basic() {
     tokio_uring::start(async move {
-        let socket = Rc::new(
-            UdpSocket::bind("127.0.0.1:1336".parse().unwrap())
-                .await
-                .unwrap(),
-        );
-        let stream = UtpStream::new(1, "127.0.0.1:1337".parse().unwrap(), Rc::downgrade(&socket));
-        let stream_clone = stream.clone();
-        let response_ack_nr = rand::random();
-        let handle = tokio_uring::spawn(async move {
-            let socket = UdpSocket::bind("127.0.0.1:1337".parse().unwrap())
-                .await
-                .unwrap();
-            let buf = vec![0; 1024];
-            let (result, buf) = socket.recv_from(buf).await;
-            let (recv, _) = result.unwrap();
-            let packet_header = PacketHeader::try_from(&buf[..recv]).unwrap();
-
-            let packet = Packet {
-                header: packet_header,
-                data: Bytes::copy_from_slice(&buf[HEADER_SIZE as usize..recv]),
-            };
-
-            // No data is sent
-            assert!(packet.data.is_empty());
-            assert_eq!(packet.header.ack_nr, 0);
-            assert_eq!(packet.header.packet_type, PacketType::Syn);
-            assert_eq!(packet.header.timestamp_difference_microseconds, 0);
-            assert!(packet.header.wnd_size > 0);
-
-            let header = PacketHeader {
-                seq_nr: response_ack_nr,
-                ack_nr: packet.header.seq_nr,
-                conn_id: packet.header.conn_id,
-                packet_type: PacketType::State,
-                timestamp_microseconds: get_microseconds() as u32,
-                timestamp_difference_microseconds: get_microseconds() as u32
-                    - packet.header.timestamp_microseconds,
-                wnd_size: 123,
-                extension: 0,
-            };
-            stream_clone
-                .process_incoming(Packet {
-                    header,
-                    data: Bytes::new(),
-                })
-                .await
-                .unwrap();
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(stream.state().conn_id_recv + 1, stream.state().conn_id_send);
-        stream.connect().await.unwrap();
-        assert_eq!(stream.state().connection_state, ConnectionState::Connected);
-        assert_eq!(stream.state().their_advertised_window, 123);
-        assert_eq!(stream.state().ack_nr, response_ack_nr);
-        assert!(stream.state().outgoing_buffer.is_empty());
-        assert!(stream.state().incoming_buffer.is_empty());
-        handle.await.unwrap();
+        let (_socket, _stream, _pkt_rc) = setup_connected_stream(123).await;
     });
 }
 
