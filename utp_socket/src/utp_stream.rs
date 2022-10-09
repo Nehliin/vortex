@@ -400,10 +400,9 @@ impl UtpStream {
                 let (result, _buf) = socket.send_to(packet_bytes, self.addr).await;
                 let _ = result?;
                 let mut state = self.state_mut();
-                // Might be certain situations where this shouldn't be appended?
-                // seems like only ST_DATA and ST_FIN. Also count bytes instead of packets
+                // Note that only the data is appended here and not the entire packet size
                 debug_assert!(bytes_sent < u32::MAX as usize);
-                state.cur_window += bytes_sent as u32;
+                state.cur_window += packet.data.len() as u32;
             }
         } else {
             anyhow::bail!("Failed to send packets, socket dropped");
@@ -605,7 +604,6 @@ impl UtpStream {
             // Outgoing connection completion
             (PacketType::State, conn_state) => {
                 let mut state = self.state_mut();
-                state.cur_window -= packet.size();
                 state.ack_nr = packet.header.seq_nr;
 
                 if let ConnectionState::SynSent { connect_notifier } = conn_state {
@@ -616,7 +614,10 @@ impl UtpStream {
                     // Syn is only sent once so not currently present in outgoing buffer
                     log::debug!("SYN_ACK");
                 } else {
-                    if state.outgoing_buffer.remove(packet.header.ack_nr).is_none() {
+                    if let Some(pkt) = state.outgoing_buffer.remove(packet.header.ack_nr) {
+                        // Update cur_window to reflect that the outgoing packet has been acked
+                        state.cur_window -= pkt.data.len() as u32;
+                    } else {
                         log::error!("Recevied ack for packet not inside the outgoing_buffer");
                     }
                     // Reset connection state if it wasn't modified
