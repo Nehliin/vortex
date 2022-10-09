@@ -22,7 +22,7 @@ async fn setup_connected_stream(
     );
     // Needs to be randomized to avoid confilicting inbetween tests
     // not perfect though
-    let port: u16 = rand::random();
+    let port: u16 = (rand::random::<f32>() * (u16::MAX - 2000) as f32) as u16 + 2000;
     let addr = format!("127.0.0.1:{port}").parse().unwrap();
     let stream = UtpStream::new(1, addr, Rc::downgrade(&socket));
     let (pkt_tx, mut pkt_rc) = tokio::sync::mpsc::channel(256);
@@ -94,11 +94,11 @@ async fn setup_connected_stream(
 fn does_shutdown() {
     tokio_uring::start(async move {
         let socket = Rc::new(
-            UdpSocket::bind("0.0.0.0:1336".parse().unwrap())
+            UdpSocket::bind("0.0.0.0:2010".parse().unwrap())
                 .await
                 .unwrap(),
         );
-        let _stream = UtpStream::new(1, "0.0.0.0:1337".parse().unwrap(), Rc::downgrade(&socket));
+        let _stream = UtpStream::new(1, "0.0.0.0:2000".parse().unwrap(), Rc::downgrade(&socket));
         tokio::time::sleep(Duration::from_millis(400)).await;
     });
 }
@@ -426,7 +426,7 @@ fn handles_decreasing_window_size() {
             .unwrap();
         assert_eq!(stream.state().outgoing_buffer.len(), 0);
 
-        // Send one packet that fits and one that doesn't in 
+        // Send one packet that fits and one that doesn't in
         // the new window size
         stream.write(LOREM_IPSUM.to_vec()).await.unwrap();
         stream.write(vec![2; 180].to_vec()).await.unwrap();
