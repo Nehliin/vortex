@@ -8,24 +8,28 @@ use tokio::sync::mpsc::Receiver;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tokio_uring::net::UdpSocket;
 
-async fn setup_connected_stream() -> (Rc<UdpSocket>, UtpStream, Receiver<Packet>) {
+async fn setup_connected_stream(
+    initial_stream_window: u32,
+) -> (Rc<UdpSocket>, UtpStream, Receiver<Packet>) {
     let _ = env_logger::builder()
         .filter_level(log::LevelFilter::Trace)
         .is_test(true)
         .try_init();
     let socket = Rc::new(
-        UdpSocket::bind("127.0.0.1:1336".parse().unwrap())
+        UdpSocket::bind("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap(),
     );
-    let stream = UtpStream::new(1, "127.0.0.1:1337".parse().unwrap(), Rc::downgrade(&socket));
+    // Needs to be randomized to avoid confilicting inbetween tests
+    // not perfect though
+    let port: u16 = rand::random();
+    let addr = format!("127.0.0.1:{port}").parse().unwrap();
+    let stream = UtpStream::new(1, addr, Rc::downgrade(&socket));
     let (pkt_tx, mut pkt_rc) = tokio::sync::mpsc::channel(256);
     let (ready_tx, ready_rc) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         tokio_uring::start(async move {
-            let socket = UdpSocket::bind("127.0.0.1:1337".parse().unwrap())
-                .await
-                .unwrap();
+            let socket = UdpSocket::bind(addr).await.unwrap();
             let _ = ready_tx.send(());
             loop {
                 let buf = vec![0; 1024];
@@ -64,7 +68,7 @@ async fn setup_connected_stream() -> (Rc<UdpSocket>, UtpStream, Receiver<Packet>
             timestamp_microseconds: get_microseconds() as u32,
             timestamp_difference_microseconds: get_microseconds() as u32
                 - syn_pkt.header.timestamp_microseconds,
-            wnd_size: 123,
+            wnd_size: initial_stream_window,
             extension: 0,
         };
         stream
@@ -76,7 +80,10 @@ async fn setup_connected_stream() -> (Rc<UdpSocket>, UtpStream, Receiver<Packet>
             .unwrap();
     }
     assert_eq!(stream.state().connection_state, ConnectionState::Connected);
-    assert_eq!(stream.state().their_advertised_window, 123);
+    assert_eq!(
+        stream.state().their_advertised_window,
+        initial_stream_window
+    );
     assert_eq!(stream.state().ack_nr, response_ack_nr);
     assert!(stream.state().outgoing_buffer.is_empty());
     assert!(stream.state().incoming_buffer.is_empty());
@@ -162,7 +169,7 @@ fn connect_basic() {
 #[test]
 fn basic_acking() {
     tokio_uring::start(async move {
-        let (_socket, stream, pkt_rc) = setup_connected_stream().await;
+        let (_socket, stream, pkt_rc) = setup_connected_stream(123).await;
         // The id used to send data back to the stream after SYN-ACK
         let conn_id_send = stream.state().conn_id_recv;
         let rc_seq_nr = stream.state().ack_nr;
