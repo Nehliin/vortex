@@ -427,7 +427,6 @@ impl UtpStream {
             // TODO: potentially have an buffer of pending acks here and send
             // at once much like in the flush outbuf impl, perhaps possible
             // to then also share more code.
-            // TODO ofc the entire packet and not only the header should be sent
 
             // No need to wrap the header in a packet struct
             // since the body is always empty here
@@ -475,26 +474,14 @@ impl UtpStream {
 
         let dist_from_expected = {
             let mut state = self.state_mut();
-
-            let syn_sent = matches!(state.connection_state, ConnectionState::SynSent { .. });
-
             // Sequence number used to check that the ack is valid.
-            // If we receive an ack for a packet past this sequence number
+            // If we receive an ack for a packet past our seq_nr
             // we have received an ack for an unsent packet which is incorrect.
-            // Syn is the first packet sent so no - 1 there and same goes for Fin I guess?
-            //
-            // TODO: move this to be part of the match or something
-            // ALSO TODO: handle wrapping ack/seq nr.
-            let cmp_seq_nr = if (syn_sent || state.connection_state == ConnectionState::FinSent)
-                && packet_header.packet_type == PacketType::State
-            {
-                state.seq_nr
-            } else {
-                state.seq_nr - 1
-            };
-
-            if cmp_seq_nr < packet_header.ack_nr {
-                anyhow::bail!("Incoming ack_nr was invalid");
+            if state.seq_nr < packet_header.ack_nr {
+                // Don't kill the connection based on an invalid ack. It's possible for
+                // 3rd party to inject packets into the stream for DDosing purposes
+                log::warn!("Incoming ack_nr was invalid, packet acked has never been sent");
+                return Ok(());
             }
 
             // TODO: handle eof
@@ -510,11 +497,14 @@ impl UtpStream {
             state.reply_micro = their_delay as u32;
             state.their_advertised_window = packet_header.wnd_size;
 
-            if syn_sent {
-                // If we have sent a syn packet and are awaiting responses all packet header
-                // sequence numbers are "expected" since connection have yet to be established
+            if packet.header.packet_type == PacketType::State {
+                // If it's an ack packet we always consider it to be in order since the only
+                // out of order acks are for seq_nrs that have never been sent and that's checked
+                // above
                 0
             } else {
+                // Ack nr should have been set after connection has been established
+                debug_assert!(state.ack_nr != 0);
                 // The number of packets past the expected packet. Diff between acked
                 // up until and current -1 gives 0 the meaning of this being the next
                 // expected packet in the sequence.

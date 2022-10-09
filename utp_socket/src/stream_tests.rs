@@ -159,6 +159,47 @@ fn connect_basic() {
     });
 }
 
+#[test]
+fn basic_acking() {
+    tokio_uring::start(async move {
+        let (_socket, stream, pkt_rc) = setup_connected_stream().await;
+        // The id used to send data back to the stream after SYN-ACK
+        let conn_id_send = stream.state().conn_id_recv;
+        let rc_seq_nr = stream.state().ack_nr;
+        let old_seq_nr = stream.state().seq_nr;
+
+        // Connected -----------------------------------
+        stream.write(vec![1; 50]).await.unwrap();
+        assert_eq!(stream.state().outgoing_buffer.len(), 1);
+        assert_eq!(stream.state().seq_nr, old_seq_nr + 1);
+
+        let mut pkt_stream = ReceiverStream::new(pkt_rc);
+        let pkt = pkt_stream.next().await.unwrap();
+        assert_eq!(pkt.header.seq_nr, old_seq_nr + 1);
+        assert_eq!(pkt.data, vec![1; 50]);
+
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr,
+                    ack_nr: pkt.header.seq_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::State,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: get_microseconds() as u32
+                        - pkt.header.timestamp_microseconds,
+                    wnd_size: 123,
+                    extension: 0,
+                },
+                data: Bytes::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(stream.state().outgoing_buffer.len(), 0);
+    });
+}
+
 const LOREM_IPSUM: &[u8] = br#"
       Lorem ipsum dolor sit amet, consectetur adipiscing elit, 
       sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. 
