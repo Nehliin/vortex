@@ -340,6 +340,23 @@ impl UtpStream {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub async fn send_syn(&self) -> anyhow::Result<()> {
+        // Extra brackets to ensure state_mut is dropped pre .await
+        let (header, _rc) = { self.state_mut().syn_header() };
+
+        log::debug!("Sending SYN");
+        self.send_packet(
+            Packet {
+                header,
+                data: Bytes::new(),
+            },
+            true,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn flush_outbuf(&self) -> anyhow::Result<()> {
         // TODO avoid cloning here, perhaps an extra layer like "Outgoing packet"
         // which could also help with keeping track of resends etc. The reorder buffer needs
