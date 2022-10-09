@@ -620,7 +620,9 @@ impl UtpStream {
 
                 if let ConnectionState::SynSent { connect_notifier } = conn_state {
                     state.connection_state = ConnectionState::Connected;
-                    connect_notifier.send(()).unwrap();
+                    if connect_notifier.send(()).is_err() {
+                        log::warn!("Connect notify receiver dropped");
+                    }
                     // Syn is only sent once so not currently present in outgoing buffer
                     log::debug!("SYN_ACK");
                 } else {
@@ -705,7 +707,7 @@ impl UtpStream {
 impl Drop for UtpStream {
     fn drop(&mut self) {
         // Only shutdown if this + the stream used in the send loop are the last clone
-        if dbg!(Rc::strong_count(&self.inner)) == 2 {
+        if Rc::strong_count(&self.inner) == 2 {
             // The socket will detect that the inner state have been dropped
             // after the send loop have shutdown and remove it from the map
             self.state_mut()
@@ -715,20 +717,5 @@ impl Drop for UtpStream {
                 .send(())
                 .unwrap();
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use tokio_uring::net::UdpSocket;
-
-    #[test]
-    fn does_shutdown() {
-        tokio_uring::start(async move {
-            let socket = Rc::new(UdpSocket::bind("0.0.0.0:1336".parse().unwrap()).await.unwrap());
-            let stream = UtpStream::new(1, "0.0.0.0:1337".parse().unwrap(), Rc::downgrade(&socket));
-            tokio::time::sleep(Duration::from_millis(400)).await;
-        });
     }
 }
