@@ -1,5 +1,4 @@
 #![no_main]
-use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
 
 use utp_socket::{
@@ -7,11 +6,12 @@ use utp_socket::{
     utp_packet::{self, Packet, PacketHeader},
 };
 
-fuzz_target!(|data: Vec<u16>| {
+fuzz_target!(|data: Vec<(u16, u16)>| {
     let mut buffer = ReorderBuffer::new(64);
 
     let mut unique = std::collections::HashSet::new();
-    for seq_nr in data.iter() {
+    let mut expected_size = 0;
+    for (seq_nr, len) in data.iter() {
         buffer.insert(
             Packet {
                 header: PacketHeader {
@@ -24,18 +24,23 @@ fuzz_target!(|data: Vec<u16>| {
                     wnd_size: 0,
                     extension: 0,
                 },
-                data: Bytes::new(),
+                data: vec![2; *len as usize].into(),
             },
         );
-        unique.insert(*seq_nr);
+        if unique.insert(*seq_nr) {
+            expected_size += *len as usize;
+        }
+        assert_eq!(buffer.size(), expected_size);
     }
 
     for seq_nr in unique.iter() {
         let packet = buffer.remove(*seq_nr).unwrap();
+        expected_size -= packet.data.len();
         assert_eq!(packet.header.seq_nr, *seq_nr);
+        assert_eq!(buffer.size(), expected_size);
     }
 
-    for seq_nr in data.iter() {
+    for (seq_nr, _) in data.iter() {
         assert!(buffer.get(*seq_nr).is_none());
     }
 

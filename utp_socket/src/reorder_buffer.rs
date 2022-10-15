@@ -5,6 +5,7 @@ pub struct ReorderBuffer {
     buffer: Box<[Option<Packet>]>,
     first: usize,
     last: usize,
+    size: usize,
 }
 
 impl ReorderBuffer {
@@ -15,6 +16,7 @@ impl ReorderBuffer {
             buffer: vec![Option::<Packet>::None; size].into_boxed_slice(),
             first: 0,
             last: 0,
+            size: 0,
         }
     }
 
@@ -35,11 +37,13 @@ impl ReorderBuffer {
         ) {
             (first_val, last_val)
         } else {
+            self.size += packet.data.len();
             self.buffer[self.first] = Some(packet);
             debug_assert!(self.last == self.first);
             return;
         };
 
+        self.size += packet.data.len();
         match position.cmp(&first_val) {
             std::cmp::Ordering::Less => {
                 // If the available space is less than the distance to
@@ -159,7 +163,12 @@ impl ReorderBuffer {
                         }
                     }
                 }
-                return maybe_packet;
+                if let Some(packet) = maybe_packet {
+                    self.size -= packet.data.len();
+                    return Some(packet);
+                } else {
+                    return None;
+                }
             } else {
                 self.buffer[index] = maybe_packet;
             }
@@ -176,12 +185,20 @@ impl ReorderBuffer {
         empty
     }
 
+    // Lenght in the number of packets
+    #[inline]
     pub fn len(&self) -> usize {
         if self.is_empty() {
             0
         } else {
             self.iter().count()
         }
+    }
+
+    // Size in bytes
+    #[inline(always)]
+    pub fn size(&self) -> usize {
+        self.size
     }
 
     // TODO remove allocations from this
