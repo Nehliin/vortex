@@ -65,6 +65,8 @@ pub(crate) struct StreamState {
     // Receive buffer, used to store packet data before read requests
     // this is what's used to determine window size.
     // Have the same size like the initial our_advertised_window
+    // TODO: There could be a provided read buffer from the user
+    // before any data is read and that should be used instead in that case
     pub(crate) receive_buf: Box<[u8]>,
     receive_buf_cursor: usize,
 
@@ -140,8 +142,10 @@ impl StreamState {
     }
 
     #[inline(always)]
-    fn our_advertised_window(&self) -> u32 {
-        (self.receive_buf.len() - self.receive_buf_cursor) as u32
+    pub(crate) fn our_advertised_window(&self) -> u32 {
+        let wnd_size = (self.receive_buf.len() - self.receive_buf_cursor) as i32
+            - self.incoming_buffer.size() as i32;
+        std::cmp::max(wnd_size, 0) as u32
     }
 
     #[inline(always)]

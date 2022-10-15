@@ -526,9 +526,65 @@ fn our_advertised_window_size() {
     });
 }
 
-// TODO take packets that are in the reorder buffer is taken into account
 #[test]
 fn drop_packets_if_window_is_full() {
+    tokio_uring::start(async move {
+        let (_socket, stream, mut pkt_rc) = setup_connected_stream(1000).await;
+        // The id used to send data back to the stream after SYN-ACK
+        let conn_id_send = stream.state().conn_id_recv;
+        let rc_seq_nr = stream.state().ack_nr;
+        // Ack nr of the other side
+        let ack_nr = stream.state().seq_nr;
+        // Connected -----------------------------------
+        // Almost fill up the windows with this initial data packet
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr + 1,
+                    ack_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::Data,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: 2,
+                    wnd_size: 1000,
+                    extension: 0,
+                },
+                data: vec![1; 1024 * 1024 - 100].into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(stream.state().our_advertised_window(), 100);
+        let ack_pkt = pkt_rc.recv().await.unwrap();
+        assert_eq!(ack_pkt.header.ack_nr, rc_seq_nr + 1);
+        assert_eq!(ack_pkt.header.packet_type, PacketType::State);
+        // Window size has decreased
+        assert_eq!(ack_pkt.header.wnd_size, 100);
+        // Packet doesn't respect the window size and is out of order
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr + 10,
+                    ack_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::Data,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: 3,
+                    wnd_size: 1200,
+                    extension: 0,
+                },
+                data: vec![2; 170].into(),
+            })
+            .await
+            .unwrap();
+
+        // Packet was dropped because window size wasn't respected
+        assert_eq!(stream.state().incoming_buffer.len(), 0);
+        assert_eq!(stream.state().our_advertised_window(), 100);
+    });
+}
+
+#[test]
+fn take_packets_in_reorder_buffer_into_account_for_window_size() {
     tokio_uring::start(async move {
         let (_socket, stream, mut pkt_rc) = setup_connected_stream(1000).await;
         // The id used to send data back to the stream after SYN-ACK
@@ -559,7 +615,7 @@ fn drop_packets_if_window_is_full() {
         assert_eq!(ack_pkt.header.packet_type, PacketType::State);
         // Window size has decreased
         assert_eq!(ack_pkt.header.wnd_size, 100);
-        // Packet doesn't respect the window size 
+        // Out of order packet that fits in the window
         stream
             .process_incoming(Packet {
                 header: PacketHeader {
@@ -572,12 +628,38 @@ fn drop_packets_if_window_is_full() {
                     wnd_size: 1200,
                     extension: 0,
                 },
-                data: vec![2; 170].into(),
+                data: vec![2; 50].into(),
             })
             .await
             .unwrap();
 
-        // Packet was dropped because window size wasn't respected
-        assert_eq!(stream.state().incoming_buffer.len(), 0);
+        assert_eq!(stream.state().our_advertised_window(), 50);
+        assert_eq!(stream.state().incoming_buffer.len(), 1);
+        assert!(stream.state().incoming_buffer.get(rc_seq_nr + 4).is_some());
+        
+        stream
+            .process_incoming(Packet {
+                header: PacketHeader {
+                    seq_nr: rc_seq_nr + 2,
+                    ack_nr,
+                    conn_id: conn_id_send,
+                    packet_type: PacketType::Data,
+                    timestamp_microseconds: get_microseconds() as u32,
+                    timestamp_difference_microseconds: 3,
+                    wnd_size: 1200,
+                    extension: 0,
+                },
+                data: vec![2; 60].into(),
+            })
+            .await
+            .unwrap();
+        let ack_pkt = pkt_rc.recv().await.unwrap();
+        assert_eq!(ack_pkt.header.ack_nr, rc_seq_nr + 2);
+        assert_eq!(ack_pkt.header.packet_type, PacketType::State);
+        // Packet was handled but we do not have any window left 
+        assert_eq!(ack_pkt.header.wnd_size, 0);
+        assert_eq!(stream.state().our_advertised_window(), 0);
+        assert_eq!(stream.state().incoming_buffer.len(), 1);
+        assert!(stream.state().incoming_buffer.get(rc_seq_nr + 4).is_some());
     });
 }
