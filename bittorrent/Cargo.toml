@@ -6,3 +6,7 @@ edition = "2021"
 
 [dependencies]
 bytes = "1.2"
+tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
+anyhow = "1.0"
+log = "0.4"
+tokio = { version = "1.20.1", features = ["time", "sync", "macros"] }
