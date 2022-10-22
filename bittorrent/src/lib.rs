@@ -7,10 +7,13 @@ use std::{
     cell::{Ref, RefCell, RefMut},
     net::SocketAddr,
     rc::Rc,
+    sync::Arc,
 };
 
+use bitvec::prelude::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio_uring::{buf::IoBuf, net::TcpStream};
+use parking_lot::Mutex;
+use tokio_uring::net::TcpStream;
 
 struct PeerConnectionState {
     /// This side is choking the peer
@@ -23,12 +26,54 @@ struct PeerConnectionState {
     peer_interested: bool,
 }
 
+pub struct TorrentState {
+    completed_pieces: BitBox,
+    pretended_file: BytesMut,
+}
+
+pub struct TorrentManager {
+    torrent_info: bip_metainfo::Info,
+    peer_connections: Vec<PeerConnection>,
+    // Maybe use a channel to communicate instead?
+    torrent_state: Arc<Mutex<TorrentState>>,
+}
+
+impl TorrentManager {
+    pub fn new(torrent_info: bip_metainfo::Info) -> Self {
+        let completed_pieces: BitBox = torrent_info.pieces().map(|_| false).collect();
+        let torrent_state = TorrentState {
+            completed_pieces,
+            pretended_file: BytesMut::new(),
+        };
+        Self {
+            torrent_info,
+            peer_connections: Vec::new(),
+            torrent_state: Arc::new(Mutex::new(torrent_state)),
+        }
+    }
+}
+
+// Torrentmanager
+// tracks peers "haves"
+// includes piece stategy
+// chokes and unchokes
+// owns peer connections
+// includes mmapped file(s)?
+
+// TorrentDownloadManager
+// 1. Get meta data about pieces and info hashes
+// 2. Fetch peers from DHT for the pieces
+// 3. Connect to all peers
+// 4. Do piece selection and distribute pieces across peers that have them
+// 5. PeerConnection requests subpieces automatically
+// 6. Manager is informed about pieces that have completed (and peer choking us)
+
 #[derive(Clone)]
 pub struct PeerConnection {
     // TODO use utp
-    // Also is a single socket needed to be used?
     stream: Rc<TcpStream>,
     state: Rc<RefCell<PeerConnectionState>>,
+    torrent_state: Arc<Mutex<TorrentState>>,
 }
 
 impl PeerConnection {
@@ -37,6 +82,7 @@ impl PeerConnection {
         our_id: [u8; 20],
         their_id: [u8; 20],
         info_hash: [u8; 20],
+        torrent_state: Arc<Mutex<TorrentState>>,
     ) -> anyhow::Result<PeerConnection> {
         let stream = Rc::new(TcpStream::connect(addr).await?);
 
@@ -47,25 +93,25 @@ impl PeerConnection {
         let (res, buf) = stream.read(buf).await;
         let read = res?;
         let mut buf = buf.as_slice();
-        if read >= 67 {
+        if read >= 68 {
             log::info!("HANDSHAKE RECV");
             let str_len = buf.get_u8();
             assert_eq!(str_len, 19);
             assert_eq!(
-                buf.get(1..(str_len as usize + 1)),
+                buf.get(..str_len as usize),
                 Some(b"BitTorrent protocol" as &[u8])
             );
             assert_eq!(
-                buf.get((str_len as usize + 1)..(str_len as usize + 9)),
+                buf.get((str_len as usize)..(str_len as usize + 8)),
                 Some(&[0_u8; 8] as &[u8])
             );
             assert_eq!(
                 Some(&info_hash as &[u8]),
-                buf.get((str_len as usize + 9)..(str_len as usize + 21))
+                buf.get((str_len as usize + 8)..(str_len as usize + 28))
             );
             assert_eq!(
                 Some(&their_id as &[u8]),
-                buf.get((str_len as usize + 21)..(str_len as usize + 41))
+                buf.get((str_len as usize + 28)..(str_len as usize + 48))
             );
             let stream_state = PeerConnectionState {
                 is_choking: false,
@@ -77,6 +123,7 @@ impl PeerConnection {
             let connection = PeerConnection {
                 stream: stream.clone(),
                 state: Rc::new(RefCell::new(stream_state)),
+                torrent_state,
             };
             let connection_clone = connection.clone();
             // TODO Handle shutdowns
@@ -86,6 +133,7 @@ impl PeerConnection {
                 loop {
                     let (result, buf) = connection_clone.stream.read(read_buf).await;
                     match result {
+                        Ok(0) => log::info!("Shutting down connection"),
                         Ok(bytes_read) => {
                             log::debug!("Read data from peer connection: {bytes_read}");
                             let msg = PeerMessage::try_from(&buf[..bytes_read]).unwrap();
@@ -141,7 +189,8 @@ impl PeerConnection {
                     // uses the same type of logic
                     log::info!("Should perhaps send a redundant unchoke here");
                 } else {
-                    //TODO
+                    // TODO call to the torrent manager which might call back into
+                    // this peer connection and send an unchoke
                     log::warn!("Should maybe unchoke");
                 }
             }
@@ -154,8 +203,18 @@ impl PeerConnection {
             }
             PeerMessage::Have { index } => {
                 log::info!("Peer have piece with index: {index}");
+                /*self.manager_coms
+                .send(ManagerMsg::Have(index))
+                .await
+                .unwrap();*/
             }
-            PeerMessage::Bitfield(_) => unimplemented!(),
+            PeerMessage::Bitfield(field) => {
+                log::info!("Bifield received");
+                /*self.manager_coms
+                .send(ManagerMsg::Bitfield(field))
+                .await
+                .unwrap();*/
+            }
             PeerMessage::Request {
                 index,
                 begin,
@@ -183,14 +242,24 @@ impl PeerConnection {
             } => {
                 log::info!("Recived a piece index: {index}, begin: {begin}, piece: {piece}");
                 log::info!("Data len: {}", data.len());
+                /*self.manager_coms
+                .send(ManagerMsg::Piece {
+                    index,
+                    begin,
+                    piece,
+                    // TODO don't copy here
+                    data: Bytes::copy_from_slice(data),
+                })
+                .await
+                .unwrap();*/
             }
         }
         Ok(())
     }
 
-    fn handshake(info_hash: [u8; 20], peer_id: [u8; 20]) -> [u8; 67] {
+    fn handshake(info_hash: [u8; 20], peer_id: [u8; 20]) -> [u8; 68] {
         const PROTOCOL: &[u8] = b"BitTorrent protocol";
-        let mut buffer: [u8; 67] = [0; PROTOCOL.len() + 8 + 20 + 20];
+        let mut buffer: [u8; 68] = [0; PROTOCOL.len() + 8 + 20 + 20 + 1];
         let mut writer: &mut [u8] = &mut buffer;
         writer.put_u8(PROTOCOL.len() as u8);
         writer.put(PROTOCOL);
@@ -217,7 +286,7 @@ pub enum PeerMessage<'a> {
     Have {
         index: i32,
     },
-    Bitfield(i32),
+    Bitfield(&'a BitSlice<u8, Msb0>),
     Request {
         index: i32,
         begin: i32,
@@ -273,7 +342,8 @@ impl PeerMessage<'_> {
             }
             PeerMessage::Bitfield(bitfield) => {
                 bytes.put_u8(Self::BITFIELD);
-                bytes.put_i32(bitfield);
+                // TODO
+                //bytes.put_i32(bitfield);
                 bytes.freeze()
             }
             PeerMessage::Request {
@@ -321,18 +391,19 @@ impl<'a> TryFrom<&'a [u8]> for PeerMessage<'a> {
     fn try_from(mut bytes: &'a [u8]) -> Result<Self, Self::Error> {
         let msg_type = bytes.get_u8();
         match msg_type {
-            CHOKE => Ok(PeerMessage::Choke),
-            UNCHOKE => Ok(PeerMessage::Unchoke),
-            INTERESTED => Ok(PeerMessage::Interested),
-            NOT_INTERESTED => Ok(PeerMessage::NotInterested),
-            HAVE => Ok(PeerMessage::Have {
+            PeerMessage::CHOKE => Ok(PeerMessage::Choke),
+            PeerMessage::UNCHOKE => Ok(PeerMessage::Unchoke),
+            PeerMessage::INTERESTED => Ok(PeerMessage::Interested),
+            PeerMessage::NOT_INTERESTED => Ok(PeerMessage::NotInterested),
+            PeerMessage::HAVE => Ok(PeerMessage::Have {
                 index: bytes.get_i32(),
             }),
-            BITFIELD => {
+            PeerMessage::BITFIELD => {
                 log::debug!("Bitfield received");
-                Ok(PeerMessage::Bitfield(bytes.get_i32()))
+                let bits = BitSlice::<_, Msb0>::try_from_slice(bytes).unwrap();
+                Ok(PeerMessage::Bitfield(bits))
             }
-            REQUEST => {
+            PeerMessage::REQUEST => {
                 let index = bytes.get_i32();
                 let begin = bytes.get_i32();
                 let length = bytes.get_i32();
@@ -347,13 +418,13 @@ impl<'a> TryFrom<&'a [u8]> for PeerMessage<'a> {
                     })
                 }
             }
-            PIECE => Ok(PeerMessage::Piece {
+            PeerMessage::PIECE => Ok(PeerMessage::Piece {
                 index: bytes.get_i32(),
                 begin: bytes.get_i32(),
                 piece: bytes.get_i32(),
                 data: bytes,
             }),
-            CANCEL => Ok(PeerMessage::Cancel {
+            PeerMessage::CANCEL => Ok(PeerMessage::Cancel {
                 index: bytes.get_i32(),
                 begin: bytes.get_i32(),
                 length: bytes.get_i32(),
@@ -372,11 +443,73 @@ pub fn add(left: usize, right: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
+    use tokio_uring::net::TcpListener;
+
+    use super::*;
     #[test]
     fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+        let torrent = std::fs::read("../test.torrent").unwrap();
+        let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
+        println!("infohash: {:?}", metainfo.info().info_hash());
+        println!("pices: {}", metainfo.info().pieces().count());
+        println!("files: {}", metainfo.info().files().count());
+        for piece in metainfo.info().pieces() {
+            println!("Piece size: {}", piece.len());
+        }
+    }
+
+    fn setup_test() -> (TorrentManager, [u8; 20], SocketAddr) {
+        let _ = env_logger::builder()
+            .filter_level(log::LevelFilter::Trace)
+            .is_test(true)
+            .try_init();
+
+        let torrent = std::fs::read("../test.torrent").unwrap();
+        let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
+        let info_hash: [u8; 20] = metainfo.info().info_hash().try_into().unwrap();
+
+        let port: u16 = (rand::random::<f32>() * (u16::MAX - 2000) as f32) as u16 + 2000;
+        let addr = format!("127.0.0.1:{port}").parse().unwrap();
+        let info_hash_clone = info_hash;
+        std::thread::spawn(move || {
+            let listener = TcpListener::bind(addr).unwrap();
+            tokio_uring::start(async move {
+                let (connection, _conn_addr) = listener.accept().await.unwrap();
+                let buf = vec![0u8; 68];
+                let (bytes_read, buf) = connection.read(buf).await;
+                let bytes_read = bytes_read.unwrap();
+                assert_eq!(bytes_read, 68);
+                assert_eq!(
+                    PeerConnection::handshake(info_hash_clone, [0; 20]),
+                    buf[..bytes_read]
+                );
+
+                let buf = PeerConnection::handshake(info_hash, [1; 20]).to_vec();
+                let (res, _buf) = connection.write(buf).await;
+                res.unwrap();
+                log::info!("Connected!");
+            });
+        });
+
+        let torrent_manager = TorrentManager::new(metainfo.info().clone());
+        (torrent_manager, info_hash, addr)
+    }
+
+    #[test]
+    fn test_incoming_choke() {
+        let (torrent_manager, info_hash, addr) = setup_test();
+
+        let state = torrent_manager.torrent_state;
+        tokio_uring::start(async move {
+            let connection = PeerConnection::new(addr, [0; 20], [1; 20], info_hash, state)
+                .await
+                .unwrap();
+            connection
+                .process_incoming(PeerMessage::Choke)
+                .await
+                .unwrap();
+            assert!(connection.state().peer_choking)
+        });
     }
 }

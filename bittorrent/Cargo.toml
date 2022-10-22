@@ -9,4 +9,11 @@ bytes = "1.2"
 tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
 anyhow = "1.0"
 log = "0.4"
+bip_metainfo = "0.12"
+parking_lot = "0.12"
+bitvec = { version = "1.0", default-features = false, features = ["alloc"]}
 tokio = { version = "1.20.1", features = ["time", "sync", "macros"] }
+
+[dev-dependencies]
+env_logger = "0.9"
+rand = "0.8"
