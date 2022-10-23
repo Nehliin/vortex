@@ -46,6 +46,16 @@ impl PeerConnectionState {
 pub struct TorrentState {
     completed_pieces: BitBox<u8, Msb0>,
     pretended_file: BytesMut,
+    max_unchoked: u32,
+    num_unchoked: u32,
+}
+
+impl TorrentState {
+    fn should_unchoke(&self) -> bool {
+        self.num_unchoked < self.max_unchoked
+    }
+}
+
 pub struct PeerConnectionHandle {
     peer_id: [u8; 20],
     //ip?
@@ -64,6 +74,8 @@ impl TorrentManager {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         let torrent_state = TorrentState {
             completed_pieces,
+            num_unchoked: 0,
+            max_unchoked,
             pretended_file: BytesMut::new(),
         };
         Self {
@@ -72,6 +84,7 @@ impl TorrentManager {
             torrent_state: Arc::new(Mutex::new(torrent_state)),
         }
     }
+
     pub fn add_peer(&mut self, addr: SocketAddr, our_id: [u8; 20], peer_id: [u8; 20]) {
         // Connect first perhaps so errors can be handled
         let (sender, receiver) = tokio::sync::mpsc::channel(256);
@@ -283,18 +296,20 @@ impl PeerConnection {
                 }
             }
             PeerMessage::Interested => {
-                let mut state = self.state_mut();
-                log::info!("Peer is interested in us!");
-                state.peer_interested = true;
-                if !state.is_choking {
-                    // TODO if we are not choking them we might need to send a
+                let is_choking = {
+                    let mut state = self.state_mut();
+                    log::info!("Peer is interested in us!");
+                    state.peer_interested = true;
+                    state.is_choking
+                };
+                if !is_choking {
+                    // if we are not choking them we might need to send a
                     // unchoke to avoid some race conditions. Libtorrent
                     // uses the same type of logic
-                    log::info!("Should perhaps send a redundant unchoke here");
-                } else {
-                    // TODO call to the torrent manager which might call back into
-                    // this peer connection and send an unchoke
-                    log::warn!("Should maybe unchoke");
+                    self.unchoke().await.unwrap();
+                } else if self.torrent_state.lock().should_unchoke() {
+                    log::debug!("Unchoking peer after intrest");
+                    self.unchoke().await.unwrap();
                 }
             }
             PeerMessage::NotInterested => {
