@@ -13,6 +13,7 @@ use std::{
 use bitvec::prelude::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use parking_lot::Mutex;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_uring::net::TcpStream;
 
 struct PeerConnectionState {
@@ -87,12 +88,35 @@ impl TorrentManager {
 // 5. PeerConnection requests subpieces automatically
 // 6. Manager is informed about pieces that have completed (and peer choking us)
 
-#[derive(Clone)]
+// Operations the manager can request of the peer connection
+pub enum PeerOrder {
+    Choke,
+    Unchoke,
+    Interested,
+    NotInterested,
+    RequestPiece(i32),
+    SendHave(i32),
+}
+
 pub struct PeerConnection {
     // TODO use utp
     stream: Rc<TcpStream>,
     state: Rc<RefCell<PeerConnectionState>>,
     torrent_state: Arc<Mutex<TorrentState>>,
+    // ew
+    send_queue: Option<Receiver<PeerOrder>>,
+}
+
+// this isn't super nice
+impl Clone for PeerConnection {
+    fn clone(&self) -> Self {
+        Self {
+            stream: self.stream.clone(),
+            state: self.state.clone(),
+            torrent_state: self.torrent_state.clone(),
+            send_queue: None,
+        }
+    }
 }
 
 impl PeerConnection {
@@ -102,6 +126,7 @@ impl PeerConnection {
         their_id: [u8; 20],
         info_hash: [u8; 20],
         torrent_state: Arc<Mutex<TorrentState>>,
+        send_queue: Receiver<PeerOrder>,
     ) -> anyhow::Result<PeerConnection> {
         let stream = Rc::new(TcpStream::connect(addr).await?);
 
@@ -140,9 +165,10 @@ impl PeerConnection {
                 stream: stream.clone(),
                 state: Rc::new(RefCell::new(stream_state)),
                 torrent_state,
+                send_queue: Some(send_queue),
             };
             let connection_clone = connection.clone();
-            // TODO Handle shutdowns
+            // TODO Handle shutdowns and move out to separate function
             tokio_uring::spawn(async move {
                 // Spec says max size of request is 2^14 so double that for safety
                 let mut read_buf = vec![0_u8; 2 ^ 15];
@@ -168,12 +194,54 @@ impl PeerConnection {
         anyhow::bail!("Didn't get enough data");
     }
 
-    pub async fn request(&self, index: i32, begin: i32, length: i32) {
-        let msg = PeerMessage::Request {
-            index,
-            begin,
-            length,
-        };
+    async fn choke(&self) -> anyhow::Result<()> {
+        // Reuse bufs?
+        let msg = PeerMessage::Choke;
+        let (result, _buf) = self.stream.write_all(msg.to_bytes()).await;
+        result.context("Failed to write choke msg")
+    }
+
+    async fn unchoke(&self) -> anyhow::Result<()> {
+        // Reuse bufs?
+        let msg = PeerMessage::Unchoke;
+        let (result, _buf) = self.stream.write_all(msg.to_bytes()).await;
+        result.context("Failed to write unchoke msg")
+    }
+
+    async fn interested(&self) -> anyhow::Result<()> {
+        // Reuse bufs?
+        let msg = PeerMessage::Interested;
+        let (result, _buf) = self.stream.write_all(msg.to_bytes()).await;
+        result.context("Failed to write interested msg")
+    }
+
+    async fn not_interested(&self) -> anyhow::Result<()> {
+        // Reuse bufs?
+        let msg = PeerMessage::NotInterested;
+        let (result, _buf) = self.stream.write_all(msg.to_bytes()).await;
+        result.context("Failed to write not interested msg")
+    }
+
+    async fn have(&self, index: i32) -> anyhow::Result<()> {
+        // Reuse bufs?
+        let msg = PeerMessage::Have { index };
+        let (result, _buf) = self.stream.write_all(msg.to_bytes()).await;
+        result.context("Failed to write have msg")
+    }
+
+    async fn connection_send_loop(&mut self) -> anyhow::Result<()> {
+        let mut send_queue = self.send_queue.take().unwrap();
+        while let Some(order) = send_queue.recv().await {
+            match order {
+                PeerOrder::Choke => self.choke().await?,
+                PeerOrder::Unchoke => self.unchoke().await?,
+                PeerOrder::Interested => self.interested().await?,
+                PeerOrder::NotInterested => self.not_interested().await?,
+                PeerOrder::RequestPiece(_index) => todo!(),
+                PeerOrder::SendHave(index) => self.have(index).await?,
+            }
+        }
+        Ok(())
     }
 
     // Consider adding handlers for each msg as a trait which extensions can implement
