@@ -10,6 +10,7 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::Context;
 use bitvec::prelude::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use parking_lot::Mutex;
@@ -70,6 +71,24 @@ impl TorrentManager {
             peer_connections: Vec::new(),
             torrent_state: Arc::new(Mutex::new(torrent_state)),
         }
+    }
+    pub fn add_peer(&mut self, addr: SocketAddr, our_id: [u8; 20], peer_id: [u8; 20]) {
+        // Connect first perhaps so errors can be handled
+        let (sender, receiver) = tokio::sync::mpsc::channel(256);
+        let peer_handle = PeerConnectionHandle { peer_id, sender };
+        let info_hash = self.torrent_info.info_hash().into();
+        let state_clone = self.torrent_state.clone();
+        std::thread::spawn(move || {
+            tokio_uring::start(async move {
+                let mut peer_connection =
+                    PeerConnection::new(addr, our_id, peer_id, info_hash, state_clone, receiver)
+                        .await
+                        .unwrap();
+
+                peer_connection.connection_send_loop().await.unwrap();
+            })
+        });
+        self.peer_connections.push(peer_handle);
     }
 }
 
