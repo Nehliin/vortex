@@ -17,6 +17,16 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_uring::net::TcpStream;
 
+struct Piece {
+    index: i32,
+    completed_subpieces: BitBox,
+    inflight_subpieces: BitBox,
+    last_subpiece_length: i32,
+    // TODO this should be a memory mapped region in
+    // the actual file
+    memory: Vec<u8>,
+}
+
 struct PeerConnectionState {
     /// This side is choking the peer
     is_choking: bool,
@@ -28,6 +38,7 @@ struct PeerConnectionState {
     peer_interested: bool,
     /// Which pieces do the peer have
     peer_pieces: BitBox<u8, Msb0>,
+    piece: Option<Piece>,
 }
 
 impl PeerConnectionState {
@@ -39,13 +50,14 @@ impl PeerConnectionState {
             peer_choking: false,
             peer_interested: false,
             peer_pieces,
+            piece: None,
         }
     }
 }
 
 pub struct TorrentState {
     completed_pieces: BitBox<u8, Msb0>,
-    pretended_file: BytesMut,
+    pretended_file: Vec<u8>,
     max_unchoked: u32,
     num_unchoked: u32,
 }
@@ -72,11 +84,13 @@ pub struct TorrentManager {
 impl TorrentManager {
     pub fn new(torrent_info: bip_metainfo::Info, max_unchoked: u32) -> Self {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
+        assert!(torrent_info.files().count() == 1);
+        let file_lenght = torrent_info.files().next().unwrap().length();
         let torrent_state = TorrentState {
             completed_pieces,
             num_unchoked: 0,
             max_unchoked,
-            pretended_file: BytesMut::new(),
+            pretended_file: vec![0; file_lenght as usize],
         };
         Self {
             torrent_info,
@@ -126,7 +140,7 @@ pub enum PeerOrder {
     Unchoke,
     Interested,
     NotInterested,
-    RequestPiece(i32),
+    RequestPiece { index: i32, total_len: u32 },
     SendHave(i32),
 }
 
@@ -150,6 +164,8 @@ impl Clone for PeerConnection {
         }
     }
 }
+
+const SUBPIECE_SIZE: i32 = 16_000;
 
 impl PeerConnection {
     pub async fn new(
@@ -226,6 +242,7 @@ impl PeerConnection {
         anyhow::bail!("Didn't get enough data");
     }
 
+    // TODO: unify all of these
     async fn choke(&self) -> anyhow::Result<()> {
         // Reuse bufs?
         let msg = PeerMessage::Choke;
@@ -261,6 +278,34 @@ impl PeerConnection {
         result.context("Failed to write have msg")
     }
 
+    async fn request(&self) -> anyhow::Result<()> {
+        let mut bytes = BytesMut::new();
+        {
+            let mut state = self.state_mut();
+            let piece = state.piece.as_mut().unwrap();
+            // First subpiece that isn't already completed or inflight
+            let mut unstarted_subpieces = piece.completed_subpieces.clone();
+            unstarted_subpieces |= &piece.inflight_subpieces;
+            // Max 5 packets per request
+            for _ in 0..5 {
+                if let Some(subindex) = unstarted_subpieces.first_zero() {
+                    piece.inflight_subpieces.set(subindex, true);
+                    unstarted_subpieces.set(subindex, true);
+                    bytes.put(
+                        PeerMessage::Request {
+                            index: piece.index,
+                            begin: subindex as i32 * SUBPIECE_SIZE as i32,
+                            length: SUBPIECE_SIZE as i32,
+                        }
+                        .to_bytes(),
+                    )
+                }
+            }
+        }
+        let (result, _buf) = self.stream.write_all(bytes.freeze()).await;
+        result.context("Failed to write request(s) msg")
+    }
+
     async fn connection_send_loop(&mut self) -> anyhow::Result<()> {
         let mut send_queue = self.send_queue.take().unwrap();
         while let Some(order) = send_queue.recv().await {
@@ -269,7 +314,34 @@ impl PeerConnection {
                 PeerOrder::Unchoke => self.unchoke().await?,
                 PeerOrder::Interested => self.interested().await?,
                 PeerOrder::NotInterested => self.not_interested().await?,
-                PeerOrder::RequestPiece(_index) => todo!(),
+                PeerOrder::RequestPiece { index, total_len } => {
+                    {
+                        let mut state = self.state_mut();
+                        // Don't start on a new piece before the current one is completed
+                        assert!(state.piece.is_none());
+                        assert!(state.peer_pieces[index as usize]);
+                        // extremely ineffective
+                        let memory = vec![0; total_len as usize];
+                        let subpieces = (total_len / SUBPIECE_SIZE as u32).max(1);
+                        let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
+                        let inflight_subpieces = completed_subpieces.clone();
+
+                        let last_subpiece_length = if total_len as i32 % SUBPIECE_SIZE == 0 {
+                            SUBPIECE_SIZE
+                        } else {
+                            total_len as i32 % SUBPIECE_SIZE
+                        };
+                        log::info!("Last subpiece lenght: {last_subpiece_length}");
+                        state.piece = Some(Piece {
+                            index,
+                            completed_subpieces,
+                            inflight_subpieces,
+                            memory,
+                            last_subpiece_length,
+                        });
+                    }
+                    self.request().await?
+                }
                 PeerOrder::SendHave(index) => self.have(index).await?,
             }
         }
@@ -352,21 +424,40 @@ impl PeerConnection {
             PeerMessage::Piece {
                 index,
                 begin,
-                piece,
+                lenght,
                 data,
             } => {
-                log::info!("Recived a piece index: {index}, begin: {begin}, piece: {piece}");
+                log::info!("Recived a piece index: {index}, begin: {begin}, piece: {lenght}");
                 log::info!("Data len: {}", data.len());
-                /*self.manager_coms
-                .send(ManagerMsg::Piece {
-                    index,
-                    begin,
-                    piece,
-                    // TODO don't copy here
-                    data: Bytes::copy_from_slice(data),
-                })
-                .await
-                .unwrap();*/
+                let mut state = self.state_mut();
+                if let Some(mut piece) = state.piece.take() {
+                    let subpiece_index = begin / SUBPIECE_SIZE;
+                    log::info!("Subpiece index received: {subpiece_index}");
+                    let last_subpiece =
+                        subpiece_index == (piece.completed_subpieces.len() - 1) as i32;
+                    if last_subpiece {
+                        log::info!("Last subpiece");
+                        assert_eq!(lenght, piece.last_subpiece_length);
+                    } else {
+                        log::info!("Not last subpiece");
+                        assert_eq!(lenght, SUBPIECE_SIZE);
+                    }
+                    piece.completed_subpieces.set(subpiece_index as usize, true);
+                    piece.inflight_subpieces.set(subpiece_index as usize, false);
+                    piece.memory[begin as usize..lenght as usize].copy_from_slice(data);
+                    let piece_completed = piece.completed_subpieces.all();
+
+                    if !piece_completed {
+                        state.piece = Some(piece);
+                    } else {
+                        log::info!("Piece completed!");
+                        drop(state);
+                        let mut torrent_state = self.torrent_state.lock();
+                        torrent_state.completed_pieces.set(index as usize, true);
+                    }
+                } else {
+                    log::error!("Piece received before it was expected");
+                }
             }
         }
         Ok(())
@@ -416,7 +507,7 @@ pub enum PeerMessage<'a> {
     Piece {
         index: i32,
         begin: i32,
-        piece: i32,
+        lenght: i32,
         data: &'a [u8],
     },
 }
@@ -487,7 +578,7 @@ impl PeerMessage<'_> {
             PeerMessage::Piece {
                 index,
                 begin,
-                piece,
+                lenght: piece,
                 data,
             } => {
                 bytes.put_u8(Self::PIECE);
@@ -537,7 +628,7 @@ impl<'a> TryFrom<&'a [u8]> for PeerMessage<'a> {
             PeerMessage::PIECE => Ok(PeerMessage::Piece {
                 index: bytes.get_i32(),
                 begin: bytes.get_i32(),
-                piece: bytes.get_i32(),
+                lenght: bytes.get_i32(),
                 data: bytes,
             }),
             PeerMessage::CANCEL => Ok(PeerMessage::Cancel {
