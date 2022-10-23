@@ -24,23 +24,42 @@ struct PeerConnectionState {
     peer_choking: bool,
     /// The peer is interested what we have to offer
     peer_interested: bool,
+    /// Which pieces do the peer have
+    peer_pieces: BitBox<u8, Msb0>,
+}
+
+impl PeerConnectionState {
+    fn new(peer_pieces: BitBox<u8, Msb0>) -> Self {
+        Self {
+            is_choking: true,
+            is_interested: false,
+            // TODO: is this correct?
+            peer_choking: false,
+            peer_interested: false,
+            peer_pieces,
+        }
+    }
 }
 
 pub struct TorrentState {
-    completed_pieces: BitBox,
+    completed_pieces: BitBox<u8, Msb0>,
     pretended_file: BytesMut,
+pub struct PeerConnectionHandle {
+    peer_id: [u8; 20],
+    //ip?
+    sender: Sender<PeerOrder>,
 }
 
 pub struct TorrentManager {
     torrent_info: bip_metainfo::Info,
-    peer_connections: Vec<PeerConnection>,
+    peer_connections: Vec<PeerConnectionHandle>,
     // Maybe use a channel to communicate instead?
     torrent_state: Arc<Mutex<TorrentState>>,
 }
 
 impl TorrentManager {
-    pub fn new(torrent_info: bip_metainfo::Info) -> Self {
-        let completed_pieces: BitBox = torrent_info.pieces().map(|_| false).collect();
+    pub fn new(torrent_info: bip_metainfo::Info, max_unchoked: u32) -> Self {
+        let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         let torrent_state = TorrentState {
             completed_pieces,
             pretended_file: BytesMut::new(),
@@ -113,12 +132,9 @@ impl PeerConnection {
                 Some(&their_id as &[u8]),
                 buf.get((str_len as usize + 28)..(str_len as usize + 48))
             );
-            let stream_state = PeerConnectionState {
-                is_choking: false,
-                peer_choking: false,
-                is_interested: false,
-                peer_interested: false,
-            };
+            let mut peer_pieces = torrent_state.lock().completed_pieces.clone();
+            peer_pieces.fill(false);
+            let stream_state = PeerConnectionState::new(peer_pieces);
 
             let connection = PeerConnection {
                 stream: stream.clone(),
@@ -203,17 +219,11 @@ impl PeerConnection {
             }
             PeerMessage::Have { index } => {
                 log::info!("Peer have piece with index: {index}");
-                /*self.manager_coms
-                .send(ManagerMsg::Have(index))
-                .await
-                .unwrap();*/
+                self.state_mut().peer_pieces.set(index as usize, true);
             }
             PeerMessage::Bitfield(field) => {
                 log::info!("Bifield received");
-                /*self.manager_coms
-                .send(ManagerMsg::Bitfield(field))
-                .await
-                .unwrap();*/
+                self.state_mut().peer_pieces |= field;
             }
             PeerMessage::Request {
                 index,
