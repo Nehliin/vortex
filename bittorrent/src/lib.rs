@@ -313,11 +313,13 @@ impl PeerConnection {
                 }
             }
             PeerMessage::NotInterested => {
-                let mut state = self.state_mut();
-                log::info!("Peer is no longer interested in us!");
-                state.peer_interested = false;
-                state.is_choking = true;
-                // TODO: send choke to the peer
+                {
+                    let mut state = self.state_mut();
+                    log::info!("Peer is no longer interested in us!");
+                    state.peer_interested = false;
+                    state.is_choking = true;
+                }
+                self.choke().await.unwrap();
             }
             PeerMessage::Have { index } => {
                 log::info!("Peer have piece with index: {index}");
@@ -335,6 +337,7 @@ impl PeerConnection {
                 log::info!(
                     "Peer wants piece with index: {index}, begin: {begin}, length: {length}"
                 );
+                unimplemented!()
             }
             PeerMessage::Cancel {
                 index,
