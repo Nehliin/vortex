@@ -6,6 +6,7 @@
 use std::{
     cell::{Ref, RefCell, RefMut},
     net::SocketAddr,
+    os::unix::prelude::{AsRawFd, FromRawFd},
     rc::Rc,
     sync::Arc,
 };
@@ -47,7 +48,7 @@ impl PeerConnectionState {
             is_choking: true,
             is_interested: false,
             // TODO: is this correct?
-            peer_choking: false,
+            peer_choking: true,
             peer_interested: false,
             peer_pieces,
             piece: None,
@@ -69,14 +70,14 @@ impl TorrentState {
 }
 
 pub struct PeerConnectionHandle {
-    peer_id: [u8; 20],
+    pub peer_id: [u8; 20],
     //ip?
-    sender: Sender<PeerOrder>,
+    pub sender: Sender<PeerOrder>,
 }
 
 pub struct TorrentManager {
     torrent_info: bip_metainfo::Info,
-    peer_connections: Vec<PeerConnectionHandle>,
+    pub peer_connections: Vec<PeerConnectionHandle>,
     // Maybe use a channel to communicate instead?
     torrent_state: Arc<Mutex<TorrentState>>,
 }
@@ -99,12 +100,20 @@ impl TorrentManager {
         }
     }
 
-    pub fn add_peer(&mut self, addr: SocketAddr, our_id: [u8; 20], peer_id: [u8; 20]) {
+    pub async fn add_peer(
+        &mut self,
+        addr: SocketAddr,
+        our_id: [u8; 20],
+        peer_id: [u8; 20],
+    ) -> tokio::sync::oneshot::Receiver<()> {
         // Connect first perhaps so errors can be handled
         let (sender, receiver) = tokio::sync::mpsc::channel(256);
         let peer_handle = PeerConnectionHandle { peer_id, sender };
         let info_hash = self.torrent_info.info_hash().into();
         let state_clone = self.torrent_state.clone();
+        let (tx, rc) = tokio::sync::oneshot::channel();
+        // TEMP UGLY HACK
+        let (closed_sender, closed_recv) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
             tokio_uring::start(async move {
                 let mut peer_connection =
@@ -112,10 +121,14 @@ impl TorrentManager {
                         .await
                         .unwrap();
 
+                tx.send(()).unwrap();
                 peer_connection.connection_send_loop().await.unwrap();
+                closed_sender.send(()).unwrap();
             })
         });
         self.peer_connections.push(peer_handle);
+        rc.await.unwrap();
+        closed_recv
     }
 }
 
@@ -135,6 +148,7 @@ impl TorrentManager {
 // 6. Manager is informed about pieces that have completed (and peer choking us)
 
 // Operations the manager can request of the peer connection
+#[derive(Debug)]
 pub enum PeerOrder {
     Choke,
     Unchoke,
@@ -165,7 +179,15 @@ impl Clone for PeerConnection {
     }
 }
 
+// THIS ISN'T 16kib
 const SUBPIECE_SIZE: i32 = 16_000;
+
+struct PendingMsg {
+    // Number of bytes remaining 
+    remaining_bytes: i32,
+    // Bytes accumalated so far
+    partial: BytesMut,
+}
 
 impl PeerConnection {
     pub async fn new(
@@ -176,14 +198,22 @@ impl PeerConnection {
         torrent_state: Arc<Mutex<TorrentState>>,
         send_queue: Receiver<PeerOrder>,
     ) -> anyhow::Result<PeerConnection> {
-        let stream = Rc::new(TcpStream::connect(addr).await?);
+        let stream = std::net::TcpStream::connect(addr).unwrap();
+        log::info!("LOCAL_ADDR: {}", stream.local_addr().unwrap());
+        /*let stream = TcpStream::connect(addr).await?;
+        let fd = stream.as_raw_fd();
+        let std_stream = unsafe { std::net::TcpStream::from_raw_fd(fd) };
+        let stream = TcpStream::from_std(std_stream);
+        let stream = Rc::new(stream);*/
 
+        let stream = Rc::new(TcpStream::from_std(stream));
         let handshake_msg = Self::handshake(info_hash, our_id).to_vec();
         let (res, buf) = stream.write(handshake_msg).await;
         let _res = res?;
 
         let (res, buf) = stream.read(buf).await;
         let read = res?;
+        log::info!("RECEIVED: {read}");
         let mut buf = buf.as_slice();
         if read >= 68 {
             log::info!("HANDSHAKE RECV");
@@ -193,10 +223,11 @@ impl PeerConnection {
                 buf.get(..str_len as usize),
                 Some(b"BitTorrent protocol" as &[u8])
             );
-            assert_eq!(
+            // Extensions!
+            /*assert_eq!(
                 buf.get((str_len as usize)..(str_len as usize + 8)),
                 Some(&[0_u8; 8] as &[u8])
-            );
+            );*/
             assert_eq!(
                 Some(&info_hash as &[u8]),
                 buf.get((str_len as usize + 8)..(str_len as usize + 28))
@@ -219,27 +250,79 @@ impl PeerConnection {
             // TODO Handle shutdowns and move out to separate function
             tokio_uring::spawn(async move {
                 // Spec says max size of request is 2^14 so double that for safety
-                let mut read_buf = vec![0_u8; 2 ^ 15];
+                let mut read_buf = BytesMut::zeroed(1 << 15);
+                let mut maybe_msg_len: Option<PendingMsg> = None;
                 loop {
+                    assert_eq!(read_buf.len(), 1 << 15);
                     let (result, buf) = connection_clone.stream.read(read_buf).await;
+                    read_buf = buf;
                     match result {
-                        Ok(0) => log::info!("Shutting down connection"),
+                        Ok(0) => {
+                            log::info!("Shutting down connection");
+                            break;
+                        }
                         Ok(bytes_read) => {
-                            log::debug!("Read data from peer connection: {bytes_read}");
-                            let msg = PeerMessage::try_from(&buf[..bytes_read]).unwrap();
-                            connection_clone.process_incoming(msg).await.unwrap();
+                            let remainder = read_buf.split_off(bytes_read);
+                            if maybe_msg_len.is_none() && bytes_read < std::mem::size_of::<i32>() {
+                                panic!("Not enough data received");
+                            }
+                            let mut buf = read_buf.clone();
+                            if maybe_msg_len.is_none() {
+                                let pending = PendingMsg {
+                                    remaining_bytes: buf.get_i32(),
+                                    partial: BytesMut::new(),
+                                };
+                                maybe_msg_len = Some(pending);
+                            }
+                            connection_clone.parse_msgs(buf, &mut maybe_msg_len).await;
+                            read_buf.unsplit(remainder);
                         }
                         Err(err) => {
                             log::error!("Failed to read from peer connection: {err}");
                             break;
                         }
                     }
-                    read_buf = buf;
                 }
             });
             return Ok(connection);
         }
         anyhow::bail!("Didn't get enough data");
+    }
+
+    async fn parse_msgs(&self, mut incoming: BytesMut, pending_msg: &mut Option<PendingMsg>) {
+        while let Some(pending) = pending_msg {
+            // There exist enough data to finish the pending message
+            if incoming.remaining() as i32 >= pending.remaining_bytes {
+                let mut remainder = incoming.split_off(pending.remaining_bytes as usize);
+                pending.partial.unsplit(incoming.split());
+                log::trace!("Extending partial: {}", pending.remaining_bytes);
+                let msg = PeerMessage::try_from(&pending.partial[..]).unwrap();
+                self.process_incoming(msg).await.unwrap();
+                // Should we try to start parsing a new msg?
+                if remainder.remaining() >= std::mem::size_of::<i32>() {
+                    let len_rem = remainder.get_i32();
+                    log::debug!("Starting new message with len: {len_rem}");
+                    // If we don't start from the 0 here the extend from slice will
+                    // duplicate the partial data
+                    let partial: BytesMut = BytesMut::new();
+                    *pending_msg = Some(PendingMsg { remaining_bytes: len_rem, partial });
+                } else {
+                    log::trace!("Buffer spent");
+                    // This might not be true if we are unlucky
+                    // and it's possible for a i32 to split between 
+                    // to separate receive operations
+                    assert_eq!(remainder.remaining(), 0);
+                    *pending_msg = None;
+                }
+                incoming = remainder;
+            } else {
+                log::trace!("More data needed");
+                pending.remaining_bytes -= incoming.len() as i32;
+                pending.partial.unsplit(incoming);
+                // Return to read more data!
+                return;
+            }
+        }
     }
 
     // TODO: unify all of these
@@ -286,6 +369,7 @@ impl PeerConnection {
             // First subpiece that isn't already completed or inflight
             let mut unstarted_subpieces = piece.completed_subpieces.clone();
             unstarted_subpieces |= &piece.inflight_subpieces;
+            let last_subpiece_index = piece.completed_subpieces.len() - 1;
             // Max 5 packets per request
             for _ in 0..5 {
                 if let Some(subindex) = unstarted_subpieces.first_zero() {
@@ -295,10 +379,17 @@ impl PeerConnection {
                         PeerMessage::Request {
                             index: piece.index,
                             begin: subindex as i32 * SUBPIECE_SIZE as i32,
-                            length: SUBPIECE_SIZE as i32,
+                            length: if last_subpiece_index == subindex {
+                                piece.last_subpiece_length
+                            } else {
+                                SUBPIECE_SIZE as i32
+                            },
                         }
                         .to_bytes(),
-                    )
+                    );
+                    if subindex == last_subpiece_index {
+                        break;
+                    }
                 }
             }
         }
@@ -319,10 +410,12 @@ impl PeerConnection {
                         let mut state = self.state_mut();
                         // Don't start on a new piece before the current one is completed
                         assert!(state.piece.is_none());
-                        assert!(state.peer_pieces[index as usize]);
+                        // This is racy
+                        //assert!(state.peer_pieces[index as usize]);
                         // extremely ineffective
                         let memory = vec![0; total_len as usize];
-                        let subpieces = (total_len / SUBPIECE_SIZE as u32).max(1);
+                        let subpieces = (total_len / SUBPIECE_SIZE as u32) + 1;
+                        dbg!(subpieces);
                         let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
                         let inflight_subpieces = completed_subpieces.clone();
 
@@ -427,7 +520,7 @@ impl PeerConnection {
                 lenght,
                 data,
             } => {
-                log::info!("Recived a piece index: {index}, begin: {begin}, piece: {lenght}");
+                log::info!("Recived a piece index: {index}, begin: {begin}, length: {lenght}");
                 log::info!("Data len: {}", data.len());
                 let mut state = self.state_mut();
                 if let Some(mut piece) = state.piece.take() {
@@ -440,11 +533,14 @@ impl PeerConnection {
                         assert_eq!(lenght, piece.last_subpiece_length);
                     } else {
                         log::info!("Not last subpiece");
+                        // TODO: is that correct
+                        // LENGHT is SUBPIECE_SIZE - HEADER_SIZE
                         assert_eq!(lenght, SUBPIECE_SIZE);
                     }
                     piece.completed_subpieces.set(subpiece_index as usize, true);
                     piece.inflight_subpieces.set(subpiece_index as usize, false);
-                    piece.memory[begin as usize..lenght as usize].copy_from_slice(data);
+                    piece.memory[begin as usize..begin as usize + data.len() as usize]
+                        .copy_from_slice(data);
                     let piece_completed = piece.completed_subpieces.all();
 
                     if !piece_completed {
@@ -527,27 +623,33 @@ impl PeerMessage<'_> {
         let mut bytes = BytesMut::new();
         match self {
             PeerMessage::Choke => {
+                bytes.put_i32(1);
                 bytes.put_u8(Self::CHOKE);
                 bytes.freeze()
             }
             PeerMessage::Unchoke => {
+                bytes.put_i32(1);
                 bytes.put_u8(Self::UNCHOKE);
                 bytes.freeze()
             }
             PeerMessage::Interested => {
+                bytes.put_i32(1);
                 bytes.put_u8(Self::INTERESTED);
                 bytes.freeze()
             }
             PeerMessage::NotInterested => {
+                bytes.put_i32(1);
                 bytes.put_u8(Self::NOT_INTERESTED);
                 bytes.freeze()
             }
             PeerMessage::Have { index } => {
+                bytes.put_i32(5);
                 bytes.put_u8(Self::HAVE);
                 bytes.put_i32(index);
                 bytes.freeze()
             }
             PeerMessage::Bitfield(bitfield) => {
+                bytes.put_i32(1);
                 bytes.put_u8(Self::BITFIELD);
                 // TODO
                 //bytes.put_i32(bitfield);
@@ -558,6 +660,7 @@ impl PeerMessage<'_> {
                 begin,
                 length,
             } => {
+                bytes.put_i32(13);
                 bytes.put_u8(Self::REQUEST);
                 bytes.put_i32(index);
                 bytes.put_i32(begin);
@@ -569,6 +672,7 @@ impl PeerMessage<'_> {
                 begin,
                 length,
             } => {
+                bytes.put_i32(13);
                 bytes.put_u8(Self::CANCEL);
                 bytes.put_i32(index);
                 bytes.put_i32(begin);
@@ -581,6 +685,7 @@ impl PeerMessage<'_> {
                 lenght: piece,
                 data,
             } => {
+                bytes.put_i32(13 + data.len() as i32);
                 bytes.put_u8(Self::PIECE);
                 bytes.put_i32(index);
                 bytes.put_i32(begin);
@@ -596,6 +701,7 @@ impl<'a> TryFrom<&'a [u8]> for PeerMessage<'a> {
     type Error = anyhow::Error;
 
     fn try_from(mut bytes: &'a [u8]) -> Result<Self, Self::Error> {
+        let length = bytes.len();
         let msg_type = bytes.get_u8();
         match msg_type {
             PeerMessage::CHOKE => Ok(PeerMessage::Choke),
@@ -614,7 +720,7 @@ impl<'a> TryFrom<&'a [u8]> for PeerMessage<'a> {
                 let index = bytes.get_i32();
                 let begin = bytes.get_i32();
                 let length = bytes.get_i32();
-                if length > 2 ^ 14 {
+                if length > (1 << 14) {
                     log::error!("Too large piece requested failing");
                     anyhow::bail!("Invalid request");
                 } else {
@@ -625,12 +731,16 @@ impl<'a> TryFrom<&'a [u8]> for PeerMessage<'a> {
                     })
                 }
             }
-            PeerMessage::PIECE => Ok(PeerMessage::Piece {
-                index: bytes.get_i32(),
-                begin: bytes.get_i32(),
-                lenght: bytes.get_i32(),
-                data: bytes,
-            }),
+            PeerMessage::PIECE => {
+                // msg type + index + begin
+                const HEADER_SIZE: i32 = 9;
+                Ok(PeerMessage::Piece {
+                    index: bytes.get_i32(),
+                    begin: bytes.get_i32(),
+                    lenght: length as i32 - HEADER_SIZE,
+                    data: bytes,
+                })
+            }
             PeerMessage::CANCEL => Ok(PeerMessage::Cancel {
                 index: bytes.get_i32(),
                 begin: bytes.get_i32(),
@@ -658,7 +768,7 @@ mod tests {
     use super::*;
     #[test]
     fn it_works() {
-        let torrent = std::fs::read("../test.torrent").unwrap();
+        let torrent = std::fs::read("test_torrent.torrent").unwrap();
         let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
         println!("infohash: {:?}", metainfo.info().info_hash());
         println!("pices: {}", metainfo.info().pieces().count());
