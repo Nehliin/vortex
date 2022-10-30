@@ -29,11 +29,7 @@ fn initial_end_to_end() {
             .send(bittorrent::PeerOrder::Interested)
             .await
             .unwrap();
-        handle
-            .sender
-            .send(bittorrent::PeerOrder::Unchoke)
-            .await
-            .unwrap();
+        
         let piece_len = metainfo.info().piece_length();
         /*        for (i, _) in metainfo.info().pieces().enumerate() {
             handle
