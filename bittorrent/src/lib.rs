@@ -179,11 +179,10 @@ impl Clone for PeerConnection {
     }
 }
 
-// THIS ISN'T 16kib
-const SUBPIECE_SIZE: i32 = 16_000;
+const SUBPIECE_SIZE: i32 = 16_384;
 
 struct PendingMsg {
-    // Number of bytes remaining 
+    // Number of bytes remaining
     remaining_bytes: i32,
     // Bytes accumalated so far
     partial: BytesMut,
@@ -305,11 +304,14 @@ impl PeerConnection {
                     // If we don't start from the 0 here the extend from slice will
                     // duplicate the partial data
                     let partial: BytesMut = BytesMut::new();
-                    *pending_msg = Some(PendingMsg { remaining_bytes: len_rem, partial });
+                    *pending_msg = Some(PendingMsg {
+                        remaining_bytes: len_rem,
+                        partial,
+                    });
                 } else {
                     log::trace!("Buffer spent");
                     // This might not be true if we are unlucky
-                    // and it's possible for a i32 to split between 
+                    // and it's possible for a i32 to split between
                     // to separate receive operations
                     assert_eq!(remainder.remaining(), 0);
                     *pending_msg = None;
@@ -414,16 +416,20 @@ impl PeerConnection {
                         //assert!(state.peer_pieces[index as usize]);
                         // extremely ineffective
                         let memory = vec![0; total_len as usize];
-                        let subpieces = (total_len / SUBPIECE_SIZE as u32) + 1;
-                        dbg!(subpieces);
-                        let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
-                        let inflight_subpieces = completed_subpieces.clone();
-
                         let last_subpiece_length = if total_len as i32 % SUBPIECE_SIZE == 0 {
                             SUBPIECE_SIZE
                         } else {
                             total_len as i32 % SUBPIECE_SIZE
                         };
+                        let subpieces = (total_len / SUBPIECE_SIZE as u32)
+                            + if last_subpiece_length != SUBPIECE_SIZE {
+                                1
+                            } else {
+                                0
+                            };
+                        let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
+                        let inflight_subpieces = completed_subpieces.clone();
+
                         log::info!("Last subpiece lenght: {last_subpiece_length}");
                         state.piece = Some(Piece {
                             index,
