@@ -6,7 +6,6 @@
 use std::{
     cell::{Ref, RefCell, RefMut},
     net::SocketAddr,
-    os::unix::prelude::{AsRawFd, FromRawFd},
     rc::Rc,
     sync::Arc,
 };
@@ -20,12 +19,45 @@ use tokio_uring::net::TcpStream;
 
 struct Piece {
     index: i32,
+    // Contains only completed subpieces
     completed_subpieces: BitBox,
+    // Contains both completed and inflight subpieces
     inflight_subpieces: BitBox,
     last_subpiece_length: i32,
     // TODO this should be a memory mapped region in
     // the actual file
     memory: Vec<u8>,
+}
+
+impl Piece {
+    fn new(index: i32, lenght: u32) -> Self {
+        let memory = vec![0; lenght as usize];
+        let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
+            SUBPIECE_SIZE
+        } else {
+            lenght as i32 % SUBPIECE_SIZE
+        };
+        let subpieces = (lenght / SUBPIECE_SIZE as u32)
+            + if last_subpiece_length != SUBPIECE_SIZE {
+                1
+            } else {
+                0
+            };
+        let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
+        let inflight_subpieces = completed_subpieces.clone();
+        Self {
+            index,
+            completed_subpieces,
+            inflight_subpieces,
+            last_subpiece_length,
+            memory,
+        }
+    }
+
+    #[inline]
+    fn next_unstarted_subpice(&self) -> Option<usize> {
+        self.inflight_subpieces.first_zero()
+    }
 }
 
 struct PeerConnectionState {
@@ -39,7 +71,10 @@ struct PeerConnectionState {
     peer_interested: bool,
     /// Which pieces do the peer have
     peer_pieces: BitBox<u8, Msb0>,
-    piece: Option<Piece>,
+    /// Piece that is being currently downloaded
+    /// from the peer. Might allow for more than 1 per peer
+    /// in the future
+    currently_downloading: Option<Piece>,
 }
 
 impl PeerConnectionState {
@@ -51,7 +86,7 @@ impl PeerConnectionState {
             peer_choking: true,
             peer_interested: false,
             peer_pieces,
-            piece: None,
+            currently_downloading: None,
         }
     }
 }
@@ -367,16 +402,13 @@ impl PeerConnection {
         let mut bytes = BytesMut::new();
         {
             let mut state = self.state_mut();
-            let piece = state.piece.as_mut().unwrap();
+            let piece = state.currently_downloading.as_mut().unwrap();
             // First subpiece that isn't already completed or inflight
-            let mut unstarted_subpieces = piece.completed_subpieces.clone();
-            unstarted_subpieces |= &piece.inflight_subpieces;
             let last_subpiece_index = piece.completed_subpieces.len() - 1;
-            // Max 5 packets per request
+            // Should have 5 in flight subpieces at all times
             for _ in 0..5 {
-                if let Some(subindex) = unstarted_subpieces.first_zero() {
+                if let Some(subindex) = piece.next_unstarted_subpice() {
                     piece.inflight_subpieces.set(subindex, true);
-                    unstarted_subpieces.set(subindex, true);
                     bytes.put(
                         PeerMessage::Request {
                             index: piece.index,
@@ -411,33 +443,11 @@ impl PeerConnection {
                     {
                         let mut state = self.state_mut();
                         // Don't start on a new piece before the current one is completed
-                        assert!(state.piece.is_none());
+                        assert!(state.currently_downloading.is_none());
                         // This is racy
                         //assert!(state.peer_pieces[index as usize]);
-                        // extremely ineffective
-                        let memory = vec![0; total_len as usize];
-                        let last_subpiece_length = if total_len as i32 % SUBPIECE_SIZE == 0 {
-                            SUBPIECE_SIZE
-                        } else {
-                            total_len as i32 % SUBPIECE_SIZE
-                        };
-                        let subpieces = (total_len / SUBPIECE_SIZE as u32)
-                            + if last_subpiece_length != SUBPIECE_SIZE {
-                                1
-                            } else {
-                                0
-                            };
-                        let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
-                        let inflight_subpieces = completed_subpieces.clone();
-
-                        log::info!("Last subpiece lenght: {last_subpiece_length}");
-                        state.piece = Some(Piece {
-                            index,
-                            completed_subpieces,
-                            inflight_subpieces,
-                            memory,
-                            last_subpiece_length,
-                        });
+                        let piece = Piece::new(index, total_len);
+                        state.currently_downloading = Some(piece);
                     }
                     self.request().await?
                 }
@@ -519,6 +529,7 @@ impl PeerConnection {
                     "Peer cancels request with index: {index}, begin: {begin}, length: {length}"
                 );
                 //TODO cancel if has yet to been sent I guess
+                unimplemented!()
             }
             PeerMessage::Piece {
                 index,
@@ -529,7 +540,7 @@ impl PeerConnection {
                 log::info!("Recived a piece index: {index}, begin: {begin}, length: {lenght}");
                 log::info!("Data len: {}", data.len());
                 let mut state = self.state_mut();
-                if let Some(mut piece) = state.piece.take() {
+                if let Some(mut piece) = state.currently_downloading.take() {
                     let subpiece_index = begin / SUBPIECE_SIZE;
                     log::info!("Subpiece index received: {subpiece_index}");
                     let last_subpiece =
@@ -539,18 +550,42 @@ impl PeerConnection {
                         assert_eq!(lenght, piece.last_subpiece_length);
                     } else {
                         log::info!("Not last subpiece");
-                        // TODO: is that correct
-                        // LENGHT is SUBPIECE_SIZE - HEADER_SIZE
                         assert_eq!(lenght, SUBPIECE_SIZE);
                     }
                     piece.completed_subpieces.set(subpiece_index as usize, true);
-                    piece.inflight_subpieces.set(subpiece_index as usize, false);
                     piece.memory[begin as usize..begin as usize + data.len() as usize]
                         .copy_from_slice(data);
                     let piece_completed = piece.completed_subpieces.all();
 
                     if !piece_completed {
-                        state.piece = Some(piece);
+                        let piece_index = piece.index;
+                        let last_subpiece_length = piece.last_subpiece_length;
+                        // Next subpice to download (that isn't already inflight)
+                        let maybe_next_subpiece = piece.next_unstarted_subpice();
+                        if let Some(next_subpice) = maybe_next_subpiece {
+                            piece.inflight_subpieces.set(next_subpice, true);
+                            state.currently_downloading = Some(piece);
+                            drop(state);
+                            // Write a new request, would slab + writev make sense?
+                            let (res, _buf) = self
+                                .stream
+                                .write_all(
+                                    PeerMessage::Request {
+                                        index: piece_index,
+                                        begin: SUBPIECE_SIZE * next_subpice as i32,
+                                        length: if last_subpiece {
+                                            last_subpiece_length
+                                        } else {
+                                            SUBPIECE_SIZE
+                                        },
+                                    }
+                                    .to_bytes(),
+                                )
+                                .await;
+                            res.unwrap();
+                        } else {
+                            state.currently_downloading = Some(piece);
+                        }
                     } else {
                         log::info!("Piece completed!");
                         drop(state);
@@ -657,9 +692,10 @@ impl PeerMessage<'_> {
             PeerMessage::Bitfield(bitfield) => {
                 bytes.put_i32(1);
                 bytes.put_u8(Self::BITFIELD);
+                unimplemented!()
                 // TODO
                 //bytes.put_i32(bitfield);
-                bytes.freeze()
+                //bytes.freeze()
             }
             PeerMessage::Request {
                 index,
