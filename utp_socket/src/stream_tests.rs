@@ -636,7 +636,7 @@ fn take_packets_in_reorder_buffer_into_account_for_window_size() {
         assert_eq!(stream.state().our_advertised_window(), 50);
         assert_eq!(stream.state().incoming_buffer.len(), 1);
         assert!(stream.state().incoming_buffer.get(rc_seq_nr + 4).is_some());
-        
+
         stream
             .process_incoming(Packet {
                 header: PacketHeader {
@@ -656,7 +656,7 @@ fn take_packets_in_reorder_buffer_into_account_for_window_size() {
         let ack_pkt = pkt_rc.recv().await.unwrap();
         assert_eq!(ack_pkt.header.ack_nr, rc_seq_nr + 2);
         assert_eq!(ack_pkt.header.packet_type, PacketType::State);
-        // Packet was handled but we do not have any window left 
+        // Packet was handled but we do not have any window left
         assert_eq!(ack_pkt.header.wnd_size, 0);
         assert_eq!(stream.state().our_advertised_window(), 0);
         assert_eq!(stream.state().incoming_buffer.len(), 1);

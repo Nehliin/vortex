@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bittorrent::TorrentManager;
+use bittorrent::{peer_connection::PeerOrder, TorrentManager};
 
 // Make these tests automatic
 // ./build/examples/client_test -G -f log.txt --peer_fingerprint=9424471b03a5975de79a --list-settings test_torrent.torrent
@@ -24,12 +24,8 @@ fn initial_end_to_end() {
             .await;
         log::info!("We are connected!!");
         let handle = &torrent_manager.peer_connections[0];
-        handle
-            .sender
-            .send(bittorrent::PeerOrder::Interested)
-            .await
-            .unwrap();
-        
+        handle.sender.send(PeerOrder::Interested).await.unwrap();
+
         let piece_len = metainfo.info().piece_length();
         /*        for (i, _) in metainfo.info().pieces().enumerate() {
             handle
@@ -44,7 +40,7 @@ fn initial_end_to_end() {
         // packet is too large
         handle
             .sender
-            .send(bittorrent::PeerOrder::RequestPiece {
+            .send(PeerOrder::RequestPiece {
                 index: 0,
                 total_len: dbg!(piece_len) as u32,
             })
