@@ -17,6 +17,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_uring::net::TcpStream;
 
+// Perhaps also create a subpiece type that can be converted into a peer request
 struct Piece {
     index: i32,
     // Contains only completed subpieces
@@ -54,9 +55,37 @@ impl Piece {
         }
     }
 
+    fn on_subpiece(&mut self, index: i32, begin: i32, length: i32, data: &[u8]) {
+        // This subpice is part of the currently downloading piece
+        assert_eq!(self.index, index);
+        let subpiece_index = begin / SUBPIECE_SIZE;
+        log::info!("Subpiece index received: {subpiece_index}");
+        let last_subpiece = subpiece_index == self.last_subpiece_index();
+        if last_subpiece {
+            log::info!("Last subpiece");
+            assert_eq!(length, self.last_subpiece_length);
+        } else {
+            log::info!("Not last subpiece");
+            assert_eq!(length, SUBPIECE_SIZE);
+        }
+        self.completed_subpieces.set(subpiece_index as usize, true);
+        self.memory[begin as usize..begin as usize + data.len() as usize].copy_from_slice(data);
+    }
+
+    // Perhaps this can return the subpice or a peer request directly?
     #[inline]
     fn next_unstarted_subpice(&self) -> Option<usize> {
         self.inflight_subpieces.first_zero()
+    }
+
+    #[inline]
+    fn last_subpiece_index(&self) -> i32 {
+        self.completed_subpieces.len() as i32 - 1
+    }
+
+    #[inline]
+    fn is_complete(&self) -> bool {
+        self.completed_subpieces.all()
     }
 }
 
@@ -539,42 +568,24 @@ impl PeerConnection {
             } => {
                 log::info!("Recived a piece index: {index}, begin: {begin}, length: {lenght}");
                 log::info!("Data len: {}", data.len());
-                let mut state = self.state_mut();
-                if let Some(mut piece) = state.currently_downloading.take() {
-                    let subpiece_index = begin / SUBPIECE_SIZE;
-                    log::info!("Subpiece index received: {subpiece_index}");
-                    let last_subpiece =
-                        subpiece_index == (piece.completed_subpieces.len() - 1) as i32;
-                    if last_subpiece {
-                        log::info!("Last subpiece");
-                        assert_eq!(lenght, piece.last_subpiece_length);
-                    } else {
-                        log::info!("Not last subpiece");
-                        assert_eq!(lenght, SUBPIECE_SIZE);
-                    }
-                    piece.completed_subpieces.set(subpiece_index as usize, true);
-                    piece.memory[begin as usize..begin as usize + data.len() as usize]
-                        .copy_from_slice(data);
-                    let piece_completed = piece.completed_subpieces.all();
-
-                    if !piece_completed {
-                        let piece_index = piece.index;
-                        let last_subpiece_length = piece.last_subpiece_length;
+                let currently_downloading = self.state_mut().currently_downloading.take();
+                if let Some(mut piece) = currently_downloading {
+                    piece.on_subpiece(index, begin, lenght, data);
+                    if !piece.is_complete() {
                         // Next subpice to download (that isn't already inflight)
-                        let maybe_next_subpiece = piece.next_unstarted_subpice();
-                        if let Some(next_subpice) = maybe_next_subpiece {
+                        if let Some(next_subpice) = piece.next_unstarted_subpice() {
                             piece.inflight_subpieces.set(next_subpice, true);
-                            state.currently_downloading = Some(piece);
-                            drop(state);
                             // Write a new request, would slab + writev make sense?
                             let (res, _buf) = self
                                 .stream
                                 .write_all(
                                     PeerMessage::Request {
-                                        index: piece_index,
+                                        index: piece.index,
                                         begin: SUBPIECE_SIZE * next_subpice as i32,
-                                        length: if last_subpiece {
-                                            last_subpiece_length
+                                        length: if next_subpice as i32
+                                            == piece.last_subpiece_index()
+                                        {
+                                            piece.last_subpiece_length
                                         } else {
                                             SUBPIECE_SIZE
                                         },
@@ -583,17 +594,16 @@ impl PeerConnection {
                                 )
                                 .await;
                             res.unwrap();
-                        } else {
-                            state.currently_downloading = Some(piece);
                         }
+                        // Still downloading the same piece
+                        self.state_mut().currently_downloading = Some(piece);
                     } else {
                         log::info!("Piece completed!");
-                        drop(state);
                         let mut torrent_state = self.torrent_state.lock();
                         torrent_state.completed_pieces.set(index as usize, true);
                     }
                 } else {
-                    log::error!("Piece received before it was expected");
+                    log::error!("Recieved unexpected piece message");
                 }
             }
         }
