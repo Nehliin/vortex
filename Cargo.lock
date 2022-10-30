@@ -169,9 +169,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.0.73"
+version = "1.0.74"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fff2a6927b3bb87f9595d67196a70493f627687a71d87a0d692242c33f58c11"
+checksum = "581f5dba903aac52ea3feb5ec4810848460ee833876f1f9b0fdeab1f19091574"
 
 [[package]]
 name = "cfg-if"
@@ -413,9 +413,9 @@ dependencies = [
 
 [[package]]
 name = "io-uring"
-version = "0.5.7"
+version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d32c9c053ad47572e11da8bce622ed4c9ae9dedac5b7f678a2e876d1494d4c4"
+checksum = "00d78c9f2db2a9800dfd15c69543896dae2135112dde0d1944442e83da8ce23a"
 dependencies = [
  "bitflags",
  "libc",
@@ -453,9 +453,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
-version = "0.2.136"
+version = "0.2.137"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55edcf6c0bb319052dea84732cf99db461780fd5e8d3eb46ab6ff312ab31f197"
+checksum = "fc7fcc620a3bff7cdd7a365be3376c97191aeaccc2a603e600951e452615bf89"
 
 [[package]]
 name = "linked-hash-map"
@@ -1125,7 +1125,7 @@ dependencies = [
 [[package]]
 name = "tokio-uring"
 version = "0.3.0"
-source = "git+https://github.com/tokio-rs/tokio-uring?branch=master#13f740988de40f6ef99f11b870985cd051e7b5ef"
+source = "git+https://github.com/tokio-rs/tokio-uring?branch=master#507186d1ab6854470ee746cb64c6f2d0cf9604f7"
 dependencies = [
  "bytes",
  "io-uring",
