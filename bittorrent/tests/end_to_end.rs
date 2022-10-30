@@ -12,7 +12,7 @@ fn initial_end_to_end() {
         .try_init();
     let torrent = std::fs::read("test_torrent.torrent").unwrap();
     let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
-    let mut torrent_manager = TorrentManager::new(metainfo.info().clone(), 1);
+    let torrent_manager = TorrentManager::new(metainfo.info().clone(), 1);
     tokio_uring::start(async move {
         // Will never shutdown!
         let shutdown = torrent_manager
@@ -23,7 +23,7 @@ fn initial_end_to_end() {
             )
             .await;
         log::info!("We are connected!!");
-        let handle = &torrent_manager.peer_connections[0];
+        let handle = torrent_manager.peer(0).unwrap();
         handle.sender.send(PeerOrder::Interested).await.unwrap();
 
         let piece_len = metainfo.info().piece_length();
@@ -46,6 +46,10 @@ fn initial_end_to_end() {
             })
             .await
             .unwrap();
+        // nästa steg: se till att torrent manager kollar hash samt skickar
+        // ut have meddelande till samtliga peers
+        // Sen ska den skicka ut ny order om att ladda ner piece
+        // sen efter det kan man böra kolla piece selection algoritmer
         tokio::time::sleep(Duration::from_secs(3)).await;
         /*handle
         .sender

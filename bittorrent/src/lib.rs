@@ -10,6 +10,8 @@ use bytes::BytesMut;
 use parking_lot::Mutex;
 use peer_connection::{PeerConnection, PeerConnectionHandle};
 
+const SUBPIECE_SIZE: i32 = 16_384;
+
 pub mod peer_connection;
 pub mod peer_message;
 #[cfg(test)]
@@ -92,17 +94,12 @@ pub struct TorrentState {
     pretended_file: Vec<u8>,
     max_unchoked: u32,
     num_unchoked: u32,
+    peer_connections: Vec<PeerConnectionHandle>,
 }
 
-impl TorrentState {
-    fn should_unchoke(&self) -> bool {
-        self.num_unchoked < self.max_unchoked
-    }
-}
-
+#[derive(Clone)]
 pub struct TorrentManager {
-    torrent_info: bip_metainfo::Info,
-    pub peer_connections: Vec<PeerConnectionHandle>,
+    torrent_info: Arc<bip_metainfo::Info>,
     // Maybe use a channel to communicate instead?
     torrent_state: Arc<Mutex<TorrentState>>,
 }
@@ -117,16 +114,16 @@ impl TorrentManager {
             num_unchoked: 0,
             max_unchoked,
             pretended_file: vec![0; file_lenght as usize],
+            peer_connections: Vec::new(),
         };
         Self {
-            torrent_info,
-            peer_connections: Vec::new(),
+            torrent_info: Arc::new(torrent_info),
             torrent_state: Arc::new(Mutex::new(torrent_state)),
         }
     }
 
     pub async fn add_peer(
-        &mut self,
+        &self,
         addr: SocketAddr,
         our_id: [u8; 20],
         peer_id: [u8; 20],
@@ -135,14 +132,14 @@ impl TorrentManager {
         let (sender, receiver) = tokio::sync::mpsc::channel(256);
         let peer_handle = PeerConnectionHandle { peer_id, sender };
         let info_hash = self.torrent_info.info_hash().into();
-        let state_clone = self.torrent_state.clone();
+        let this = self.clone();
         let (tx, rc) = tokio::sync::oneshot::channel();
         // TEMP UGLY HACK
         let (closed_sender, closed_recv) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
             tokio_uring::start(async move {
                 let mut peer_connection =
-                    PeerConnection::new(addr, our_id, peer_id, info_hash, state_clone, receiver)
+                    PeerConnection::new(addr, our_id, peer_id, info_hash, this, receiver)
                         .await
                         .unwrap();
 
@@ -151,10 +148,25 @@ impl TorrentManager {
                 closed_sender.send(()).unwrap();
             })
         });
-        self.peer_connections.push(peer_handle);
+        self.torrent_state.lock().peer_connections.push(peer_handle);
         rc.await.unwrap();
         closed_recv
     }
+
+    pub fn peer(&self, index: usize) -> Option<PeerConnectionHandle> {
+        self.torrent_state
+            .lock()
+            .peer_connections
+            .get(index)
+            .cloned()
+    }
+
+    fn should_unchoke(&self) -> bool {
+        let state = self.torrent_state.lock();
+        state.num_unchoked < state.max_unchoked
+    }
+
+    pub(crate) async fn on_piece_completed(&self, index: i32, data: Vec<u8>) {}
 }
 
 // Torrentmanager
@@ -171,12 +183,3 @@ impl TorrentManager {
 // 4. Do piece selection and distribute pieces across peers that have them
 // 5. PeerConnection requests subpieces automatically
 // 6. Manager is informed about pieces that have completed (and peer choking us)
-
-const SUBPIECE_SIZE: i32 = 16_384;
-
-struct PendingMsg {
-    // Number of bytes remaining
-    remaining_bytes: i32,
-    // Bytes accumalated so far
-    partial: BytesMut,
-}

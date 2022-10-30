@@ -1,17 +1,16 @@
 use std::cell::{Ref, RefMut};
 use std::net::SocketAddr;
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Context;
 use bitvec::prelude::{BitBox, Msb0};
 use bytes::{Buf, BufMut, BytesMut};
-use parking_lot::Mutex;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio_uring::net::TcpStream;
 
 use crate::peer_message::PeerMessage;
-use crate::{Piece, TorrentState, SUBPIECE_SIZE};
+use crate::{Piece, TorrentManager, SUBPIECE_SIZE};
 
 pub(crate) struct PeerConnectionState {
     /// This side is choking the peer
@@ -44,6 +43,7 @@ impl PeerConnectionState {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct PeerConnectionHandle {
     pub peer_id: [u8; 20],
     //ip?
@@ -72,7 +72,7 @@ pub(crate) struct PeerConnection {
     // TODO use utp
     stream: Rc<TcpStream>,
     state: Rc<RefCell<PeerConnectionState>>,
-    torrent_state: Arc<Mutex<TorrentState>>,
+    torrent_manager: TorrentManager,
     // ew
     send_queue: Option<Receiver<PeerOrder>>,
 }
@@ -83,7 +83,7 @@ impl Clone for PeerConnection {
         Self {
             stream: self.stream.clone(),
             state: self.state.clone(),
-            torrent_state: self.torrent_state.clone(),
+            torrent_manager: self.torrent_manager.clone(),
             send_queue: None,
         }
     }
@@ -95,7 +95,7 @@ impl PeerConnection {
         our_id: [u8; 20],
         their_id: [u8; 20],
         info_hash: [u8; 20],
-        torrent_state: Arc<Mutex<TorrentState>>,
+        torrent_manager: TorrentManager,
         send_queue: Receiver<PeerOrder>,
     ) -> anyhow::Result<PeerConnection> {
         let stream = std::net::TcpStream::connect(addr).unwrap();
@@ -136,14 +136,17 @@ impl PeerConnection {
                 Some(&their_id as &[u8]),
                 buf.get((str_len as usize + 28)..(str_len as usize + 48))
             );
-            let mut peer_pieces = torrent_state.lock().completed_pieces.clone();
-            peer_pieces.fill(false);
+            let peer_pieces = torrent_manager
+                .torrent_info
+                .pieces()
+                .map(|_| false)
+                .collect();
             let stream_state = PeerConnectionState::new(peer_pieces);
 
             let connection = PeerConnection {
                 stream: stream.clone(),
                 state: Rc::new(RefCell::new(stream_state)),
-                torrent_state,
+                torrent_manager,
                 send_queue: Some(send_queue),
             };
             let connection_clone = connection.clone();
@@ -354,7 +357,7 @@ impl PeerConnection {
                     // unchoke to avoid some race conditions. Libtorrent
                     // uses the same type of logic
                     self.unchoke().await.unwrap();
-                } else if self.torrent_state.lock().should_unchoke() {
+                } else if self.torrent_manager.should_unchoke() {
                     log::debug!("Unchoking peer after intrest");
                     self.unchoke().await.unwrap();
                 }
@@ -436,8 +439,9 @@ impl PeerConnection {
                         self.state_mut().currently_downloading = Some(piece);
                     } else {
                         log::info!("Piece completed!");
-                        let mut torrent_state = self.torrent_state.lock();
-                        torrent_state.completed_pieces.set(index as usize, true);
+                        self.torrent_manager
+                            .on_piece_completed(piece.index, piece.memory)
+                            .await;
                     }
                 } else {
                     log::error!("Recieved unexpected piece message");
