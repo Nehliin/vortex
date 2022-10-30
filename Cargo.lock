@@ -133,6 +133,7 @@ dependencies = [
  "log",
  "parking_lot",
  "rand 0.8.5",
+ "sha1",
  "tokio",
  "tokio-uring",
 ]

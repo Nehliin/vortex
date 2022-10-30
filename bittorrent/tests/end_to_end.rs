@@ -7,7 +7,7 @@ use bittorrent::{peer_connection::PeerOrder, TorrentManager};
 #[test]
 fn initial_end_to_end() {
     let _ = env_logger::builder()
-        .filter_level(log::LevelFilter::Trace)
+        .filter_level(log::LevelFilter::Info)
         .is_test(true)
         .try_init();
     let torrent = std::fs::read("test_torrent.torrent").unwrap();
@@ -27,6 +27,7 @@ fn initial_end_to_end() {
         handle.sender.send(PeerOrder::Interested).await.unwrap();
 
         let piece_len = metainfo.info().piece_length();
+        println!("pieces: {}", metainfo.info().pieces().count());
         /*        for (i, _) in metainfo.info().pieces().enumerate() {
             handle
                 .sender
@@ -50,7 +51,7 @@ fn initial_end_to_end() {
         // ut have meddelande till samtliga peers
         // Sen ska den skicka ut ny order om att ladda ner piece
         // sen efter det kan man böra kolla piece selection algoritmer
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(70)).await;
         /*handle
         .sender
         .send(bittorrent::PeerOrder::RequestPiece {

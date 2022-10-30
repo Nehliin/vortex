@@ -3,12 +3,20 @@
 // which requires support for http://www.bittorrent.org/beps/bep_0010.html
 // which needs the foundational http://www.bittorrent.org/beps/bep_0003.html implementation
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    io::{Cursor, Write},
+    net::SocketAddr,
+    sync::Arc,
+};
 
+use bip_metainfo::Accessor;
 use bitvec::prelude::*;
 use bytes::BytesMut;
 use parking_lot::Mutex;
 use peer_connection::{PeerConnection, PeerConnectionHandle};
+use sha1::{Digest, Sha1};
+
+use crate::peer_connection::PeerOrder;
 
 const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -92,6 +100,8 @@ impl Piece {
 pub struct TorrentState {
     completed_pieces: BitBox<u8, Msb0>,
     pretended_file: Vec<u8>,
+    // Temp
+    downloaded: usize,
     max_unchoked: u32,
     num_unchoked: u32,
     peer_connections: Vec<PeerConnectionHandle>,
@@ -114,6 +124,7 @@ impl TorrentManager {
             num_unchoked: 0,
             max_unchoked,
             pretended_file: vec![0; file_lenght as usize],
+            downloaded: 0,
             peer_connections: Vec::new(),
         };
         Self {
@@ -161,12 +172,61 @@ impl TorrentManager {
             .cloned()
     }
 
-    fn should_unchoke(&self) -> bool {
+    pub(crate) fn should_unchoke(&self) -> bool {
         let state = self.torrent_state.lock();
         state.num_unchoked < state.max_unchoked
     }
 
-    pub(crate) async fn on_piece_completed(&self, index: i32, data: Vec<u8>) {}
+    pub(crate) async fn on_piece_completed(&self, index: i32, data: Vec<u8>) {
+        let mut hasher = Sha1::new();
+        hasher.update(&data);
+        let data_hash = hasher.finalize();
+        let position = self
+            .torrent_info
+            .pieces()
+            .position(|piece_hash| data_hash.as_slice() == piece_hash);
+        match position {
+            Some(piece_index) if piece_index == index as usize => {
+                log::info!("Piece hash matched downloaded data");
+                let (peer_connections, next_piece): (Vec<_>, Option<usize>) = {
+                    let mut state = self.torrent_state.lock();
+                    state.completed_pieces.set(piece_index, true);
+                    let mut cursor = Cursor::new(std::mem::take(&mut state.pretended_file));
+                    cursor.set_position((SUBPIECE_SIZE * index) as u64);
+                    cursor.write_all(&data).unwrap();
+                    state.pretended_file = cursor.into_inner();
+                    state.downloaded += data.len();
+                    log::info!("Downloaded: {}", state.downloaded);
+
+                    // TODO avoid clone here
+                    (state.peer_connections.clone(), state.completed_pieces.first_zero())
+                };
+
+                for peer in peer_connections.iter() {
+                    peer.sender.send(PeerOrder::SendHave(index)).await.unwrap();
+                }
+
+                // TODO Remove me 
+                if let Some(next_piece) = next_piece {
+                    log::info!("Requesting next piece: {next_piece}");
+                    peer_connections[0]
+                        .sender
+                        .send(
+                        peer_connection::PeerOrder::RequestPiece {
+                                index: next_piece as i32,
+                                total_len: self.torrent_info.piece_length() as u32
+                        }).await.unwrap();
+                } else {
+                    log::info!("Torrent completed! Downloaded: {}", self.torrent_state.lock().pretended_file.len());
+                }
+
+            }
+            Some(piece_index) => log::error!(
+                "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
+            ),
+            None => log::error!("Piece sha1 hash not found!"),
+        }
+    }
 }
 
 // Torrentmanager
