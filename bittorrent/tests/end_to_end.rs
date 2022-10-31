@@ -10,7 +10,7 @@ fn initial_end_to_end() {
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
         .try_init();
-    let torrent = std::fs::read("test_torrent.torrent").unwrap();
+    let torrent = std::fs::read("final_test.torrent").unwrap();
     let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
     let torrent_manager = TorrentManager::new(metainfo.info().clone(), 1);
     tokio_uring::start(async move {
@@ -26,7 +26,7 @@ fn initial_end_to_end() {
         let handle = torrent_manager.peer(0).unwrap();
         handle.sender.send(PeerOrder::Interested).await.unwrap();
 
-        let piece_len = metainfo.info().piece_length();
+        //let piece_len = metainfo.info().piece_length();
         println!("pieces: {}", metainfo.info().pieces().count());
         /*        for (i, _) in metainfo.info().pieces().enumerate() {
             handle
@@ -38,20 +38,16 @@ fn initial_end_to_end() {
                 .await
                 .unwrap();
         }*/
-        // packet is too large
-        handle
-            .sender
-            .send(PeerOrder::RequestPiece {
-                index: 0,
-                total_len: dbg!(piece_len) as u32,
-            })
-            .await
-            .unwrap();
-        // nästa steg: se till att torrent manager kollar hash samt skickar
-        // ut have meddelande till samtliga peers
-        // Sen ska den skicka ut ny order om att ladda ner piece
-        // sen efter det kan man böra kolla piece selection algoritmer
-        tokio::time::sleep(Duration::from_secs(70)).await;
+        torrent_manager.start().await;
+        std::fs::write(
+            "downloaded.txt",
+            torrent_manager
+                .torrent_state
+                .lock()
+                .pretended_file
+                .as_slice(),
+        )
+        .unwrap();
         /*handle
         .sender
         .send(bittorrent::PeerOrder::RequestPiece {
@@ -60,6 +56,6 @@ fn initial_end_to_end() {
         })
         .await
         .unwrap();*/
-        shutdown.await.unwrap();
+        //shutdown.await.unwrap();
     });
 }

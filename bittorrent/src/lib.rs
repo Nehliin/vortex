@@ -9,12 +9,11 @@ use std::{
     sync::Arc,
 };
 
-use bip_metainfo::Accessor;
 use bitvec::prelude::*;
-use bytes::BytesMut;
 use parking_lot::Mutex;
 use peer_connection::{PeerConnection, PeerConnectionHandle};
 use sha1::{Digest, Sha1};
+use tokio::sync::oneshot;
 
 use crate::peer_connection::PeerOrder;
 
@@ -99,9 +98,11 @@ impl Piece {
 
 pub struct TorrentState {
     completed_pieces: BitBox<u8, Msb0>,
-    pretended_file: Vec<u8>,
+    pub pretended_file: Vec<u8>,
     // Temp
     downloaded: usize,
+    download_rc: Option<oneshot::Receiver<()>>,
+    download_tx: Option<oneshot::Sender<()>>,
     max_unchoked: u32,
     num_unchoked: u32,
     peer_connections: Vec<PeerConnectionHandle>,
@@ -110,8 +111,9 @@ pub struct TorrentState {
 #[derive(Clone)]
 pub struct TorrentManager {
     torrent_info: Arc<bip_metainfo::Info>,
+    last_piece_len: u64,
     // Maybe use a channel to communicate instead?
-    torrent_state: Arc<Mutex<TorrentState>>,
+    pub torrent_state: Arc<Mutex<TorrentState>>,
 }
 
 impl TorrentManager {
@@ -119,6 +121,9 @@ impl TorrentManager {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         assert!(torrent_info.files().count() == 1);
         let file_lenght = torrent_info.files().next().unwrap().length();
+        let last_piece_len = file_lenght % SUBPIECE_SIZE as u64;
+        dbg!(last_piece_len);
+        let (tx, rc) = tokio::sync::oneshot::channel();
         let torrent_state = TorrentState {
             completed_pieces,
             num_unchoked: 0,
@@ -126,10 +131,39 @@ impl TorrentManager {
             pretended_file: vec![0; file_lenght as usize],
             downloaded: 0,
             peer_connections: Vec::new(),
+            download_rc: Some(rc),
+            download_tx: Some(tx),
         };
         Self {
+            last_piece_len,
             torrent_info: Arc::new(torrent_info),
             torrent_state: Arc::new(Mutex::new(torrent_state)),
+        }
+    }
+
+    // TODO fixme
+    fn piece_length(&self, index: i32) -> u32 {
+        if self.torrent_info.pieces().count() == (index as usize + 1) {
+            self.last_piece_len as u32
+        } else {
+            self.torrent_info.piece_length() as u32
+        }
+    }
+
+    pub async fn start(&self) {
+        if let Some(peer_handle) = self.peer(0) {
+            peer_handle
+                .sender
+                .send(PeerOrder::RequestPiece {
+                    index: 0,
+                    total_len: self.piece_length(0),
+                })
+                .await
+                .unwrap();
+            let rc = self.torrent_state.lock().download_rc.take();
+            rc.unwrap().await.unwrap();
+        } else {
+            log::error!("No peers to download from!");
         }
     }
 
@@ -199,32 +233,45 @@ impl TorrentManager {
                     log::info!("Downloaded: {}", state.downloaded);
 
                     // TODO avoid clone here
-                    (state.peer_connections.clone(), state.completed_pieces.first_zero())
+                    (
+                        state.peer_connections.clone(),
+                        state.completed_pieces.first_zero(),
+                    )
                 };
 
                 for peer in peer_connections.iter() {
                     peer.sender.send(PeerOrder::SendHave(index)).await.unwrap();
                 }
 
-                // TODO Remove me 
+                // TODO Remove me
                 if let Some(next_piece) = next_piece {
                     log::info!("Requesting next piece: {next_piece}");
                     peer_connections[0]
                         .sender
-                        .send(
-                        peer_connection::PeerOrder::RequestPiece {
-                                index: next_piece as i32,
-                                total_len: self.torrent_info.piece_length() as u32
-                        }).await.unwrap();
+                        .send(peer_connection::PeerOrder::RequestPiece {
+                            index: next_piece as i32,
+                            total_len: self.piece_length(next_piece as i32),
+                        })
+                        .await
+                        .unwrap();
                 } else {
-                    log::info!("Torrent completed! Downloaded: {}", self.torrent_state.lock().pretended_file.len());
+                    let mut state = self.torrent_state.lock();
+                    log::info!(
+                        "Torrent completed! Downloaded: {}",
+                        state.pretended_file.len()
+                    );
+                    state.download_tx.take().unwrap().send(()).unwrap();
                 }
-
             }
             Some(piece_index) => log::error!(
-                "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
+                    "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
             ),
-            None => log::error!("Piece sha1 hash not found!"),
+            None => {
+                // TODO just testing
+                log::error!("Piece sha1 hash not found!");
+                let mut state = self.torrent_state.lock();
+                state.download_tx.take().unwrap().send(()).unwrap();
+            }
         }
     }
 }
