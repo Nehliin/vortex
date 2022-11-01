@@ -15,7 +15,7 @@ fn initial_end_to_end() {
     let torrent_manager = TorrentManager::new(metainfo.info().clone(), 1);
     tokio_uring::start(async move {
         // Will never shutdown!
-        let shutdown = torrent_manager
+        let shutjown = torrent_manager
             .add_peer(
                 "127.0.0.1:6881".parse().unwrap(),
                 *b"7ee95578b1236c45daaa",
@@ -26,18 +26,12 @@ fn initial_end_to_end() {
         let handle = torrent_manager.peer(0).unwrap();
         handle.sender.send(PeerOrder::Interested).await.unwrap();
 
-        //let piece_len = metainfo.info().piece_length();
+        println!(
+            "file len: {}",
+            metainfo.info().files().next().unwrap().length()
+        );
         println!("pieces: {}", metainfo.info().pieces().count());
-        /*        for (i, _) in metainfo.info().pieces().enumerate() {
-            handle
-                .sender
-                .send(bittorrent::PeerOrder::RequestPiece {
-                    index: i as i32,
-                    total_len: piece_len as u32,
-                })
-                .await
-                .unwrap();
-        }*/
+
         torrent_manager.start().await;
         std::fs::write(
             "downloaded.txt",
@@ -48,14 +42,9 @@ fn initial_end_to_end() {
                 .as_slice(),
         )
         .unwrap();
-        /*handle
-        .sender
-        .send(bittorrent::PeerOrder::RequestPiece {
-            index: 0,
-            total_len: dbg!(piece_len) as u32,
-        })
-        .await
-        .unwrap();*/
-        //shutdown.await.unwrap();
+
+        let expected = std::fs::read("final_file.txt").unwrap();
+        let actual = std::fs::read("downloaded.txt").unwrap();
+        assert_eq!(actual, expected);
     });
 }

@@ -75,6 +75,7 @@ impl Piece {
             log::info!("Not last subpiece");
             assert_eq!(length, SUBPIECE_SIZE);
         }
+        assert_eq!(data.len(), length as usize);
         self.completed_subpieces.set(subpiece_index as usize, true);
         self.memory[begin as usize..begin as usize + data.len() as usize].copy_from_slice(data);
     }
@@ -121,8 +122,7 @@ impl TorrentManager {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         assert!(torrent_info.files().count() == 1);
         let file_lenght = torrent_info.files().next().unwrap().length();
-        let last_piece_len = file_lenght % SUBPIECE_SIZE as u64;
-        dbg!(last_piece_len);
+        let last_piece_len = file_lenght % torrent_info.piece_length() as u64;
         let (tx, rc) = tokio::sync::oneshot::channel();
         let torrent_state = TorrentState {
             completed_pieces,
@@ -226,7 +226,7 @@ impl TorrentManager {
                     let mut state = self.torrent_state.lock();
                     state.completed_pieces.set(piece_index, true);
                     let mut cursor = Cursor::new(std::mem::take(&mut state.pretended_file));
-                    cursor.set_position((SUBPIECE_SIZE * index) as u64);
+                    cursor.set_position(self.torrent_info.piece_length() * index as u64);
                     cursor.write_all(&data).unwrap();
                     state.pretended_file = cursor.into_inner();
                     state.downloaded += data.len();
@@ -267,10 +267,7 @@ impl TorrentManager {
                     "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
             ),
             None => {
-                // TODO just testing
                 log::error!("Piece sha1 hash not found!");
-                let mut state = self.torrent_state.lock();
-                state.download_tx.take().unwrap().send(()).unwrap();
             }
         }
     }
