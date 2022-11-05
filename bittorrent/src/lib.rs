@@ -10,6 +10,7 @@ use std::{
 };
 
 use bitvec::prelude::*;
+use bytes::Buf;
 use parking_lot::Mutex;
 use peer_connection::{PeerConnection, PeerConnectionHandle};
 use sha1::{Digest, Sha1};
@@ -45,12 +46,8 @@ impl Piece {
         } else {
             lenght as i32 % SUBPIECE_SIZE
         };
-        let subpieces = (lenght / SUBPIECE_SIZE as u32)
-            + if last_subpiece_length != SUBPIECE_SIZE {
-                1
-            } else {
-                0
-            };
+        let subpieces =
+            (lenght / SUBPIECE_SIZE as u32) + u32::from(last_subpiece_length != SUBPIECE_SIZE);
         let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
         let inflight_subpieces = completed_subpieces.clone();
         Self {
@@ -98,6 +95,7 @@ impl Piece {
 }
 
 pub struct TorrentState {
+    // TODO Lsb0 is should be used instead
     completed_pieces: BitBox<u8, Msb0>,
     pub pretended_file: Vec<u8>,
     // Temp
@@ -209,6 +207,40 @@ impl TorrentManager {
     pub(crate) fn should_unchoke(&self) -> bool {
         let state = self.torrent_state.lock();
         state.num_unchoked < state.max_unchoked
+    }
+
+    pub(crate) fn on_piece_request(
+        &self,
+        index: i32,
+        begin: i32,
+        length: i32,
+    ) -> anyhow::Result<Vec<u8>> {
+        // TODO: Take choking into account
+        let piece_size = self.torrent_info.piece_length();
+        let mut torrent_state = self.torrent_state.lock();
+        if *torrent_state
+            .completed_pieces
+            .get(index as usize)
+            .as_deref()
+            .unwrap_or(&false)
+        {
+            log::info!("Piece is available!");
+            if torrent_state.pretended_file.len()
+                < ((index as u64 * piece_size) + begin as u64 + length as u64) as usize
+            {
+                anyhow::bail!("Invalid piece request, out of bounds of file");
+            }
+            let mut data = vec![0; length as usize];
+            let mut cursor = Cursor::new(std::mem::take(&mut torrent_state.pretended_file));
+            cursor.set_position(piece_size * index as u64);
+            cursor.copy_to_slice(&mut data);
+            torrent_state.pretended_file = cursor.into_inner();
+
+            drop(torrent_state);
+            Ok(data)
+        } else {
+            anyhow::bail!("Piece requested isn't available");
+        }
     }
 
     pub(crate) async fn on_piece_completed(&self, index: i32, data: Vec<u8>) {

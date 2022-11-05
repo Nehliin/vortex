@@ -1,4 +1,5 @@
 use std::cell::{Ref, RefMut};
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::{cell::RefCell, rc::Rc};
 
@@ -300,6 +301,23 @@ impl PeerConnection {
         result.context("Failed to write request(s) msg")
     }
 
+    async fn piece(
+        &self,
+        index: i32,
+        begin: i32,
+        length: i32,
+        data: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let msg = PeerMessage::Piece {
+            index,
+            begin,
+            lenght: length,
+            data: data.as_slice(),
+        };
+        let (result, _buf) = self.stream.write_all(msg.into_bytes()).await;
+        result.context("Failed to write piece msg")
+    }
+
     pub(crate) async fn connection_send_loop(&mut self) -> anyhow::Result<()> {
         let mut send_queue = self.send_queue.take().unwrap();
         while let Some(order) = send_queue.recv().await {
@@ -387,7 +405,17 @@ impl PeerConnection {
                 log::info!(
                     "Peer wants piece with index: {index}, begin: {begin}, length: {length}"
                 );
-                unimplemented!()
+                if length > SUBPIECE_SIZE {
+                    log::error!("Piece request is too large, ignoring. Lenght: {length}");
+                    return Ok(());
+                }
+
+                match self.torrent_manager.on_piece_request(index, begin, length) {
+                    Ok(piece_data) => {
+                        self.piece(index, begin, length, piece_data).await?;
+                    }
+                    Err(err) => log::error!("Inavlid piece request: {err}"),
+                }
             }
             PeerMessage::Cancel {
                 index,
