@@ -823,9 +823,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.6.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c4eb3267174b8c6c2f654116623910a0fef09c4753f8dd83db29c48a0df988b"
+checksum = "e076559ef8e241f2ae3479e36f97bd5741c0330689e217ad51ce2c76808b868a"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -834,9 +834,9 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.6.27"
+version = "0.6.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3f87b73ce11b1619a3c6332f45341e0047173771e8b8b73f87bfeefb7b56244"
+checksum = "456c603be3e8d448b072f410900c09faf164fbce2d480456f50eea6e25f9c848"
 
 [[package]]
 name = "resolv-conf"
@@ -1042,9 +1042,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fab5c8b9980850e06d92ddbe3ab839c062c801f3927c0fb8abd6fc8e918fbca"
+checksum = "a561bf4617eebd33bca6434b988f39ed798e527f51a1e797d0ee4f61c0a38376"
 dependencies = [
  "libc",
  "num_threads",
@@ -1061,9 +1061,9 @@ checksum = "2e153e1f1acaef8acc537e68b44906d2db6436e2b35ac2c6b42640fff91f00fd"
 
 [[package]]
 name = "time-macros"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65bb801831d812c562ae7d2bfb531f26e66e4e1f6b17307ba4149c5064710e5b"
+checksum = "d967f99f534ca7e495c575c62638eebc2898a8c84c119b89e250477bc4ba16b2"
 dependencies = [
  "time-core",
 ]
@@ -1125,8 +1125,8 @@ dependencies = [
 
 [[package]]
 name = "tokio-uring"
-version = "0.3.0"
-source = "git+https://github.com/tokio-rs/tokio-uring?branch=master#4b0e07e9cdd9f6cd941ee2c2abedc099961be045"
+version = "0.4.0"
+source = "git+https://github.com/tokio-rs/tokio-uring?branch=master#f5f1724140550a4a39e4ef2c579221ad90ccd068"
 dependencies = [
  "bytes",
  "io-uring",
@@ -1247,6 +1247,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base32",
+ "bip_metainfo",
+ "bittorrent",
  "bytes",
  "env_logger",
  "libc",
@@ -1260,11 +1262,10 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "sha1",
- "time 0.3.16",
+ "time 0.3.17",
  "tokio",
  "tokio-uring",
  "trust-dns-resolver",
- "utp_socket",
 ]
 
 [[package]]
