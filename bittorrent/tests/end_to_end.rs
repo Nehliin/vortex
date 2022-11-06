@@ -1,9 +1,7 @@
-use std::time::Duration;
-
 use bittorrent::{peer_connection::PeerOrder, TorrentManager};
 
 // Make these tests automatic
-// ./build/examples/client_test -G -f log.txt --peer_fingerprint=9424471b03a5975de79a --list-settings test_torrent.torrent
+// ./build/examples/client_test -G -f log.txt final_test.torrent
 #[test]
 fn initial_end_to_end() {
     let _ = env_logger::builder()
@@ -14,13 +12,8 @@ fn initial_end_to_end() {
     let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
     let torrent_manager = TorrentManager::new(metainfo.info().clone(), 1);
     tokio_uring::start(async move {
-        // Will never shutdown!
-        let shutjown = torrent_manager
-            .add_peer(
-                "127.0.0.1:6881".parse().unwrap(),
-                *b"7ee95578b1236c45daaa",
-                *b"9424471b03a5975de79a",
-            )
+        torrent_manager
+            .add_peer("127.0.0.1:6881".parse().unwrap())
             .await;
         log::info!("We are connected!!");
         let handle = torrent_manager.peer(0).unwrap();
