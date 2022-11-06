@@ -1,5 +1,4 @@
 use std::cell::{Ref, RefMut};
-use std::io::Cursor;
 use std::net::SocketAddr;
 use std::{cell::RefCell, rc::Rc};
 
@@ -74,6 +73,7 @@ pub(crate) struct PeerConnection {
     stream: Rc<TcpStream>,
     state: Rc<RefCell<PeerConnectionState>>,
     torrent_manager: TorrentManager,
+    pub peer_id: [u8; 20],
     // ew
     send_queue: Option<Receiver<PeerOrder>>,
 }
@@ -86,6 +86,7 @@ impl Clone for PeerConnection {
             state: self.state.clone(),
             torrent_manager: self.torrent_manager.clone(),
             send_queue: None,
+            peer_id: self.peer_id,
         }
     }
 }
@@ -94,7 +95,6 @@ impl PeerConnection {
     pub(crate) async fn new(
         addr: SocketAddr,
         our_id: [u8; 20],
-        their_id: [u8; 20],
         info_hash: [u8; 20],
         torrent_manager: TorrentManager,
         send_queue: Receiver<PeerOrder>,
@@ -133,10 +133,13 @@ impl PeerConnection {
                 Some(&info_hash as &[u8]),
                 buf.get((str_len as usize + 8)..(str_len as usize + 28))
             );
-            assert_eq!(
-                Some(&their_id as &[u8]),
-                buf.get((str_len as usize + 28)..(str_len as usize + 48))
-            );
+            // Read their peer id
+            let peer_id: [u8; 20] = buf
+                .get((str_len as usize + 28)..(str_len as usize + 48))
+                .unwrap()
+                .try_into()
+                .unwrap();
+
             let peer_pieces = torrent_manager
                 .torrent_info
                 .pieces()
@@ -149,6 +152,7 @@ impl PeerConnection {
                 state: Rc::new(RefCell::new(stream_state)),
                 torrent_manager,
                 send_queue: Some(send_queue),
+                peer_id,
             };
             let connection_clone = connection.clone();
             // TODO Handle shutdowns and move out to separate function

@@ -111,8 +111,20 @@ pub struct TorrentState {
 pub struct TorrentManager {
     torrent_info: Arc<bip_metainfo::Info>,
     last_piece_len: u64,
+    // TODO create newtype
+    our_peer_id: [u8; 20],
     // Maybe use a channel to communicate instead?
     pub torrent_state: Arc<Mutex<TorrentState>>,
+}
+
+fn generate_peer_id() -> [u8; 20] {
+    // Based on http://www.bittorrent.org/beps/bep_0020.html
+    const PREFIX: [u8; 8] = *b"-VT0010-";
+    let generatated = rand::random::<[u8; 12]>();
+    let mut result: [u8; 20] = [0; 20];
+    result[0..8].copy_from_slice(&PREFIX);
+    result[8..].copy_from_slice(&generatated);
+    result
 }
 
 impl TorrentManager {
@@ -134,6 +146,7 @@ impl TorrentManager {
         };
         Self {
             last_piece_len,
+            our_peer_id: generate_peer_id(),
             torrent_info: Arc::new(torrent_info),
             torrent_state: Arc::new(Mutex::new(torrent_state)),
         }
@@ -165,35 +178,27 @@ impl TorrentManager {
         }
     }
 
-    pub async fn add_peer(
-        &self,
-        addr: SocketAddr,
-        our_id: [u8; 20],
-        peer_id: [u8; 20],
-    ) -> tokio::sync::oneshot::Receiver<()> {
+    pub async fn add_peer(&self, addr: SocketAddr) {
         // Connect first perhaps so errors can be handled
         let (sender, receiver) = tokio::sync::mpsc::channel(256);
-        let peer_handle = PeerConnectionHandle { peer_id, sender };
         let info_hash = self.torrent_info.info_hash().into();
         let this = self.clone();
         let (tx, rc) = tokio::sync::oneshot::channel();
-        // TEMP UGLY HACK
-        let (closed_sender, closed_recv) = tokio::sync::oneshot::channel();
+        let our_peer_id = self.our_peer_id;
         std::thread::spawn(move || {
             tokio_uring::start(async move {
                 let mut peer_connection =
-                    PeerConnection::new(addr, our_id, peer_id, info_hash, this, receiver)
+                    PeerConnection::new(addr, our_peer_id, info_hash, this, receiver)
                         .await
                         .unwrap();
 
-                tx.send(()).unwrap();
+                tx.send(peer_connection.peer_id).unwrap();
                 peer_connection.connection_send_loop().await.unwrap();
-                closed_sender.send(()).unwrap();
             })
         });
+        let peer_id = rc.await.unwrap();
+        let peer_handle = PeerConnectionHandle { peer_id, sender };
         self.torrent_state.lock().peer_connections.push(peer_handle);
-        rc.await.unwrap();
-        closed_recv
     }
 
     pub fn peer(&self, index: usize) -> Option<PeerConnectionHandle> {
