@@ -93,21 +93,13 @@ impl Clone for PeerConnection {
 
 impl PeerConnection {
     pub(crate) async fn new(
-        addr: SocketAddr,
+        stream: TcpStream,
         our_id: [u8; 20],
         info_hash: [u8; 20],
         torrent_manager: TorrentManager,
         send_queue: Receiver<PeerOrder>,
     ) -> anyhow::Result<PeerConnection> {
-        let stream = std::net::TcpStream::connect(addr).unwrap();
-        log::info!("LOCAL_ADDR: {}", stream.local_addr().unwrap());
-        /*let stream = TcpStream::connect(addr).await?;
-        let fd = stream.as_raw_fd();
-        let std_stream = unsafe { std::net::TcpStream::from_raw_fd(fd) };
-        let stream = TcpStream::from_std(std_stream);
-        let stream = Rc::new(stream);*/
-
-        let stream = Rc::new(TcpStream::from_std(stream));
+        let stream = Rc::new(stream);
         let handshake_msg = Self::handshake(info_hash, our_id).to_vec();
         let (res, buf) = stream.write(handshake_msg).await;
         let _res = res?;

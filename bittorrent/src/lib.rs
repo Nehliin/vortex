@@ -14,7 +14,8 @@ use bytes::Buf;
 use parking_lot::Mutex;
 use peer_connection::{PeerConnection, PeerConnectionHandle};
 use sha1::{Digest, Sha1};
-use tokio::sync::oneshot;
+use tokio::sync::oneshot::{self, Receiver};
+use tokio_uring::net::{TcpListener, TcpStream};
 
 use crate::peer_connection::PeerOrder;
 
@@ -95,8 +96,7 @@ impl Piece {
 }
 
 pub struct TorrentState {
-    // TODO Lsb0 is should be used instead
-    completed_pieces: BitBox<u8, Msb0>,
+    pub completed_pieces: BitBox<u8, Lsb0>,
     pub pretended_file: Vec<u8>,
     // Temp
     downloaded: usize,
@@ -129,7 +129,7 @@ fn generate_peer_id() -> [u8; 20] {
 
 impl TorrentManager {
     pub fn new(torrent_info: bip_metainfo::Info, max_unchoked: u32) -> Self {
-        let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
+        let completed_pieces: BitBox<u8, Lsb0> = torrent_info.pieces().map(|_| false).collect();
         assert!(torrent_info.files().count() == 1);
         let file_lenght = torrent_info.files().next().unwrap().length();
         let last_piece_len = file_lenght % torrent_info.piece_length() as u64;
@@ -178,6 +178,40 @@ impl TorrentManager {
         }
     }
 
+    pub async fn accept_incoming(&self, listener: &TcpListener) {
+        let (stream, peer_addr) = listener.accept().await.unwrap();
+        log::info!("Incomming peer connection: {peer_addr}");
+        // Connect first perhaps so errors can be handled
+        let (sender, receiver) = tokio::sync::mpsc::channel(256);
+        let info_hash = self.torrent_info.info_hash().into();
+        let this = self.clone();
+        let (tx, rc) = tokio::sync::oneshot::channel();
+        let our_peer_id = self.our_peer_id;
+
+        // Safe since the inner Rc have yet to
+        // have been cloned at this point
+        struct SendableStream(TcpStream);
+        unsafe impl Send for SendableStream {}
+
+        let sendable_stream = SendableStream(stream);
+        std::thread::spawn(move || {
+            tokio_uring::start(async move {
+                let sendable_stream = sendable_stream;
+                let stream = sendable_stream.0;
+                let mut peer_connection =
+                    PeerConnection::new(stream, our_peer_id, info_hash, this, receiver)
+                        .await
+                        .unwrap();
+
+                tx.send(peer_connection.peer_id).unwrap();
+                peer_connection.connection_send_loop().await.unwrap();
+            })
+        });
+        let peer_id = rc.await.unwrap();
+        let peer_handle = PeerConnectionHandle { peer_id, sender };
+        self.torrent_state.lock().peer_connections.push(peer_handle);
+    }
+
     pub async fn add_peer(&self, addr: SocketAddr) {
         // Connect first perhaps so errors can be handled
         let (sender, receiver) = tokio::sync::mpsc::channel(256);
@@ -187,8 +221,9 @@ impl TorrentManager {
         let our_peer_id = self.our_peer_id;
         std::thread::spawn(move || {
             tokio_uring::start(async move {
+                let stream = TcpStream::connect(addr).await.unwrap();
                 let mut peer_connection =
-                    PeerConnection::new(addr, our_peer_id, info_hash, this, receiver)
+                    PeerConnection::new(stream, our_peer_id, info_hash, this, receiver)
                         .await
                         .unwrap();
 
