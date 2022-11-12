@@ -14,7 +14,7 @@ use bytes::Buf;
 use parking_lot::Mutex;
 use peer_connection::{PeerConnection, PeerConnectionHandle};
 use sha1::{Digest, Sha1};
-use tokio::sync::oneshot::{self, Receiver};
+use tokio::sync::oneshot;
 use tokio_uring::net::{TcpListener, TcpStream};
 
 use crate::peer_connection::PeerOrder;
@@ -109,7 +109,7 @@ pub struct TorrentState {
 
 #[derive(Clone)]
 pub struct TorrentManager {
-    torrent_info: Arc<bip_metainfo::Info>,
+    pub torrent_info: Arc<bip_metainfo::Info>,
     last_piece_len: u64,
     // TODO create newtype
     our_peer_id: [u8; 20],

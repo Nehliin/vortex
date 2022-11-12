@@ -25,7 +25,8 @@ log = "0.4"
 env_logger = "0.9"
 base32 = "0.4"
 libc = "0.2"
-utp_socket = { path = "../utp_socket" }
+bittorrent = { path = "../bittorrent" }
+bip_metainfo = "0.12"
 
 [dev-dependencies]
 num-bigint = "0.4.3"

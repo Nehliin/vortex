@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, net::IpAddr, path::Path, time::Duration};
 
+use bittorrent::TorrentManager;
 use krpc::{KrpcService, Peer};
 use magnet_url::Magnet;
 use node::{NodeId, ID_MAX};
@@ -12,7 +13,6 @@ use trust_dns_resolver::{
 };
 
 use crate::node::{Node, ID_ZERO};
-use utp_socket::utp_socket::UtpSocket;
 
 mod krpc;
 mod node;
@@ -195,28 +195,32 @@ fn main() {
             .count();
         log::info!("remaining: {remaining}");
 
-        let peers = find_peers(
-            &service,
-            &routing_table,
-            "magnet:?xt=urn:btih:VIJHHSNY6CICT7FIBXMBIIVNCHV4UIDA".to_string(),
-        )
-        .await;
+        // Linux mint magnet link + torrent file
+        let magnet_link = "magnet:?xt=urn:btih:CS5SSRQ4EJB2UKD43JUBJCHFPSPOWJNP".to_string();
+        let torrent_info = std::fs::read("linux_mint.torrent").unwrap();
+        let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
 
-        let socket = UtpSocket::bind("0.0.0.0:0".parse().unwrap()).await.unwrap();
+        let torrent_manager = TorrentManager::new(metainfo.info().clone(), 5);
+
+        let peers = find_peers(&service, &routing_table, magnet_link).await;
+
         for peer in peers.into_iter() {
             let connect_res =
-                tokio::time::timeout(Duration::from_secs(3), socket.connect(peer.addr)).await;
+                tokio::time::timeout(Duration::from_secs(3), torrent_manager.add_peer(peer.addr))
+                    .await;
 
             match connect_res {
-                Ok(Ok(_stream)) => {
+                Ok(()) => {
                     log::info!("Connected to {}!", peer.addr);
-                }
-                Ok(Err(err)) => {
-                    log::error!("Failed to connect to peer: {:?}, error: {err}", peer.addr)
                 }
                 Err(err) => log::error!("Failed to connect to peer: {:?}, error: {err}", peer.addr),
             }
         }
-        // announce peer
+        // 1. announce peer (måste support inkommande connections då tillslut)
+        // 2. välj X random pieces och hitta peers som har den o börja ladda ner genom intrest +
+        //    unchoke + request
+         
+        // 3. (gå över till rarest)
+
     });
 }
