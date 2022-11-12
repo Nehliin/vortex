@@ -10,6 +10,7 @@ pub enum PeerMessage {
     Have {
         index: i32,
     },
+    // TODO BITBOX
     Bitfield(BitVec<u8, Msb0>),
     Request {
         index: i32,

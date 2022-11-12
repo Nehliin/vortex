@@ -4,29 +4,30 @@
 // which needs the foundational http://www.bittorrent.org/beps/bep_0003.html implementation
 
 use std::{
+    cell::RefCell,
     io::{Cursor, Write},
     net::SocketAddr,
+    rc::Rc,
     sync::Arc,
 };
 
 use bitvec::prelude::*;
 use bytes::Buf;
-use parking_lot::Mutex;
-use peer_connection::{PeerConnection, PeerConnectionHandle};
+use peer_connection::PeerConnection;
 use sha1::{Digest, Sha1};
 use tokio::sync::oneshot;
 use tokio_uring::net::{TcpListener, TcpStream};
-
-use crate::peer_connection::PeerOrder;
 
 const SUBPIECE_SIZE: i32 = 16_384;
 
 pub mod peer_connection;
 pub mod peer_message;
-#[cfg(test)]
-mod test;
+
+//#[cfg(test)]
+//mod test;
 
 // Perhaps also create a subpiece type that can be converted into a peer request
+#[derive(Debug)]
 struct Piece {
     index: i32,
     // Contains only completed subpieces
@@ -98,23 +99,119 @@ impl Piece {
 pub struct TorrentState {
     pub completed_pieces: BitBox<u8, Lsb0>,
     pub pretended_file: Vec<u8>,
+    pub torrent_info: bip_metainfo::Info,
+    last_piece_len: u64,
     // Temp
     downloaded: usize,
     download_rc: Option<oneshot::Receiver<()>>,
     download_tx: Option<oneshot::Sender<()>>,
     max_unchoked: u32,
     num_unchoked: u32,
-    peer_connections: Vec<PeerConnectionHandle>,
+    peer_connections: Vec<PeerConnection>,
+}
+
+impl TorrentState {
+    #[inline(always)]
+    pub(crate) fn should_unchoke(&self) -> bool {
+        self.num_unchoked < self.max_unchoked
+    }
+
+    // TODO fixme
+    fn piece_length(&self, index: i32) -> u32 {
+        if self.torrent_info.pieces().count() == (index as usize + 1) {
+            self.last_piece_len as u32
+        } else {
+            self.torrent_info.piece_length() as u32
+        }
+    }
+
+    pub(crate) fn on_piece_request(
+        &mut self,
+        index: i32,
+        begin: i32,
+        length: i32,
+    ) -> anyhow::Result<Vec<u8>> {
+        // TODO: Take choking into account
+        let piece_size = self.torrent_info.piece_length();
+        if *self
+            .completed_pieces
+            .get(index as usize)
+            .as_deref()
+            .unwrap_or(&false)
+        {
+            log::info!("Piece is available!");
+            if self.pretended_file.len()
+                < ((index as u64 * piece_size) + begin as u64 + length as u64) as usize
+            {
+                anyhow::bail!("Invalid piece request, out of bounds of file");
+            }
+            let mut data = vec![0; length as usize];
+            let mut cursor = Cursor::new(std::mem::take(&mut self.pretended_file));
+            cursor.set_position(piece_size * index as u64);
+            cursor.copy_to_slice(&mut data);
+            self.pretended_file = cursor.into_inner();
+
+            Ok(data)
+        } else {
+            anyhow::bail!("Piece requested isn't available");
+        }
+    }
+
+    pub(crate) fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) {
+        let mut hasher = Sha1::new();
+        hasher.update(&data);
+        let data_hash = hasher.finalize();
+        let position = self
+            .torrent_info
+            .pieces()
+            .position(|piece_hash| data_hash.as_slice() == piece_hash);
+        match position {
+            Some(piece_index) if piece_index == index as usize => {
+                log::info!("Piece hash matched downloaded data");
+                self.completed_pieces.set(piece_index, true);
+                let mut cursor = Cursor::new(std::mem::take(&mut self.pretended_file));
+                cursor.set_position(self.torrent_info.piece_length() * index as u64);
+                cursor.write_all(&data).unwrap();
+                self.pretended_file = cursor.into_inner();
+                self.downloaded += data.len();
+                log::info!("Downloaded: {}", self.downloaded);
+
+                let next_piece = self.completed_pieces.first_zero();
+
+                for peer in self.peer_connections.iter() {
+                    peer.have(index).unwrap();
+                }
+
+                // TODO Remove me
+                if let Some(next_piece) = next_piece {
+                    log::info!("Requesting next piece: {next_piece}");
+                    self.peer_connections[0]
+                        .request_piece(next_piece as i32, self.piece_length(next_piece as i32))
+                        .unwrap();
+                } else {
+                    log::info!(
+                        "Torrent completed! Downloaded: {}",
+                        self.pretended_file.len()
+                    );
+                    self.download_tx.take().unwrap().send(()).unwrap();
+                }
+            }
+            Some(piece_index) => log::error!(
+                    "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
+            ),
+            None => {
+                log::error!("Piece sha1 hash not found!");
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct TorrentManager {
     pub torrent_info: Arc<bip_metainfo::Info>,
-    last_piece_len: u64,
     // TODO create newtype
     our_peer_id: [u8; 20],
-    // Maybe use a channel to communicate instead?
-    pub torrent_state: Arc<Mutex<TorrentState>>,
+    pub torrent_state: Rc<RefCell<TorrentState>>,
 }
 
 fn generate_peer_id() -> [u8; 20] {
@@ -143,35 +240,21 @@ impl TorrentManager {
             peer_connections: Vec::new(),
             download_rc: Some(rc),
             download_tx: Some(tx),
+            torrent_info: torrent_info.clone(),
+            last_piece_len,
         };
         Self {
-            last_piece_len,
             our_peer_id: generate_peer_id(),
             torrent_info: Arc::new(torrent_info),
-            torrent_state: Arc::new(Mutex::new(torrent_state)),
-        }
-    }
-
-    // TODO fixme
-    fn piece_length(&self, index: i32) -> u32 {
-        if self.torrent_info.pieces().count() == (index as usize + 1) {
-            self.last_piece_len as u32
-        } else {
-            self.torrent_info.piece_length() as u32
+            torrent_state: Rc::new(RefCell::new(torrent_state)),
         }
     }
 
     pub async fn start(&self) {
         if let Some(peer_handle) = self.peer(0) {
-            peer_handle
-                .sender
-                .send(PeerOrder::RequestPiece {
-                    index: 0,
-                    total_len: self.piece_length(0),
-                })
-                .await
-                .unwrap();
-            let rc = self.torrent_state.lock().download_rc.take();
+            let lenght = self.torrent_state.borrow().piece_length(0);
+            peer_handle.request_piece(0, lenght).unwrap();
+            let rc = self.torrent_state.borrow_mut().download_rc.take();
             rc.unwrap().await.unwrap();
         } else {
             log::error!("No peers to download from!");
@@ -181,176 +264,69 @@ impl TorrentManager {
     pub async fn accept_incoming(&self, listener: &TcpListener) {
         let (stream, peer_addr) = listener.accept().await.unwrap();
         log::info!("Incomming peer connection: {peer_addr}");
-        // Connect first perhaps so errors can be handled
-        let (sender, receiver) = tokio::sync::mpsc::channel(256);
-        let info_hash = self.torrent_info.info_hash().into();
-        let this = self.clone();
-        let (tx, rc) = tokio::sync::oneshot::channel();
-        let our_peer_id = self.our_peer_id;
-
-        // Safe since the inner Rc have yet to
-        // have been cloned at this point
-        struct SendableStream(TcpStream);
-        unsafe impl Send for SendableStream {}
-
-        let sendable_stream = SendableStream(stream);
-        std::thread::spawn(move || {
-            tokio_uring::start(async move {
-                let sendable_stream = sendable_stream;
-                let stream = sendable_stream.0;
-                let mut peer_connection =
-                    PeerConnection::new(stream, our_peer_id, info_hash, this, receiver)
-                        .await
-                        .unwrap();
-
-                tx.send(peer_connection.peer_id).unwrap();
-                peer_connection.connection_send_loop().await.unwrap();
-            })
-        });
-        let peer_id = rc.await.unwrap();
-        let peer_handle = PeerConnectionHandle { peer_id, sender };
-        self.torrent_state.lock().peer_connections.push(peer_handle);
+        let peer_connection = PeerConnection::new(
+            stream,
+            self.our_peer_id,
+            self.torrent_info.info_hash().into(),
+            self.torrent_info.pieces().count(),
+            Rc::downgrade(&self.torrent_state),
+        )
+        .await
+        .unwrap();
+        self.torrent_state
+            .borrow_mut()
+            .peer_connections
+            .push(peer_connection);
     }
 
     pub async fn add_peer(&self, addr: SocketAddr) {
-        // Connect first perhaps so errors can be handled
-        let (sender, receiver) = tokio::sync::mpsc::channel(256);
-        let info_hash = self.torrent_info.info_hash().into();
-        let this = self.clone();
-        let (tx, rc) = tokio::sync::oneshot::channel();
-        let our_peer_id = self.our_peer_id;
-        std::thread::spawn(move || {
-            tokio_uring::start(async move {
-                let stream = TcpStream::connect(addr).await.unwrap();
-                let mut peer_connection =
-                    PeerConnection::new(stream, our_peer_id, info_hash, this, receiver)
-                        .await
-                        .unwrap();
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let peer_connection = PeerConnection::new(
+            stream,
+            self.our_peer_id,
+            self.torrent_info.info_hash().into(),
+            self.torrent_info.pieces().count(),
+            Rc::downgrade(&self.torrent_state),
+        )
+        .await
+        .unwrap();
 
-                tx.send(peer_connection.peer_id).unwrap();
-                peer_connection.connection_send_loop().await.unwrap();
-            })
-        });
-        let peer_id = rc.await.unwrap();
-        let peer_handle = PeerConnectionHandle { peer_id, sender };
-        self.torrent_state.lock().peer_connections.push(peer_handle);
+        self.torrent_state
+            .borrow_mut()
+            .peer_connections
+            .push(peer_connection);
     }
 
-    pub fn peer(&self, index: usize) -> Option<PeerConnectionHandle> {
+    pub fn peer(&self, index: usize) -> Option<PeerConnection> {
         self.torrent_state
-            .lock()
+            .borrow()
             .peer_connections
             .get(index)
             .cloned()
     }
-
-    pub(crate) fn should_unchoke(&self) -> bool {
-        let state = self.torrent_state.lock();
-        state.num_unchoked < state.max_unchoked
-    }
-
-    pub(crate) fn on_piece_request(
-        &self,
-        index: i32,
-        begin: i32,
-        length: i32,
-    ) -> anyhow::Result<Vec<u8>> {
-        // TODO: Take choking into account
-        let piece_size = self.torrent_info.piece_length();
-        let mut torrent_state = self.torrent_state.lock();
-        if *torrent_state
-            .completed_pieces
-            .get(index as usize)
-            .as_deref()
-            .unwrap_or(&false)
-        {
-            log::info!("Piece is available!");
-            if torrent_state.pretended_file.len()
-                < ((index as u64 * piece_size) + begin as u64 + length as u64) as usize
-            {
-                anyhow::bail!("Invalid piece request, out of bounds of file");
-            }
-            let mut data = vec![0; length as usize];
-            let mut cursor = Cursor::new(std::mem::take(&mut torrent_state.pretended_file));
-            cursor.set_position(piece_size * index as u64);
-            cursor.copy_to_slice(&mut data);
-            torrent_state.pretended_file = cursor.into_inner();
-
-            drop(torrent_state);
-            Ok(data)
-        } else {
-            anyhow::bail!("Piece requested isn't available");
-        }
-    }
-
-    pub(crate) async fn on_piece_completed(&self, index: i32, data: Vec<u8>) {
-        let mut hasher = Sha1::new();
-        hasher.update(&data);
-        let data_hash = hasher.finalize();
-        let position = self
-            .torrent_info
-            .pieces()
-            .position(|piece_hash| data_hash.as_slice() == piece_hash);
-        match position {
-            Some(piece_index) if piece_index == index as usize => {
-                log::info!("Piece hash matched downloaded data");
-                let (peer_connections, next_piece): (Vec<_>, Option<usize>) = {
-                    let mut state = self.torrent_state.lock();
-                    state.completed_pieces.set(piece_index, true);
-                    let mut cursor = Cursor::new(std::mem::take(&mut state.pretended_file));
-                    cursor.set_position(self.torrent_info.piece_length() * index as u64);
-                    cursor.write_all(&data).unwrap();
-                    state.pretended_file = cursor.into_inner();
-                    state.downloaded += data.len();
-                    log::info!("Downloaded: {}", state.downloaded);
-
-                    // TODO avoid clone here
-                    (
-                        state.peer_connections.clone(),
-                        state.completed_pieces.first_zero(),
-                    )
-                };
-
-                for peer in peer_connections.iter() {
-                    peer.sender.send(PeerOrder::SendHave(index)).await.unwrap();
-                }
-
-                // TODO Remove me
-                if let Some(next_piece) = next_piece {
-                    log::info!("Requesting next piece: {next_piece}");
-                    peer_connections[0]
-                        .sender
-                        .send(peer_connection::PeerOrder::RequestPiece {
-                            index: next_piece as i32,
-                            total_len: self.piece_length(next_piece as i32),
-                        })
-                        .await
-                        .unwrap();
-                } else {
-                    let mut state = self.torrent_state.lock();
-                    log::info!(
-                        "Torrent completed! Downloaded: {}",
-                        state.pretended_file.len()
-                    );
-                    state.download_tx.take().unwrap().send(()).unwrap();
-                }
-            }
-            Some(piece_index) => log::error!(
-                    "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
-            ),
-            None => {
-                log::error!("Piece sha1 hash not found!");
-            }
-        }
-    }
+    
 }
+
+// Peer info needed:
+// up/download rate
+// haves is choked/interestead or not
 
 // Torrentmanager
 // tracks peers "haves"
 // includes piece stategy
 // chokes and unchokes
-// owns peer connections
+// owns peer connections and connections have weak ref back?
 // includes mmapped file(s)?
+//
+// TorrentManager owns peer connections and peers have weak ref back
+// pro: peer connection state and torrent state is accessible to both synchronously
+// con: locking needed
+
+// Start with this!
+// TorrentManager owns peer connection state, connection on separate thread keeps channel to
+// communicate. Separate thread sends back parsed messages and recieved messages to be sent out
+// pro: clean separation, less locking most likely
+// con: More cloning? async might not always be desired
 
 // TorrentDownloadManager
 // 1. Get meta data about pieces and info hashes

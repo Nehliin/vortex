@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bittorrent::{peer_connection::PeerOrder, TorrentManager};
+use bittorrent::TorrentManager;
 use tokio_uring::net::TcpListener;
 
 // Make these tests automatic
@@ -20,7 +20,7 @@ fn download_from_seeding() {
             .await;
         log::info!("We are connected!!");
         let handle = torrent_manager.peer(0).unwrap();
-        handle.sender.send(PeerOrder::Interested).await.unwrap();
+        handle.interested().unwrap();
 
         println!(
             "file len: {}",
@@ -33,7 +33,7 @@ fn download_from_seeding() {
             "downloaded.txt",
             torrent_manager
                 .torrent_state
-                .lock()
+                .borrow_mut()
                 .pretended_file
                 .as_slice(),
         )
@@ -56,10 +56,10 @@ fn accepts_incoming() {
     // simulate seeding
     let torrent_manager = TorrentManager::new(metainfo.info().clone(), 1);
     let file = std::fs::read("final_file.txt").unwrap();
-    torrent_manager.torrent_state.lock().pretended_file = file;
+    torrent_manager.torrent_state.borrow_mut().pretended_file = file;
     torrent_manager
         .torrent_state
-        .lock()
+        .borrow_mut()
         .completed_pieces
         .fill(true);
 
@@ -70,6 +70,5 @@ fn accepts_incoming() {
         log::info!("We are connected!!");
         let handle = torrent_manager.peer(0).unwrap();
         tokio::time::sleep(Duration::from_secs(10)).await;
-        
     });
 }
