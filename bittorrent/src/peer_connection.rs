@@ -15,19 +15,19 @@ use crate::{Piece, TorrentState, SUBPIECE_SIZE};
 #[derive(Debug)]
 pub(crate) struct PeerConnectionState {
     /// This side is choking the peer
-    is_choking: bool,
+    pub is_choking: bool,
     /// This side is interested what the peer has to offer
-    is_interested: bool,
+    pub is_interested: bool,
     /// The peer have informed us that it is choking us.
-    peer_choking: bool,
+    pub peer_choking: bool,
     /// The peer is interested what we have to offer
-    peer_interested: bool,
+    pub peer_interested: bool,
     /// Which pieces do the peer have
-    peer_pieces: BitBox<u8, Msb0>,
+    pub peer_pieces: BitBox<u8, Msb0>,
     /// Piece that is being currently downloaded
     /// from the peer. Might allow for more than 1 per peer
     /// in the future
-    currently_downloading: Option<Piece>,
+    pub currently_downloading: Option<Piece>,
 }
 
 impl PeerConnectionState {
@@ -467,11 +467,11 @@ impl PeerConnection {
         Ok(())
     }
 
-    fn state_mut(&self) -> RefMut<'_, PeerConnectionState> {
+    pub(crate) fn state_mut(&self) -> RefMut<'_, PeerConnectionState> {
         self.state.borrow_mut()
     }
 
-    fn state(&self) -> Ref<'_, PeerConnectionState> {
+    pub(crate) fn state(&self) -> Ref<'_, PeerConnectionState> {
         self.state.borrow()
     }
 }

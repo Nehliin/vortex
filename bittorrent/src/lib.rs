@@ -97,7 +97,7 @@ impl Piece {
 }
 
 pub struct TorrentState {
-    pub completed_pieces: BitBox<u8, Lsb0>,
+    pub completed_pieces: BitBox<u8, Msb0>,
     pub pretended_file: Vec<u8>,
     pub torrent_info: bip_metainfo::Info,
     last_piece_len: u64,
@@ -122,6 +122,55 @@ impl TorrentState {
             self.last_piece_len as u32
         } else {
             self.torrent_info.piece_length() as u32
+        }
+    }
+
+    // Returnes the next piece that can be downloaded
+    // from the current connected peers based on current state.
+    // Starts by picking random and then transitions to rarest first
+    fn next_piece(&self) -> Option<i32> {
+        let pieces_left = self.completed_pieces.count_zeros();
+        if pieces_left == 0 {
+            log::info!("Torrent is completed, no next piece found");
+            return None;
+        }
+        // All pieces we haven't downloaded that peers have
+        let mut available_pieces: BitBox<u8, Msb0> =
+            (0..self.completed_pieces.len()).map(|_| false).collect();
+
+        for peer in self.peer_connections.iter() {
+            available_pieces |= &peer.state().peer_pieces;
+        }
+        let mut tmp = self.completed_pieces.clone();
+        tmp &= &available_pieces;
+        available_pieces ^= &tmp;
+
+        if available_pieces.not_any() {
+            log::warn!("There are no available pieces!");
+            return None;
+        }
+
+        let procentage_left = pieces_left as f32 / self.completed_pieces.len() as f32;
+
+        if procentage_left > 0.95 {
+            loop {
+                let index = (rand::random::<f32>() * self.completed_pieces.len() as f32) as usize;
+                log::info!("Picking random piece to download, index: {index}");
+                if available_pieces[index] {
+                    return Some(index as i32);
+                }
+            }
+        } else {
+            // Rarest first
+            let mut count = vec![0; available_pieces.len()];
+            for available in available_pieces.iter_ones() {
+                for peer in self.peer_connections.iter() {
+                    if peer.state().peer_pieces[available] {
+                        count[available] += 1;
+                    }
+                }
+            }
+            count.into_iter().filter(|count| count > &0).min()
         }
     }
 
@@ -226,7 +275,7 @@ fn generate_peer_id() -> [u8; 20] {
 
 impl TorrentManager {
     pub fn new(torrent_info: bip_metainfo::Info, max_unchoked: u32) -> Self {
-        let completed_pieces: BitBox<u8, Lsb0> = torrent_info.pieces().map(|_| false).collect();
+        let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         assert!(torrent_info.files().count() == 1);
         let file_lenght = torrent_info.files().next().unwrap().length();
         let last_piece_len = file_lenght % torrent_info.piece_length() as u64;
@@ -251,6 +300,7 @@ impl TorrentManager {
     }
 
     pub async fn start(&self) {
+
         if let Some(peer_handle) = self.peer(0) {
             let lenght = self.torrent_state.borrow().piece_length(0);
             peer_handle.request_piece(0, lenght).unwrap();
@@ -304,7 +354,6 @@ impl TorrentManager {
             .get(index)
             .cloned()
     }
-    
 }
 
 // Peer info needed:
