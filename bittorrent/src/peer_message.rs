@@ -1,8 +1,8 @@
-use bitvec::{prelude::*, slice::BitSlice};
+use bitvec::prelude::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum PeerMessage<'a> {
+pub enum PeerMessage {
     Choke,
     Unchoke,
     Interested,
@@ -10,7 +10,7 @@ pub enum PeerMessage<'a> {
     Have {
         index: i32,
     },
-    Bitfield(&'a BitSlice<u8, Msb0>),
+    Bitfield(BitVec<u8, Msb0>),
     Request {
         index: i32,
         begin: i32,
@@ -25,11 +25,11 @@ pub enum PeerMessage<'a> {
         index: i32,
         begin: i32,
         lenght: i32,
-        data: &'a [u8],
+        data: Bytes,
     },
 }
 
-impl PeerMessage<'_> {
+impl PeerMessage {
     pub const CHOKE: u8 = 0;
     pub const UNCHOKE: u8 = 1;
     pub const INTERESTED: u8 = 2;
@@ -119,10 +119,10 @@ impl PeerMessage<'_> {
     }
 }
 
-impl<'a> TryFrom<&'a [u8]> for PeerMessage<'a> {
+impl TryFrom<Bytes> for PeerMessage {
     type Error = anyhow::Error;
 
-    fn try_from(mut bytes: &'a [u8]) -> Result<Self, Self::Error> {
+    fn try_from(mut bytes: Bytes) -> Result<Self, Self::Error> {
         let length = bytes.len();
         let msg_type = bytes.get_u8();
         match msg_type {
@@ -135,7 +135,7 @@ impl<'a> TryFrom<&'a [u8]> for PeerMessage<'a> {
             }),
             PeerMessage::BITFIELD => {
                 log::debug!("Bitfield received");
-                let bits = BitSlice::<_, Msb0>::try_from_slice(bytes).unwrap();
+                let bits = BitVec::<_, Msb0>::from_slice(&bytes);
                 Ok(PeerMessage::Bitfield(bits))
             }
             PeerMessage::REQUEST => {

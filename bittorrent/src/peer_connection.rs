@@ -1,5 +1,4 @@
 use std::cell::{Ref, RefMut};
-use std::net::SocketAddr;
 use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Context;
@@ -190,13 +189,13 @@ impl PeerConnection {
     }
 
     async fn parse_msgs(&self, mut incoming: BytesMut, pending_msg: &mut Option<PendingMsg>) {
-        while let Some(pending) = pending_msg {
+        while let Some(mut pending) = pending_msg.take() {
             // There exist enough data to finish the pending message
             if incoming.remaining() as i32 >= pending.remaining_bytes {
                 let mut remainder = incoming.split_off(pending.remaining_bytes as usize);
                 pending.partial.unsplit(incoming.split());
                 log::trace!("Extending partial: {}", pending.remaining_bytes);
-                let msg = PeerMessage::try_from(&pending.partial[..]).unwrap();
+                let msg = PeerMessage::try_from(pending.partial.freeze()).unwrap();
                 self.process_incoming(msg).await.unwrap();
                 // Should we try to start parsing a new msg?
                 if remainder.remaining() >= std::mem::size_of::<i32>() {
@@ -222,6 +221,7 @@ impl PeerConnection {
                 log::trace!("More data needed");
                 pending.remaining_bytes -= incoming.len() as i32;
                 pending.partial.unsplit(incoming);
+                *pending_msg = Some(pending);
                 // Return to read more data!
                 return;
             }
@@ -308,7 +308,7 @@ impl PeerConnection {
             index,
             begin,
             lenght: length,
-            data: data.as_slice(),
+            data: data.into(),
         };
         let (result, _buf) = self.stream.write_all(msg.into_bytes()).await;
         result.context("Failed to write piece msg")
@@ -341,7 +341,7 @@ impl PeerConnection {
     }
 
     // Consider adding handlers for each msg as a trait which extensions can implement
-    pub(crate) async fn process_incoming(&self, msg: PeerMessage<'_>) -> anyhow::Result<()> {
+    pub(crate) async fn process_incoming(&self, msg: PeerMessage) -> anyhow::Result<()> {
         match msg {
             PeerMessage::Choke => {
                 let mut state = self.state_mut();
@@ -434,7 +434,7 @@ impl PeerConnection {
                 log::info!("Data len: {}", data.len());
                 let currently_downloading = self.state_mut().currently_downloading.take();
                 if let Some(mut piece) = currently_downloading {
-                    piece.on_subpiece(index, begin, lenght, data);
+                    piece.on_subpiece(index, begin, lenght, &data[..]);
                     if !piece.is_complete() {
                         // Next subpice to download (that isn't already inflight)
                         if let Some(next_subpice) = piece.next_unstarted_subpice() {
