@@ -15,6 +15,7 @@ use std::{
 use anyhow::Context;
 use bitvec::prelude::*;
 use bytes::Buf;
+use indicatif::{ProgressBar, ProgressStyle};
 use peer_connection::PeerConnection;
 use sha1::{Digest, Sha1};
 use tokio::sync::oneshot;
@@ -40,10 +41,12 @@ struct Piece {
     // TODO this should be a memory mapped region in
     // the actual file
     memory: Vec<u8>,
+    // TEMP
+    progress: ProgressBar,
 }
 
 impl Piece {
-    fn new(index: i32, lenght: u32) -> Self {
+    fn new(index: i32, lenght: u32, progress: ProgressBar) -> Self {
         let memory = vec![0; lenght as usize];
         let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
             SUBPIECE_SIZE
@@ -60,6 +63,7 @@ impl Piece {
             inflight_subpieces,
             last_subpiece_length,
             memory,
+            progress,
         }
     }
 
@@ -75,6 +79,7 @@ impl Piece {
             assert_eq!(length, SUBPIECE_SIZE);
         }
         assert_eq!(data.len(), length as usize);
+        self.progress.inc(data.len() as u64);
         self.completed_subpieces.set(subpiece_index as usize, true);
         self.memory[begin as usize..begin as usize + data.len() as usize].copy_from_slice(data);
     }
@@ -102,8 +107,8 @@ pub struct TorrentState {
     pub pretended_file: Vec<u8>,
     pub torrent_info: bip_metainfo::Info,
     last_piece_len: u64,
-    // Temp
-    downloaded: usize,
+    // Temp, should be more general
+    progress: ProgressBar,
     download_rc: Option<oneshot::Receiver<()>>,
     download_tx: Option<oneshot::Sender<()>>,
     max_unchoked: u32,
@@ -232,8 +237,6 @@ impl TorrentState {
                 cursor.set_position(self.torrent_info.piece_length() * index as u64);
                 cursor.write_all(&data).unwrap();
                 self.pretended_file = cursor.into_inner();
-                self.downloaded += data.len();
-                log::info!("Downloaded: {}", self.downloaded);
 
                 for peer in self.peer_connections.iter() {
                     // don't care about failures here 
@@ -318,13 +321,17 @@ impl TorrentManager {
             num_unchoked: 0,
             max_unchoked: UNCHOKED_PEERS as u32,
             pretended_file: vec![0; file_lenght as usize],
-            downloaded: 0,
+            progress: ProgressBar::new(file_lenght),
             peer_connections: Vec::new(),
             download_rc: Some(rc),
             download_tx: Some(tx),
             torrent_info: torrent_info.clone(),
             last_piece_len,
         };
+        torrent_state.progress.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})").unwrap().progress_chars("#>-"));
+        torrent_state
+            .progress
+            .enable_steady_tick(Duration::from_millis(150));
         Self {
             our_peer_id: generate_peer_id(),
             torrent_info: Arc::new(torrent_info),
@@ -354,7 +361,11 @@ impl TorrentManager {
                         peer.unchoke().unwrap();
                         state.num_unchoked += 1;
                         state.inflight_pieces.set(piece_idx as usize, true);
-                        peer.request_piece(piece_idx, state.piece_length(piece_idx))?;
+                        peer.request_piece(
+                            piece_idx,
+                            state.piece_length(piece_idx),
+                            state.progress.clone(),
+                        )?;
                     }
                 } else {
                     log::warn!("No more pieces available");

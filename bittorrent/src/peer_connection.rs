@@ -5,6 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 use anyhow::Context;
 use bitvec::prelude::{BitBox, Msb0};
 use bytes::{Buf, BufMut, BytesMut};
+use indicatif::ProgressBar;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 use tokio_uring::net::TcpStream;
@@ -303,13 +304,18 @@ impl PeerConnection {
     }
 
     // Is this were we want to du subpice splitting?
-    pub fn request_piece(&self, index: i32, length: u32) -> anyhow::Result<()> {
+    pub fn request_piece(
+        &self,
+        index: i32,
+        length: u32,
+        progress: ProgressBar,
+    ) -> anyhow::Result<()> {
         let mut state = self.state_mut();
         // Don't start on a new piece before the current one is completed
         assert!(state.currently_downloading.is_none());
         // This is racy
         //assert!(state.peer_pieces[index as usize]);
-        let mut piece = Piece::new(index, length);
+        let mut piece = Piece::new(index, length, progress);
         // First subpiece that isn't already completed or inflight
         let last_subpiece_index = piece.completed_subpieces.len() - 1;
         // Should have 5 in flight subpieces at all times
