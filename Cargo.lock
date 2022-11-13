@@ -1312,6 +1312,7 @@ dependencies = [
  "bittorrent",
  "bytes",
  "env_logger",
+ "indicatif",
  "libc",
  "log",
  "magnet-url",

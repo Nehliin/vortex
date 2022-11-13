@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, net::IpAddr, path::Path, time::Duration};
 
 use bittorrent::TorrentManager;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use krpc::{KrpcService, Peer};
 use magnet_url::Magnet;
 use node::{NodeId, ID_MAX};
@@ -44,7 +45,12 @@ fn save_table(path: &Path, table: &RoutingTable) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boostrap_ip: IpAddr) {
+async fn bootstrap(
+    routing_table: &mut RoutingTable,
+    service: &KrpcService,
+    boostrap_ip: IpAddr,
+    progress: &MultiProgress,
+) {
     let mut node = Node {
         id: ID_ZERO,
         addr: format!("{boostrap_ip}:6881").parse().unwrap(),
@@ -55,15 +61,24 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boos
     node.id = response.id;
     routing_table.insert_node(node);
 
-    refresh(routing_table, service).await;
+    refresh(routing_table, service, progress).await;
 }
 
-async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
+async fn refresh(
+    routing_table: &mut RoutingTable,
+    service: &KrpcService,
+    progress: &MultiProgress,
+) {
     // Find closest nodes
     // 1. look in bootstrap for self
     // 2. recursivly look for the closest node to self in the resposne
     let own_id = routing_table.own_id;
     let mut prev_min = ID_MAX;
+    // TODO Refactor out to ui module
+    let refresh_progress = progress.add(ProgressBar::new_spinner());
+    refresh_progress.enable_steady_tick(Duration::from_millis(100));
+    refresh_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
+    refresh_progress.set_message("Refreshing routing table...");
     loop {
         log::info!("Scanning");
         let next_to_query = routing_table.get_closest(&own_id).unwrap();
@@ -88,7 +103,7 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
             log::debug!("Got nodes from: {next_to_query:?}");
             for node in response.nodes.into_iter() {
                 if routing_table.insert_node(node) {
-                    println!("Inserted node");
+                    log::debug!("Inserted node");
                 }
             }
             prev_min = distance;
@@ -98,6 +113,7 @@ async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
             break;
         }
     }
+    refresh_progress.finish();
 }
 
 fn pop_first(btree_map: &mut BTreeMap<NodeId, Node>) -> Node {
@@ -110,11 +126,16 @@ async fn find_peers(
     service: &KrpcService,
     routing_table: &RoutingTable,
     info_hash: &[u8],
+    progress: &MultiProgress,
 ) -> Vec<Peer> {
     /*let bytes = base32::decode(
         base32::Alphabet::RFC4648 { padding: false },
         magent_url.xt.as_ref().unwrap(),
     );*/
+    let find_peer_progress = progress.add(ProgressBar::new_spinner());
+    find_peer_progress.enable_steady_tick(Duration::from_millis(100));
+    find_peer_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
+    find_peer_progress.set_message("Finding peers...");
 
     let info_hash = NodeId::from(info_hash);
 
@@ -144,7 +165,7 @@ async fn find_peers(
                 }
             }
             krpc::GetPeerResponseBody::Peers(peers) => {
-                dbg!(&peers);
+                find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
                 break peers;
             }
         }
@@ -152,7 +173,13 @@ async fn find_peers(
 }
 
 fn main() {
-    env_logger::init();
+    // Might not exist
+    let log_file = std::fs::File::create("log.txt").unwrap();
+    let mut log_builder = env_logger::builder();
+    log_builder
+        .target(env_logger::Target::Pipe(Box::new(log_file)))
+        .filter_level(log::LevelFilter::Info)
+        .init();
 
     // Do this async
     let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default()).unwrap();
@@ -172,18 +199,25 @@ fn main() {
     }
 
     tokio_uring::start(async move {
+        let progress = MultiProgress::new();
         let service = KrpcService::new("0.0.0.0:1337".parse().unwrap())
             .await
             .unwrap();
 
         if should_bootstrap {
-            bootstrap(&mut routing_table, &service, ip).await;
+            let bootstrap_progress = ProgressBar::new_spinner();
+            let pb = progress.add(bootstrap_progress);
+            pb.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
+            pb.enable_steady_tick(Duration::from_millis(100));
+            pb.set_message("Bootstrapping DHT");
+            bootstrap(&mut routing_table, &service, ip, &progress).await;
+            pb.finish();
         } else {
             std::fs::remove_file(Path::new("routing_table.json")).unwrap();
-            refresh(&mut routing_table, &service).await;
+            refresh(&mut routing_table, &service, &progress).await;
         }
 
-        routing_table.ping_all_nodes(&service).await;
+        routing_table.ping_all_nodes(&service, &progress).await;
         log::info!("Done with pings");
 
         let remaining = routing_table
@@ -198,14 +232,15 @@ fn main() {
         let torrent_info = std::fs::read("linux_mint.torrent").unwrap();
         let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
 
-        let torrent_manager = TorrentManager::new(metainfo.info().clone());
-
         let peers = find_peers(
             &service,
             &routing_table,
             metainfo.info().info_hash().as_ref(),
+            &progress,
         )
         .await;
+
+        let torrent_manager = TorrentManager::new(metainfo.info().clone(), &progress);
 
         for peer in peers.into_iter() {
             let connect_res =

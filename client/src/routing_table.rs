@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -130,9 +133,13 @@ impl RoutingTable {
     // TODO: properly add last_changed to buckets and
     // periodically ping nodes accoriding to
     // https://www.bittorrent.org/beps/bep_0005.html
-    pub async fn ping_all_nodes(&mut self, service: &KrpcService) {
+    pub async fn ping_all_nodes(&mut self, service: &KrpcService, progress: &MultiProgress) {
         // Will live long enough and this is temporary
         let this: &'static mut Self = unsafe { std::mem::transmute(self) };
+        let ping_progress = progress.add(ProgressBar::new_spinner());
+        ping_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
+        ping_progress.enable_steady_tick(Duration::from_millis(100));
+        ping_progress.set_message("Pinging nodes...");
         let futures = this
             .buckets
             .iter_mut()
@@ -155,6 +162,7 @@ impl RoutingTable {
         for fut in futures {
             fut.await.unwrap();
         }
+        ping_progress.finish_with_message("Pinged all nodes");
     }
 
     // TODO maybe not use nodeid as type for info_hash

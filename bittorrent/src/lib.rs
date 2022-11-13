@@ -15,7 +15,7 @@ use std::{
 use anyhow::Context;
 use bitvec::prelude::*;
 use bytes::Buf;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use peer_connection::PeerConnection;
 use sha1::{Digest, Sha1};
 use tokio::sync::oneshot;
@@ -309,7 +309,7 @@ fn generate_peer_id() -> [u8; 20] {
 const UNCHOKED_PEERS: usize = 4;
 
 impl TorrentManager {
-    pub fn new(torrent_info: bip_metainfo::Info) -> Self {
+    pub fn new(torrent_info: bip_metainfo::Info, progress: &MultiProgress) -> Self {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         assert!(torrent_info.files().count() == 1);
         let file_lenght = torrent_info.files().next().unwrap().length();
@@ -321,7 +321,7 @@ impl TorrentManager {
             num_unchoked: 0,
             max_unchoked: UNCHOKED_PEERS as u32,
             pretended_file: vec![0; file_lenght as usize],
-            progress: ProgressBar::new(file_lenght),
+            progress: progress.add(ProgressBar::new(file_lenght)),
             peer_connections: Vec::new(),
             download_rc: Some(rc),
             download_tx: Some(tx),
@@ -329,9 +329,6 @@ impl TorrentManager {
             last_piece_len,
         };
         torrent_state.progress.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})").unwrap().progress_chars("#>-"));
-        torrent_state
-            .progress
-            .enable_steady_tick(Duration::from_millis(150));
         Self {
             our_peer_id: generate_peer_id(),
             torrent_info: Arc::new(torrent_info),
