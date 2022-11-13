@@ -108,24 +108,24 @@ pub struct TorrentState {
     pub torrent_info: bip_metainfo::Info,
     last_piece_len: u64,
     // Temp, should be more general
-    progress: ProgressBar,
+    pub progress: ProgressBar,
     download_rc: Option<oneshot::Receiver<()>>,
     download_tx: Option<oneshot::Sender<()>>,
     max_unchoked: u32,
-    num_unchoked: u32,
-    peer_connections: Vec<PeerConnection>,
+    pub num_unchoked: u32,
+    pub peer_connections: Vec<PeerConnection>,
 }
 
 impl TorrentState {
     #[inline(always)]
-    pub(crate) fn should_unchoke(&self) -> bool {
+    pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
     }
 
     // Returnes the next piece that can be downloaded
     // from the current connected peers based on current state.
     // Starts by picking random and then transitions to rarest first
-    fn next_piece(&self) -> Option<i32> {
+    pub fn next_piece(&self) -> Option<i32> {
         let pieces_left = self.completed_pieces.count_zeros();
         if pieces_left == 0 {
             log::info!("Torrent is completed, no next piece found");
@@ -180,7 +180,7 @@ impl TorrentState {
     }
 
     // TODO fixme
-    fn piece_length(&self, index: i32) -> u32 {
+    pub fn piece_length(&self, index: i32) -> u32 {
         if self.torrent_info.pieces().count() == (index as usize + 1) {
             self.last_piece_len as u32
         } else {
@@ -250,9 +250,10 @@ impl TorrentState {
                         for peer in self.peer_connections.iter().filter(|peer| !peer.state().peer_choking && peer.state().currently_downloading.is_none()) {
                             if peer.state().peer_pieces[next_piece as usize] {
                                 if peer.state().is_choking {
-                                    self.num_unchoked += 1;
                                     if let Err(err) = peer.unchoke() {
                                         log::error!("{err}");
+                                    } else {
+                                        self.num_unchoked += 1;
                                     }
                                 }
                                 // Group to a single operation
@@ -360,8 +361,9 @@ impl TorrentManager {
                         if let Err(err) = peer.unchoke() {
                             log::error!("Peer disconnected: {err}");
                             disconnected_peers.push(peer.peer_id);
+                        } else {
+                            state.num_unchoked += 1;
                         }
-                        state.num_unchoked += 1;
                         if let Err(err) = peer.request_piece(
                             piece_idx,
                             state.piece_length(piece_idx),
@@ -405,7 +407,7 @@ impl TorrentManager {
             .push(peer_connection);
     }
 
-    pub async fn add_peer(&self, addr: SocketAddr) -> anyhow::Result<()> {
+    pub async fn add_peer(&self, addr: SocketAddr) -> anyhow::Result<PeerConnection> {
         let stream = TcpStream::connect(addr)
             .await
             .context("Failed to connect")?;
@@ -421,8 +423,8 @@ impl TorrentManager {
         self.torrent_state
             .borrow_mut()
             .peer_connections
-            .push(peer_connection);
-        Ok(())
+            .push(peer_connection.clone());
+        Ok(peer_connection)
     }
 
     pub fn peer(&self, index: usize) -> Option<PeerConnection> {

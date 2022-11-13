@@ -14,7 +14,7 @@ use crate::peer_message::PeerMessage;
 use crate::{Piece, TorrentState, SUBPIECE_SIZE};
 
 #[derive(Debug)]
-pub(crate) struct PeerConnectionState {
+pub struct PeerConnectionState {
     /// This side is choking the peer
     pub is_choking: bool,
     /// This side is interested what the peer has to offer
@@ -28,7 +28,7 @@ pub(crate) struct PeerConnectionState {
     /// Piece that is being currently downloaded
     /// from the peer. Might allow for more than 1 per peer
     /// in the future
-    pub currently_downloading: Option<Piece>,
+    pub(crate) currently_downloading: Option<Piece>,
 }
 
 impl PeerConnectionState {
@@ -270,6 +270,7 @@ impl PeerConnection {
 
     #[inline(always)]
     pub fn choke(&self) -> anyhow::Result<()> {
+        self.state_mut().is_choking = true;
         self.outgoing
             .send(PeerMessage::Choke)
             .context("Failed to queue outoing msg")
@@ -277,6 +278,7 @@ impl PeerConnection {
 
     #[inline(always)]
     pub fn unchoke(&self) -> anyhow::Result<()> {
+        self.state_mut().is_choking = false;
         self.outgoing
             .send(PeerMessage::Unchoke)
             .context("Failed to queue outoing msg")
@@ -284,6 +286,7 @@ impl PeerConnection {
 
     #[inline(always)]
     pub fn interested(&self) -> anyhow::Result<()> {
+        self.state_mut().is_interested = true;
         self.outgoing
             .send(PeerMessage::Interested)
             .context("Failed to queue outoing msg")
@@ -291,6 +294,7 @@ impl PeerConnection {
 
     #[inline(always)]
     pub fn not_interested(&self) -> anyhow::Result<()> {
+        self.state_mut().is_interested = false;
         self.outgoing
             .send(PeerMessage::NotInterested)
             .context("Failed to queue outoing msg")
@@ -474,11 +478,11 @@ impl PeerConnection {
         Ok(())
     }
 
-    pub(crate) fn state_mut(&self) -> RefMut<'_, PeerConnectionState> {
+    pub fn state_mut(&self) -> RefMut<'_, PeerConnectionState> {
         self.state.borrow_mut()
     }
 
-    pub(crate) fn state(&self) -> Ref<'_, PeerConnectionState> {
+    pub fn state(&self) -> Ref<'_, PeerConnectionState> {
         self.state.borrow()
     }
 }

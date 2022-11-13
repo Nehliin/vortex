@@ -45,12 +45,7 @@ fn save_table(path: &Path, table: &RoutingTable) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn bootstrap(
-    routing_table: &mut RoutingTable,
-    service: &KrpcService,
-    boostrap_ip: IpAddr,
-    progress: &MultiProgress,
-) {
+async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boostrap_ip: IpAddr) {
     let mut node = Node {
         id: ID_ZERO,
         addr: format!("{boostrap_ip}:6881").parse().unwrap(),
@@ -60,25 +55,15 @@ async fn bootstrap(
     let response = service.ping(&routing_table.own_id, &node).await.unwrap();
     node.id = response.id;
     routing_table.insert_node(node);
-
-    refresh(routing_table, service, progress).await;
 }
 
-async fn refresh(
-    routing_table: &mut RoutingTable,
-    service: &KrpcService,
-    progress: &MultiProgress,
-) {
+async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
     // Find closest nodes
     // 1. look in bootstrap for self
     // 2. recursivly look for the closest node to self in the resposne
     let own_id = routing_table.own_id;
     let mut prev_min = ID_MAX;
-    // TODO Refactor out to ui module
-    let refresh_progress = progress.add(ProgressBar::new_spinner());
-    refresh_progress.enable_steady_tick(Duration::from_millis(100));
-    refresh_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
-    refresh_progress.set_message("Refreshing routing table...");
+
     loop {
         log::info!("Scanning");
         let next_to_query = routing_table.get_closest(&own_id).unwrap();
@@ -113,7 +98,6 @@ async fn refresh(
             break;
         }
     }
-    refresh_progress.finish();
 }
 
 fn pop_first(btree_map: &mut BTreeMap<NodeId, Node>) -> Node {
@@ -126,16 +110,11 @@ async fn find_peers(
     service: &KrpcService,
     routing_table: &RoutingTable,
     info_hash: &[u8],
-    progress: &MultiProgress,
 ) -> Vec<Peer> {
     /*let bytes = base32::decode(
         base32::Alphabet::RFC4648 { padding: false },
         magent_url.xt.as_ref().unwrap(),
     );*/
-    let find_peer_progress = progress.add(ProgressBar::new_spinner());
-    find_peer_progress.enable_steady_tick(Duration::from_millis(100));
-    find_peer_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
-    find_peer_progress.set_message("Finding peers...");
 
     let info_hash = NodeId::from(info_hash);
 
@@ -165,7 +144,6 @@ async fn find_peers(
                 }
             }
             krpc::GetPeerResponseBody::Peers(peers) => {
-                find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
                 break peers;
             }
         }
@@ -209,13 +187,20 @@ fn main() {
             let pb = progress.add(bootstrap_progress);
             pb.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
             pb.enable_steady_tick(Duration::from_millis(100));
-            pb.set_message("Bootstrapping DHT");
-            bootstrap(&mut routing_table, &service, ip, &progress).await;
+            pb.set_message("Bootstrapping DHT...");
+            bootstrap(&mut routing_table, &service, ip).await;
             pb.finish();
         } else {
+            // remove if it already exists, this can probably be removed though
             std::fs::remove_file(Path::new("routing_table.json")).unwrap();
-            refresh(&mut routing_table, &service, &progress).await;
         }
+        // TODO Refactor out to ui module
+        let refresh_progress = progress.add(ProgressBar::new_spinner());
+        refresh_progress.enable_steady_tick(Duration::from_millis(100));
+        refresh_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
+        refresh_progress.set_message("Refreshing routing table...");
+        refresh(&mut routing_table, &service).await;
+        refresh_progress.finish_with_message("Routing table refreshed");
 
         routing_table.ping_all_nodes(&service, &progress).await;
         log::info!("Done with pings");
@@ -225,21 +210,29 @@ fn main() {
             .iter()
             .flat_map(|bucket| bucket.nodes())
             .count();
-        log::info!("remaining: {remaining}");
+        log::info!("Remaining nodes: {remaining}");
 
         // Linux mint magnet link + torrent file
         //let magnet_link = "magnet:?xt=urn:btih:CS5SSRQ4EJB2UKD43JUBJCHFPSPOWJNP".to_string();
         let torrent_info = std::fs::read("linux_mint.torrent").unwrap();
         let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
 
+        let find_peer_progress = progress.add(ProgressBar::new_spinner());
+        find_peer_progress.enable_steady_tick(Duration::from_millis(100));
+        find_peer_progress
+            .set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
+        find_peer_progress.set_message("Finding peers...");
+
         let peers = find_peers(
             &service,
             &routing_table,
             metainfo.info().info_hash().as_ref(),
-            &progress,
         )
         .await;
 
+        find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
+
+        let info_hash = metainfo.info().info_hash();
         let torrent_manager = TorrentManager::new(metainfo.info().clone(), &progress);
 
         let connection_progress = progress.add(ProgressBar::new_spinner());
@@ -270,7 +263,7 @@ fn main() {
                         .await;
 
                 match connect_res {
-                    Ok(Ok(())) => {
+                    Ok(Ok(_peer_con)) => {
                         *num_success_clone.borrow_mut() += 1;
                         log::info!("Connected to {}!", peer.addr);
                     }
@@ -300,6 +293,80 @@ fn main() {
             num_success.borrow(),
             total_peers
         ));
+        let torrent_manager_clone = torrent_manager.clone();
+        // Try to find more peers (all logic after peers have been found and added can be moved to
+        // the torrrent manager)
+        tokio_uring::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                refresh(&mut routing_table, &service).await;
+                let peers = find_peers(&service, &routing_table, info_hash.as_ref()).await;
+                for peer in peers {
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        torrent_manager_clone.add_peer(peer.addr),
+                    )
+                    .await;
+
+                    if let Ok(Ok(peer_connection)) = result {
+                        log::info!("Peer added!");
+                        let _ = peer_connection.interested();
+
+                        let mut state = torrent_manager_clone.torrent_state.borrow_mut();
+                        if state.should_unchoke() && peer_connection.unchoke().is_ok() {
+                            state.num_unchoked += 1;
+                            for _ in 0..10 {
+                                if let Some(index) = state.next_piece() {
+                                    if peer_connection.state().peer_pieces[index as usize] {
+                                        // TODO handle error
+                                        let _ = peer_connection.request_piece(
+                                            index,
+                                            state.piece_length(index),
+                                            state.progress.clone(),
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut state = torrent_manager_clone.torrent_state.borrow_mut();
+                // Attempt to unchoke a random peer
+                if !state.should_unchoke() {
+                    if let Some(unchoked) = state
+                        .peer_connections
+                        .iter()
+                        .find(|peer| !peer.state().is_choking)
+                    {
+                        let _ = unchoked.choke();
+                        state.num_unchoked -= 1;
+                    }
+                    if let Some(choked) = state
+                        .peer_connections
+                        .iter()
+                        .find(|peer| peer.state().is_choking)
+                    {
+                        let _ = choked.unchoke();
+                        for _ in 0..10 {
+                            if let Some(index) = state.next_piece() {
+                                if choked.state().peer_pieces[index as usize] {
+                                    // TODO handle error
+                                    let _ = choked.request_piece(
+                                        index,
+                                        state.piece_length(index),
+                                        state.progress.clone(),
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        state.num_unchoked += 1;
+                    }
+                }
+            }
+        });
         // TODO announce peer (add support for incoming connections)
         torrent_manager.start().await.unwrap();
         log::info!("FILE DOWNLOADED!");
