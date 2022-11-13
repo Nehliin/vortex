@@ -238,10 +238,8 @@ impl TorrentState {
                 cursor.write_all(&data).unwrap();
                 self.pretended_file = cursor.into_inner();
 
-                for peer in self.peer_connections.iter() {
-                    // don't care about failures here 
-                    let _ = peer.have(index);
-                }
+                // Purge disconnected peers 
+                self.peer_connections.retain(|peer| peer.have(index).is_ok());
 
                 // TODO use a proper piece strategy here 
                for _ in 0..5 {
@@ -336,6 +334,7 @@ impl TorrentManager {
     }
 
     pub async fn start(&self) -> anyhow::Result<()> {
+        let mut disconnected_peers = Vec::new();
         let rc = {
             {
                 let state = self.torrent_state.borrow();
@@ -344,7 +343,10 @@ impl TorrentManager {
                     anyhow::bail!("No peers to download from");
                 }
                 for peer in state.peer_connections.iter() {
-                    peer.interested()?;
+                    if let Err(err) = peer.interested() {
+                        log::error!("Peer disconnected: {err}");
+                        disconnected_peers.push(peer.peer_id);
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -355,20 +357,29 @@ impl TorrentManager {
                 if let Some(piece_idx) = state.next_piece() {
                     let peer_owns_piece = peer.state().peer_pieces[piece_idx as usize];
                     if peer_owns_piece {
-                        peer.unchoke().unwrap();
+                        if let Err(err) = peer.unchoke() {
+                            log::error!("Peer disconnected: {err}");
+                            disconnected_peers.push(peer.peer_id);
+                        }
                         state.num_unchoked += 1;
-                        state.inflight_pieces.set(piece_idx as usize, true);
-                        peer.request_piece(
+                        if let Err(err) = peer.request_piece(
                             piece_idx,
                             state.piece_length(piece_idx),
                             state.progress.clone(),
-                        )?;
+                        ) {
+                            log::error!("Peer disconnected: {err}");
+                            disconnected_peers.push(peer.peer_id);
+                        }
+                        state.inflight_pieces.set(piece_idx as usize, true);
                     }
                 } else {
                     log::warn!("No more pieces available");
                 }
             }
             let mut state = self.torrent_state.borrow_mut();
+            state
+                .peer_connections
+                .retain(|peer| !disconnected_peers.contains(&peer.peer_id));
             state.download_rc.take()
         };
 
