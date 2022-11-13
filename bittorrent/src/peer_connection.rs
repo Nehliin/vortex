@@ -87,7 +87,13 @@ async fn parse_msgs(
                 // This might not be true if we are unlucky
                 // and it's possible for a i32 to split between
                 // to separate receive operations
-                assert_eq!(remainder.remaining(), 0);
+                // THIS WILL PANIC
+                if remainder.remaining() != 0 {
+                    log::error!(
+                        "Buffer spent but not empty, remaining: {}",
+                        remainder.remaining()
+                    );
+                }
                 *pending_msg = None;
             }
             incoming = remainder;
@@ -370,17 +376,17 @@ impl PeerConnection {
                     // if we are not choking them we might need to send a
                     // unchoke to avoid some race conditions. Libtorrent
                     // uses the same type of logic
-                    self.unchoke().unwrap();
+                    self.unchoke()?;
                 } else if torrent_state.should_unchoke() {
                     log::debug!("Unchoking peer after intrest");
-                    self.unchoke().unwrap();
+                    self.unchoke()?;
                 }
             }
             PeerMessage::NotInterested => {
                 log::info!("Peer is no longer interested in us!");
                 state.peer_interested = false;
                 state.is_choking = true;
-                self.choke().unwrap();
+                self.choke()?;
             }
             PeerMessage::Have { index } => {
                 log::info!("Peer have piece with index: {index}");
@@ -427,8 +433,7 @@ impl PeerConnection {
                 lenght,
                 data,
             } => {
-                log::info!("Recived a piece index: {index}, begin: {begin}, length: {lenght}");
-                log::info!("Data len: {}", data.len());
+                log::debug!("Recived a piece index: {index}, begin: {begin}, length: {lenght}");
                 let currently_downloading = state.currently_downloading.take();
                 if let Some(mut piece) = currently_downloading {
                     piece.on_subpiece(index, begin, lenght, &data[..]);
@@ -437,22 +442,20 @@ impl PeerConnection {
                         if let Some(next_subpice) = piece.next_unstarted_subpice() {
                             piece.inflight_subpieces.set(next_subpice, true);
                             // Write a new request, would slab + writev make sense?
-                            self.outgoing
-                                .send(PeerMessage::Request {
-                                    index: piece.index,
-                                    begin: SUBPIECE_SIZE * next_subpice as i32,
-                                    length: if next_subpice as i32 == piece.last_subpiece_index() {
-                                        piece.last_subpiece_length
-                                    } else {
-                                        SUBPIECE_SIZE
-                                    },
-                                })
-                                .unwrap();
+                            self.outgoing.send(PeerMessage::Request {
+                                index: piece.index,
+                                begin: SUBPIECE_SIZE * next_subpice as i32,
+                                length: if next_subpice as i32 == piece.last_subpiece_index() {
+                                    piece.last_subpiece_length
+                                } else {
+                                    SUBPIECE_SIZE
+                                },
+                            })?;
                         }
                         // Still downloading the same piece
                         state.currently_downloading = Some(piece);
                     } else {
-                        log::info!("Piece completed!");
+                        log::debug!("Piece completed!");
                         // Required since the state is borrowed within the on_piece function
                         drop(state);
                         torrent_state.on_piece_completed(piece.index, piece.memory);

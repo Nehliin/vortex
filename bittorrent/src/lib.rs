@@ -67,13 +67,11 @@ impl Piece {
         // This subpice is part of the currently downloading piece
         assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
-        log::info!("Subpiece index received: {subpiece_index}");
+        log::trace!("Subpiece index received: {subpiece_index}");
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {
-            log::info!("Last subpiece");
             assert_eq!(length, self.last_subpiece_length);
         } else {
-            log::info!("Not last subpiece");
             assert_eq!(length, SUBPIECE_SIZE);
         }
         assert_eq!(data.len(), length as usize);
@@ -150,7 +148,7 @@ impl TorrentState {
         if procentage_left > 0.95 {
             loop {
                 let index = (rand::random::<f32>() * self.completed_pieces.len() as f32) as usize;
-                log::info!("Picking random piece to download, index: {index}");
+                log::debug!("Picking random piece to download, index: {index}");
                 if available_pieces[index] {
                     return Some(index as i32);
                 }
@@ -171,7 +169,7 @@ impl TorrentState {
                 .filter(|(_pos, count)| count > &0)
                 .min_by_key(|(_pos, val)| *val)
                 .map(|(pos, _)| pos as i32);
-            log::info!("Picking rarest piece to download, index: {index:?}");
+            log::debug!("Picking rarest piece to download, index: {index:?}");
             index
         }
     }
@@ -238,7 +236,8 @@ impl TorrentState {
                 log::info!("Downloaded: {}", self.downloaded);
 
                 for peer in self.peer_connections.iter() {
-                    peer.have(index).unwrap();
+                    // don't care about failures here 
+                    let _ = peer.have(index);
                 }
 
                 // TODO use a proper piece strategy here 
@@ -251,12 +250,18 @@ impl TorrentState {
                             if peer.state().peer_pieces[next_piece as usize] {
                                 if peer.state().is_choking {
                                     self.num_unchoked += 1;
-                                    peer.unchoke().unwrap();
+                                    if let Err(err) = peer.unchoke() {
+                                        log::error!("{err}");
+                                    }
                                 }
                                 // Group to a single operation
-                                self.inflight_pieces.set(next_piece as usize, true);
-                                peer.request_piece(next_piece, self.piece_length(next_piece)).unwrap();
-                                return;
+                                if let Err(err) = peer.request_piece(next_piece, self.piece_length(next_piece), self.progress.clone()) {
+                                    log::error!("{err}");
+                                    continue;
+                                } else {
+                                    self.inflight_pieces.set(next_piece as usize, true);
+                                    return;
+                                }
                             }
                         }
                     } else if self.completed_pieces.all() {
