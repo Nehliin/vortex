@@ -260,7 +260,7 @@ impl KrpcService {
         let (res, _) = self.socket.send_to(encoded, node.addr).await;
         res.unwrap();
 
-        match tokio::time::timeout(Duration::from_secs(3), rx).await {
+        match tokio::time::timeout(Duration::from_secs(5), rx).await {
             Ok(Ok(Ok(response))) => Ok(response),
             Err(_elapsed) => Err(Error {
                 code: 408,
