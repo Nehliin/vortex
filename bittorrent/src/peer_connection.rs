@@ -389,7 +389,7 @@ impl PeerConnection {
                 state.peer_pieces.set(index as usize, true);
             }
             PeerMessage::Bitfield(field) => {
-                log::info!("Bifield received");
+                log::info!("Bifield received: {field}");
                 state.peer_pieces |= field;
             }
             PeerMessage::Request {
