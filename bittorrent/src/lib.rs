@@ -8,7 +8,7 @@ use std::{
     io::{Cursor, Write},
     net::SocketAddr,
     rc::Rc,
-    sync::Arc,
+    sync::Arc, time::Duration,
 };
 
 use bitvec::prelude::*;
@@ -98,6 +98,7 @@ impl Piece {
 
 pub struct TorrentState {
     pub completed_pieces: BitBox<u8, Msb0>,
+    pub inflight_pieces: BitBox<u8, Msb0>,
     pub pretended_file: Vec<u8>,
     pub torrent_info: bip_metainfo::Info,
     last_piece_len: u64,
@@ -116,15 +117,6 @@ impl TorrentState {
         self.num_unchoked < self.max_unchoked
     }
 
-    // TODO fixme
-    fn piece_length(&self, index: i32) -> u32 {
-        if self.torrent_info.pieces().count() == (index as usize + 1) {
-            self.last_piece_len as u32
-        } else {
-            self.torrent_info.piece_length() as u32
-        }
-    }
-
     // Returnes the next piece that can be downloaded
     // from the current connected peers based on current state.
     // Starts by picking random and then transitions to rarest first
@@ -141,12 +133,13 @@ impl TorrentState {
         for peer in self.peer_connections.iter() {
             available_pieces |= &peer.state().peer_pieces;
         }
+        // Get the available pieces - all already completed or inflight pieces
         let mut tmp = self.completed_pieces.clone();
-        tmp &= &available_pieces;
-        available_pieces ^= &tmp;
+        tmp |= &self.inflight_pieces;
+        available_pieces &= !tmp;
 
         if available_pieces.not_any() {
-            log::warn!("There are no available pieces!");
+            log::error!("There are no available pieces!");
             return None;
         }
 
@@ -170,7 +163,18 @@ impl TorrentState {
                     }
                 }
             }
-            count.into_iter().filter(|count| count > &0).min()
+            let index = count.into_iter().enumerate().filter(|(_pos, count)| count > &0).min_by_key(|(_pos, val)| *val).map(|(pos, _)| pos as i32);
+            log::info!("Picking rarest piece to download, index: {index:?}");
+            index
+        }
+    }
+
+    // TODO fixme
+    fn piece_length(&self, index: i32) -> u32 {
+        if self.torrent_info.pieces().count() == (index as usize + 1) {
+            self.last_piece_len as u32
+        } else {
+            self.torrent_info.piece_length() as u32
         }
     }
 
@@ -218,6 +222,7 @@ impl TorrentState {
             Some(piece_index) if piece_index == index as usize => {
                 log::info!("Piece hash matched downloaded data");
                 self.completed_pieces.set(piece_index, true);
+                self.inflight_pieces.set(piece_index, false);
                 let mut cursor = Cursor::new(std::mem::take(&mut self.pretended_file));
                 cursor.set_position(self.torrent_info.piece_length() * index as u64);
                 cursor.write_all(&data).unwrap();
@@ -225,25 +230,37 @@ impl TorrentState {
                 self.downloaded += data.len();
                 log::info!("Downloaded: {}", self.downloaded);
 
-                let next_piece = self.completed_pieces.first_zero();
 
                 for peer in self.peer_connections.iter() {
                     peer.have(index).unwrap();
                 }
 
-                // TODO Remove me
-                if let Some(next_piece) = next_piece {
-                    log::info!("Requesting next piece: {next_piece}");
-                    self.peer_connections[0]
-                        .request_piece(next_piece as i32, self.piece_length(next_piece as i32))
-                        .unwrap();
-                } else {
-                    log::info!(
-                        "Torrent completed! Downloaded: {}",
-                        self.pretended_file.len()
-                    );
-                    self.download_tx.take().unwrap().send(()).unwrap();
+                // TODO use a proper piece strategy here 
+               loop {
+                    if let Some(next_piece) = self.next_piece() {
+                        // only peers that haven't choked us 
+                        for peer in self.peer_connections.iter().filter(|peer| !peer.state().peer_choking) {
+                            if peer.state().peer_pieces[next_piece as usize] {
+                                if peer.state().is_choking {
+                                    self.num_unchoked += 1;
+                                    peer.unchoke().unwrap();
+                                }
+                                // Group to a single operation
+                                self.inflight_pieces.set(next_piece as usize, true);
+                                peer.request_piece(next_piece, self.piece_length(next_piece)).unwrap();
+                                return;
+                            }
+                        }
+                    } else if self.completed_pieces.all() {
+                        log::info!("Torrent completed! Downloaded: {}",self.pretended_file.len());
+                        self.download_tx.take().unwrap().send(()).unwrap();
+                        return;
+                    } else {
+                       log::error!("No piece can be downloaded from any peer"); 
+                        return;
+                    }
                 }
+                
             }
             Some(piece_index) => log::error!(
                     "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
@@ -273,17 +290,21 @@ fn generate_peer_id() -> [u8; 20] {
     result
 }
 
+// How many peers do we aim to have unchoked overtime
+const UNCHOKED_PEERS: usize = 4;
+
 impl TorrentManager {
-    pub fn new(torrent_info: bip_metainfo::Info, max_unchoked: u32) -> Self {
+    pub fn new(torrent_info: bip_metainfo::Info) -> Self {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         assert!(torrent_info.files().count() == 1);
         let file_lenght = torrent_info.files().next().unwrap().length();
         let last_piece_len = file_lenght % torrent_info.piece_length() as u64;
         let (tx, rc) = tokio::sync::oneshot::channel();
         let torrent_state = TorrentState {
+            inflight_pieces: completed_pieces.clone(),
             completed_pieces,
             num_unchoked: 0,
-            max_unchoked,
+            max_unchoked: UNCHOKED_PEERS as u32,
             pretended_file: vec![0; file_lenght as usize],
             downloaded: 0,
             peer_connections: Vec::new(),
@@ -300,15 +321,33 @@ impl TorrentManager {
     }
 
     pub async fn start(&self) {
+        let rc = {
+            let mut state = self.torrent_state.borrow_mut();
+            let tmp = state.peer_connections.clone();
+            drop(state);
+            for peer in tmp.iter().take(UNCHOKED_PEERS) {
+                peer.interested().unwrap();
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                let mut state = self.torrent_state.borrow_mut();
+                if let Some(piece_idx) = state.next_piece() {
+                    let peer_owns_piece = peer.state().peer_pieces[piece_idx as usize];
+                    if peer_owns_piece {
+                        peer.unchoke().unwrap();
+                        state.num_unchoked += 1;
+                        state.inflight_pieces.set(piece_idx as usize, true);
+                        peer.request_piece(piece_idx, state.piece_length(piece_idx))
+                            .unwrap();
+                    }
+                } else {
+                    log::warn!("No more pieces available");
+                }
+            }
+            let mut state = self.torrent_state.borrow_mut();
+            state.peer_connections = tmp;
+            state.download_rc.take()
+        };
 
-        if let Some(peer_handle) = self.peer(0) {
-            let lenght = self.torrent_state.borrow().piece_length(0);
-            peer_handle.request_piece(0, lenght).unwrap();
-            let rc = self.torrent_state.borrow_mut().download_rc.take();
-            rc.unwrap().await.unwrap();
-        } else {
-            log::error!("No peers to download from!");
-        }
+        rc.unwrap().await.unwrap();
     }
 
     pub async fn accept_incoming(&self, listener: &TcpListener) {
@@ -355,6 +394,33 @@ impl TorrentManager {
             .cloned()
     }
 }
+
+/*#[cfg(test)]
+mod test {
+
+    use super::*;
+
+    #[test]
+    fn next_piece() {
+        let torrent = std::fs::read("final_test.torrent").unwrap();
+        let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
+        let pieces: BitBox<u8, Msb0> = (0..10).map(|_| false).collect();
+        let state = TorrentState {
+            completed_pieces: pieces.clone(),
+            inflight_pieces: pieces.clone(),
+            peer_connections: ,
+            pretended_file:Default::default(),
+            torrent_info: metainfo.info().clone(),
+            last_piece_len: 0,
+            downloaded: Default::default(),
+            download_rc:Default::default(),
+            download_tx:  Default::default(),
+            max_unchoked: Default::default(),
+            num_unchoked: Default::default(),
+        };
+
+    }
+}*/
 
 // Peer info needed:
 // up/download rate
