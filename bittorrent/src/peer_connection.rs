@@ -58,8 +58,6 @@ fn handshake(info_hash: [u8; 20], peer_id: [u8; 20]) -> [u8; 68] {
     buffer
 }
 
-
-
 async fn parse_msgs(
     incoming_tx: &Sender<PeerMessage>,
     mut incoming: BytesMut,

@@ -8,7 +8,8 @@ use std::{
     io::{Cursor, Write},
     net::SocketAddr,
     rc::Rc,
-    sync::Arc, time::Duration,
+    sync::Arc,
+    time::Duration,
 };
 
 use bitvec::prelude::*;
@@ -163,7 +164,12 @@ impl TorrentState {
                     }
                 }
             }
-            let index = count.into_iter().enumerate().filter(|(_pos, count)| count > &0).min_by_key(|(_pos, val)| *val).map(|(pos, _)| pos as i32);
+            let index = count
+                .into_iter()
+                .enumerate()
+                .filter(|(_pos, count)| count > &0)
+                .min_by_key(|(_pos, val)| *val)
+                .map(|(pos, _)| pos as i32);
             log::info!("Picking rarest piece to download, index: {index:?}");
             index
         }
@@ -230,7 +236,6 @@ impl TorrentState {
                 self.downloaded += data.len();
                 log::info!("Downloaded: {}", self.downloaded);
 
-
                 for peer in self.peer_connections.iter() {
                     peer.have(index).unwrap();
                 }
@@ -260,7 +265,6 @@ impl TorrentState {
                         return;
                     }
                 }
-                
             }
             Some(piece_index) => log::error!(
                     "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
