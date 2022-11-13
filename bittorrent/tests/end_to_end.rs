@@ -8,7 +8,7 @@ use tokio_uring::net::TcpListener;
 #[test]
 fn download_from_seeding() {
     let _ = env_logger::builder()
-        .filter_level(log::LevelFilter::Error)
+        .filter_level(log::LevelFilter::Info)
         .is_test(true)
         .try_init();
     let torrent = std::fs::read("final_test.torrent").unwrap();
@@ -17,7 +17,8 @@ fn download_from_seeding() {
     tokio_uring::start(async move {
         torrent_manager
             .add_peer("127.0.0.1:6881".parse().unwrap())
-            .await;
+            .await
+            .unwrap();
         log::info!("We are connected!!");
 
         println!(

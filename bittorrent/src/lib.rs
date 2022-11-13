@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use bitvec::prelude::*;
 use bytes::Buf;
 use peer_connection::PeerConnection;
@@ -241,10 +242,12 @@ impl TorrentState {
                 }
 
                 // TODO use a proper piece strategy here 
-               loop {
+               for _ in 0..5 {
                     if let Some(next_piece) = self.next_piece() {
-                        // only peers that haven't choked us 
-                        for peer in self.peer_connections.iter().filter(|peer| !peer.state().peer_choking) {
+                        // only peers that haven't choked us and that aren't currently downloading. 
+                        // At least one peer must be available here to download, it might not have
+                        // the desired piece though.
+                        for peer in self.peer_connections.iter().filter(|peer| !peer.state().peer_choking && peer.state().currently_downloading.is_none()) {
                             if peer.state().peer_pieces[next_piece as usize] {
                                 if peer.state().is_choking {
                                     self.num_unchoked += 1;
@@ -324,14 +327,21 @@ impl TorrentManager {
         }
     }
 
-    pub async fn start(&self) {
+    pub async fn start(&self) -> anyhow::Result<()> {
         let rc = {
-            let mut state = self.torrent_state.borrow_mut();
-            let tmp = state.peer_connections.clone();
-            drop(state);
+            {
+                let state = self.torrent_state.borrow();
+                if state.peer_connections.is_empty() {
+                    anyhow::bail!("No peers to download from");
+                }
+                for peer in state.peer_connections.iter() {
+                    peer.interested()?;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let tmp = { self.torrent_state.borrow().peer_connections.clone() };
             for peer in tmp.iter().take(UNCHOKED_PEERS) {
-                peer.interested().unwrap();
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                peer.interested()?;
                 let mut state = self.torrent_state.borrow_mut();
                 if let Some(piece_idx) = state.next_piece() {
                     let peer_owns_piece = peer.state().peer_pieces[piece_idx as usize];
@@ -339,19 +349,18 @@ impl TorrentManager {
                         peer.unchoke().unwrap();
                         state.num_unchoked += 1;
                         state.inflight_pieces.set(piece_idx as usize, true);
-                        peer.request_piece(piece_idx, state.piece_length(piece_idx))
-                            .unwrap();
+                        peer.request_piece(piece_idx, state.piece_length(piece_idx))?;
                     }
                 } else {
                     log::warn!("No more pieces available");
                 }
             }
             let mut state = self.torrent_state.borrow_mut();
-            state.peer_connections = tmp;
             state.download_rc.take()
         };
 
-        rc.unwrap().await.unwrap();
+        rc.unwrap().await?;
+        Ok(())
     }
 
     pub async fn accept_incoming(&self, listener: &TcpListener) {
@@ -372,8 +381,10 @@ impl TorrentManager {
             .push(peer_connection);
     }
 
-    pub async fn add_peer(&self, addr: SocketAddr) {
-        let stream = TcpStream::connect(addr).await.unwrap();
+    pub async fn add_peer(&self, addr: SocketAddr) -> anyhow::Result<()> {
+        let stream = TcpStream::connect(addr)
+            .await
+            .context("Failed to connect")?;
         let peer_connection = PeerConnection::new(
             stream,
             self.our_peer_id,
@@ -381,13 +392,13 @@ impl TorrentManager {
             self.torrent_info.pieces().count(),
             Rc::downgrade(&self.torrent_state),
         )
-        .await
-        .unwrap();
+        .await?;
 
         self.torrent_state
             .borrow_mut()
             .peer_connections
             .push(peer_connection);
+        Ok(())
     }
 
     pub fn peer(&self, index: usize) -> Option<PeerConnection> {

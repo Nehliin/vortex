@@ -109,16 +109,14 @@ fn pop_first(btree_map: &mut BTreeMap<NodeId, Node>) -> Node {
 async fn find_peers(
     service: &KrpcService,
     routing_table: &RoutingTable,
-    magnet_link: String,
+    info_hash: &[u8],
 ) -> Vec<Peer> {
-    let magent_url = Magnet::new(&magnet_link).unwrap();
-
-    let bytes = base32::decode(
+    /*let bytes = base32::decode(
         base32::Alphabet::RFC4648 { padding: false },
         magent_url.xt.as_ref().unwrap(),
-    );
+    );*/
 
-    let info_hash = NodeId::from(bytes.unwrap().as_slice());
+    let info_hash = NodeId::from(info_hash);
 
     let closest_node = routing_table.get_closest(&info_hash).unwrap();
 
@@ -196,13 +194,18 @@ fn main() {
         log::info!("remaining: {remaining}");
 
         // Linux mint magnet link + torrent file
-        let magnet_link = "magnet:?xt=urn:btih:CS5SSRQ4EJB2UKD43JUBJCHFPSPOWJNP".to_string();
+        //let magnet_link = "magnet:?xt=urn:btih:CS5SSRQ4EJB2UKD43JUBJCHFPSPOWJNP".to_string();
         let torrent_info = std::fs::read("linux_mint.torrent").unwrap();
         let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
 
-        let torrent_manager = TorrentManager::new(metainfo.info().clone(), 5);
+        let torrent_manager = TorrentManager::new(metainfo.info().clone());
 
-        let peers = find_peers(&service, &routing_table, magnet_link).await;
+        let peers = find_peers(
+            &service,
+            &routing_table,
+            metainfo.info().info_hash().as_ref(),
+        )
+        .await;
 
         for peer in peers.into_iter() {
             let connect_res =
@@ -210,17 +213,34 @@ fn main() {
                     .await;
 
             match connect_res {
-                Ok(()) => {
+                Ok(Ok(())) => {
                     log::info!("Connected to {}!", peer.addr);
                 }
-                Err(err) => log::error!("Failed to connect to peer: {:?}, error: {err}", peer.addr),
+                Ok(Err(err)) => {
+                    log::error!("Failed to connect to peer {}, error: {err}", peer.addr);
+                }
+                Err(_) => log::error!("Failed to connect to peer: {:?}, timedout", peer.addr),
             }
         }
-        // 1. announce peer (måste support inkommande connections då tillslut)
-        // 2. välj X random pieces och hitta peers som har den o börja ladda ner genom intrest +
-        //    unchoke + request
-         
-        // 3. (gå över till rarest)
+        // TODO announce peer (add support for incoming connections)
+        torrent_manager.start().await.unwrap();
+        log::info!("FILE DOWNLOADED!");
 
+        std::fs::write(
+            metainfo
+                .info()
+                .files()
+                .next()
+                .unwrap()
+                .path()
+                .to_str()
+                .unwrap(),
+            torrent_manager
+                .torrent_state
+                .borrow_mut()
+                .pretended_file
+                .as_slice(),
+        )
+        .unwrap();
     });
 }

@@ -16,8 +16,8 @@ fn it_works() {
 
 fn setup_test() -> (
     TorrentManager,
-    PeerConnectionHandle,
-    impl Future<Output = anyhow::Result<PeerConnection>>,
+    PeerConnection,
+    impl Future<Output = anyhow::Result<PeerConnectiontmp>>,
     Receiver<Vec<u8>>,
 ) {
     let _ = env_logger::builder()
@@ -42,11 +42,11 @@ fn setup_test() -> (
             let bytes_read = bytes_read.unwrap();
             assert_eq!(bytes_read, 68);
             assert_eq!(
-                PeerConnection::handshake(info_hash_clone, [0; 20]),
+                PeerConnectiontmp::handshake(info_hash_clone, [0; 20]),
                 buf[..bytes_read]
             );
 
-            let buf = PeerConnection::handshake(info_hash, [1; 20]).to_vec();
+            let buf = PeerConnectiontmp::handshake(info_hash, [1; 20]).to_vec();
             let (res, _buf) = connection.write(buf).await;
             res.unwrap();
             log::info!("Connected!");
@@ -64,12 +64,12 @@ fn setup_test() -> (
 
     let torrent_manager = TorrentManager::new(metainfo.info().clone(), 1);
     let (sender, receiver) = tokio::sync::mpsc::channel(256);
-    let peer_handle = PeerConnectionHandle {
+    let peer_handle = PeerConnection {
         peer_id: [1; 20],
         sender,
     };
     let state = torrent_manager.torrent_state.clone();
-    let peer_connection = PeerConnection::new(addr, [0; 20], [1; 20], info_hash, state, receiver);
+    let peer_connection = PeerConnectiontmp::new(addr, [0; 20], [1; 20], info_hash, state, receiver);
     (torrent_manager, peer_handle, peer_connection, rx)
 }
 
