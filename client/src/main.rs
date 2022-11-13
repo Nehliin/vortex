@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, net::IpAddr, path::Path, time::Duration};
+use std::{cell::RefCell, collections::BTreeMap, net::IpAddr, path::Path, rc::Rc, time::Duration};
 
 use bittorrent::TorrentManager;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -242,21 +242,64 @@ fn main() {
 
         let torrent_manager = TorrentManager::new(metainfo.info().clone(), &progress);
 
-        for peer in peers.into_iter() {
-            let connect_res =
-                tokio::time::timeout(Duration::from_secs(3), torrent_manager.add_peer(peer.addr))
-                    .await;
+        let connection_progress = progress.add(ProgressBar::new_spinner());
+        connection_progress
+            .set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
+        connection_progress.enable_steady_tick(Duration::from_millis(100));
+        let total_peers = peers.len();
+        let num_success = Rc::new(RefCell::new(0));
+        let num_failures = Rc::new(RefCell::new(0));
 
-            match connect_res {
-                Ok(Ok(())) => {
-                    log::info!("Connected to {}!", peer.addr);
+        let connect_futures = peers.into_iter().enumerate().map(|(i, peer)| {
+            let num_success_clone = num_success.clone();
+            let num_failures_clone = num_failures.clone();
+            let manager_clone = torrent_manager.clone();
+            let connection_progress = connection_progress.clone();
+            tokio_uring::spawn(async move {
+                {
+                    let success = num_success_clone.borrow();
+                    let failures = num_failures_clone.borrow();
+                    connection_progress.set_message(format!(
+                        "Connecting to peer [{i}/{}], Success: {success}, Failures: {failures}",
+                        total_peers
+                    ));
                 }
-                Ok(Err(err)) => {
-                    log::error!("Failed to connect to peer {}, error: {err}", peer.addr);
+
+                let connect_res =
+                    tokio::time::timeout(Duration::from_secs(5), manager_clone.add_peer(peer.addr))
+                        .await;
+
+                match connect_res {
+                    Ok(Ok(())) => {
+                        *num_success_clone.borrow_mut() += 1;
+                        log::info!("Connected to {}!", peer.addr);
+                    }
+                    Ok(Err(err)) => {
+                        *num_failures_clone.borrow_mut() += 1;
+                        log::error!("Failed to connect to peer {}, error: {err}", peer.addr);
+                    }
+                    Err(_) => {
+                        *num_failures_clone.borrow_mut() += 1;
+                        log::error!("Failed to connect to peer: {:?}, timedout", peer.addr);
+                    }
                 }
-                Err(_) => log::error!("Failed to connect to peer: {:?}, timedout", peer.addr),
-            }
-        }
+                {
+                    let success = num_success_clone.borrow();
+                    let failures = num_failures_clone.borrow();
+                    connection_progress.set_message(format!(
+                        "Connecting to peer [{i}/{}], Success: {success}, Failures: {failures}",
+                        total_peers
+                    ));
+                }
+            })
+        });
+
+        futures::future::join_all(connect_futures).await;
+        connection_progress.finish_with_message(format!(
+            "Connected to {}/{} peers",
+            num_success.borrow(),
+            total_peers
+        ));
         // TODO announce peer (add support for incoming connections)
         torrent_manager.start().await.unwrap();
         log::info!("FILE DOWNLOADED!");

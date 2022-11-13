@@ -28,6 +28,7 @@ libc = "0.2"
 bittorrent = { path = "../bittorrent" }
 bip_metainfo = "0.12"
 indicatif = "0.17.2"
+futures = "0.3"
 
 [dev-dependencies]
 num-bigint = "0.4.3"

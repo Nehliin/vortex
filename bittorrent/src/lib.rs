@@ -328,7 +328,6 @@ impl TorrentManager {
             torrent_info: torrent_info.clone(),
             last_piece_len,
         };
-        torrent_state.progress.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})").unwrap().progress_chars("#>-"));
         Self {
             our_peer_id: generate_peer_id(),
             torrent_info: Arc::new(torrent_info),
@@ -340,6 +339,7 @@ impl TorrentManager {
         let rc = {
             {
                 let state = self.torrent_state.borrow();
+                state.progress.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})").unwrap().progress_chars("#>-"));
                 if state.peer_connections.is_empty() {
                     anyhow::bail!("No peers to download from");
                 }
