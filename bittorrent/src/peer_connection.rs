@@ -318,8 +318,8 @@ impl PeerConnection {
         let mut piece = Piece::new(index, length, progress);
         // First subpiece that isn't already completed or inflight
         let last_subpiece_index = piece.completed_subpieces.len() - 1;
-        // Should have 5 in flight subpieces at all times
-        for _ in 0..5 {
+        // Should have 64 in flight subpieces at all times
+        for _ in 0..piece.completed_subpieces.len().min(64) {
             if let Some(subindex) = piece.next_unstarted_subpice() {
                 piece.inflight_subpieces.set(subindex, true);
                 self.outgoing
