@@ -15,7 +15,6 @@ use std::{
 use anyhow::Context;
 use bitvec::prelude::*;
 use bytes::Buf;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use peer_connection::PeerConnection;
 use sha1::{Digest, Sha1};
 use tokio::sync::oneshot;
@@ -41,12 +40,10 @@ struct Piece {
     // TODO this should be a memory mapped region in
     // the actual file
     memory: Vec<u8>,
-    // TEMP
-    progress: ProgressBar,
 }
 
 impl Piece {
-    fn new(index: i32, lenght: u32, progress: ProgressBar) -> Self {
+    fn new(index: i32, lenght: u32) -> Self {
         let memory = vec![0; lenght as usize];
         let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
             SUBPIECE_SIZE
@@ -63,7 +60,6 @@ impl Piece {
             inflight_subpieces,
             last_subpiece_length,
             memory,
-            progress,
         }
     }
 
@@ -79,7 +75,6 @@ impl Piece {
             assert_eq!(length, SUBPIECE_SIZE);
         }
         assert_eq!(data.len(), length as usize);
-        self.progress.inc(data.len() as u64);
         self.completed_subpieces.set(subpiece_index as usize, true);
         self.memory[begin as usize..begin as usize + data.len() as usize].copy_from_slice(data);
     }
@@ -107,8 +102,7 @@ pub struct TorrentState {
     pub pretended_file: Vec<u8>,
     pub torrent_info: bip_metainfo::Info,
     last_piece_len: u64,
-    // Temp, should be more general
-    pub progress: ProgressBar,
+    pub on_subpiece_callback: Option<Box<dyn FnMut(&[u8])>>,
     download_rc: Option<oneshot::Receiver<()>>,
     download_tx: Option<oneshot::Sender<()>>,
     max_unchoked: u32,
@@ -257,7 +251,7 @@ impl TorrentState {
                                     }
                                 }
                                 // Group to a single operation
-                                if let Err(err) = peer.request_piece(next_piece, self.piece_length(next_piece), self.progress.clone()) {
+                                if let Err(err) = peer.request_piece(next_piece, self.piece_length(next_piece)) {
                                     log::error!("{err}");
                                     continue;
                                 } else {
@@ -308,7 +302,7 @@ fn generate_peer_id() -> [u8; 20] {
 const UNCHOKED_PEERS: usize = 4;
 
 impl TorrentManager {
-    pub fn new(torrent_info: bip_metainfo::Info, progress: &MultiProgress) -> Self {
+    pub fn new(torrent_info: bip_metainfo::Info) -> Self {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         assert!(torrent_info.files().count() == 1);
         let file_lenght = torrent_info.files().next().unwrap().length();
@@ -320,7 +314,7 @@ impl TorrentManager {
             num_unchoked: 0,
             max_unchoked: UNCHOKED_PEERS as u32,
             pretended_file: vec![0; file_lenght as usize],
-            progress: progress.add(ProgressBar::new(file_lenght)),
+            on_subpiece_callback: None,
             peer_connections: Vec::new(),
             download_rc: Some(rc),
             download_tx: Some(tx),
@@ -334,12 +328,15 @@ impl TorrentManager {
         }
     }
 
+    pub fn set_subpiece_callback(&self, callback: impl FnMut(&[u8]) + 'static) {
+        self.torrent_state.borrow_mut().on_subpiece_callback = Some(Box::new(callback));
+    }
+
     pub async fn start(&self) -> anyhow::Result<()> {
         let mut disconnected_peers = Vec::new();
         let rc = {
             {
                 let state = self.torrent_state.borrow();
-                state.progress.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})").unwrap().progress_chars("#>-"));
                 if state.peer_connections.is_empty() {
                     anyhow::bail!("No peers to download from");
                 }
@@ -364,11 +361,9 @@ impl TorrentManager {
                         } else {
                             state.num_unchoked += 1;
                         }
-                        if let Err(err) = peer.request_piece(
-                            piece_idx,
-                            state.piece_length(piece_idx),
-                            state.progress.clone(),
-                        ) {
+                        if let Err(err) =
+                            peer.request_piece(piece_idx, state.piece_length(piece_idx))
+                        {
                             log::error!("Peer disconnected: {err}");
                             disconnected_peers.push(peer.peer_id);
                         }

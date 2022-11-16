@@ -217,6 +217,7 @@ fn main() {
         let torrent_info = std::fs::read("linux_mint.torrent").unwrap();
         let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
 
+        println!("sum: {:x?}", metainfo.info().files().next().unwrap());
         let find_peer_progress = progress.add(ProgressBar::new_spinner());
         find_peer_progress.enable_steady_tick(Duration::from_millis(100));
         find_peer_progress
@@ -233,7 +234,7 @@ fn main() {
         find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
 
         let info_hash = metainfo.info().info_hash();
-        let torrent_manager = TorrentManager::new(metainfo.info().clone(), &progress);
+        let torrent_manager = TorrentManager::new(metainfo.info().clone());
 
         let connection_progress = progress.add(ProgressBar::new_spinner());
         connection_progress
@@ -320,11 +321,8 @@ fn main() {
                                 if let Some(index) = state.next_piece() {
                                     if peer_connection.state().peer_pieces[index as usize] {
                                         // TODO handle error
-                                        let _ = peer_connection.request_piece(
-                                            index,
-                                            state.piece_length(index),
-                                            state.progress.clone(),
-                                        );
+                                        let _ = peer_connection
+                                            .request_piece(index, state.piece_length(index));
                                         break;
                                     }
                                 }
@@ -353,11 +351,7 @@ fn main() {
                             if let Some(index) = state.next_piece() {
                                 if choked.state().peer_pieces[index as usize] {
                                     // TODO handle error
-                                    let _ = choked.request_piece(
-                                        index,
-                                        state.piece_length(index),
-                                        state.progress.clone(),
-                                    );
+                                    let _ = choked.request_piece(index, state.piece_length(index));
                                     break;
                                 }
                             }
@@ -367,9 +361,18 @@ fn main() {
                 }
             }
         });
+        let download_progress = progress.add(ProgressBar::new(
+            metainfo.info().files().next().unwrap().length(),
+        ));
+        download_progress.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})").unwrap().progress_chars("#>-"));
+        let download_progress_clone = download_progress.clone();
+        torrent_manager.set_subpiece_callback(move |data| {
+            download_progress_clone.inc(data.len() as u64);
+        });
         // TODO announce peer (add support for incoming connections)
+        download_progress.tick();
         torrent_manager.start().await.unwrap();
-        log::info!("FILE DOWNLOADED!");
+        download_progress.finish_with_message("File dowloaded!");
 
         std::fs::write(
             metainfo

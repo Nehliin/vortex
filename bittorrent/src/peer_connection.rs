@@ -5,7 +5,6 @@ use std::{cell::RefCell, rc::Rc};
 use anyhow::Context;
 use bitvec::prelude::{BitBox, Msb0};
 use bytes::{Buf, BufMut, BytesMut};
-use indicatif::ProgressBar;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 use tokio_uring::net::TcpStream;
@@ -308,18 +307,13 @@ impl PeerConnection {
     }
 
     // Is this were we want to du subpice splitting?
-    pub fn request_piece(
-        &self,
-        index: i32,
-        length: u32,
-        progress: ProgressBar,
-    ) -> anyhow::Result<()> {
+    pub fn request_piece(&self, index: i32, length: u32) -> anyhow::Result<()> {
         let mut state = self.state_mut();
         // Don't start on a new piece before the current one is completed
         assert!(state.currently_downloading.is_none());
         // This is racy
         //assert!(state.peer_pieces[index as usize]);
-        let mut piece = Piece::new(index, length, progress);
+        let mut piece = Piece::new(index, length);
         // First subpiece that isn't already completed or inflight
         let last_subpiece_index = piece.completed_subpieces.len() - 1;
         // Should have 64 in flight subpieces at all times
@@ -446,6 +440,10 @@ impl PeerConnection {
                 log::debug!("Recived a piece index: {index}, begin: {begin}, length: {lenght}");
                 let currently_downloading = state.currently_downloading.take();
                 if let Some(mut piece) = currently_downloading {
+                    // Should this be called unconditionally? 
+                    if let Some(callback) = torrent_state.on_subpiece_callback.as_mut() {
+                        callback(&data[..]);
+                    }
                     piece.on_subpiece(index, begin, lenght, &data[..]);
                     if !piece.is_complete() {
                         // Next subpice to download (that isn't already inflight)

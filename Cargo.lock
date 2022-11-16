@@ -130,7 +130,6 @@ dependencies = [
  "bitvec",
  "bytes",
  "env_logger",
- "indicatif",
  "log",
  "parking_lot",
  "rand 0.8.5",
