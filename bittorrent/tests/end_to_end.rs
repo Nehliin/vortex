@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use bittorrent::TorrentManager;
-use indicatif::MultiProgress;
 use tokio_uring::net::TcpListener;
 
 // Make these tests automatic
@@ -14,10 +13,9 @@ fn download_from_seeding() {
         .try_init();
     let torrent = std::fs::read("final_test.torrent").unwrap();
     let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
-    let bla = MultiProgress::new();
-    let torrent_manager = TorrentManager::new(metainfo.info().clone(), &bla);
+    let torrent_manager = TorrentManager::new(metainfo.info().clone());
     tokio_uring::start(async move {
-        torrent_manager
+        let _peer_con = torrent_manager
             .add_peer("127.0.0.1:6881".parse().unwrap())
             .await
             .unwrap();
@@ -29,19 +27,10 @@ fn download_from_seeding() {
         );
         println!("pieces: {}", metainfo.info().pieces().count());
 
-        torrent_manager.start().await;
-        std::fs::write(
-            "downloaded.txt",
-            torrent_manager
-                .torrent_state
-                .borrow_mut()
-                .pretended_file
-                .as_slice(),
-        )
-        .unwrap();
+        torrent_manager.start().await.unwrap();
 
-        let expected = std::fs::read("final_file.txt").unwrap();
-        let actual = std::fs::read("downloaded.txt").unwrap();
+        let expected = std::fs::read("final_file_og.txt").unwrap();
+        let actual = std::fs::read("final_file.txt").unwrap();
         assert_eq!(actual, expected);
     });
 }
@@ -55,10 +44,8 @@ fn accepts_incoming() {
     let torrent = std::fs::read("final_test.torrent").unwrap();
     let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
     // simulate seeding
-    let bla = MultiProgress::new();
-    let torrent_manager = TorrentManager::new(metainfo.info().clone(), &bla);
-    let file = std::fs::read("final_file.txt").unwrap();
-    torrent_manager.torrent_state.borrow_mut().pretended_file = file;
+    let torrent_manager = TorrentManager::new(metainfo.info().clone());
+    let file = std::fs::read("final_file_og.txt").unwrap();
     torrent_manager
         .torrent_state
         .borrow_mut()

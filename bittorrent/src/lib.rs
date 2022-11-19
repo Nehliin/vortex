@@ -15,6 +15,7 @@ use std::{
 use anyhow::Context;
 use bitvec::prelude::*;
 use bytes::Buf;
+use disk_io::FileHandle;
 use peer_connection::PeerConnection;
 use sha1::{Digest, Sha1};
 use tokio::sync::oneshot;
@@ -23,6 +24,7 @@ use tokio_uring::net::{TcpListener, TcpStream};
 const SUBPIECE_SIZE: i32 = 16_384;
 
 pub mod peer_connection;
+pub mod disk_io;
 pub mod peer_message;
 
 //#[cfg(test)]
@@ -30,15 +32,14 @@ pub mod peer_message;
 
 // Perhaps also create a subpiece type that can be converted into a peer request
 #[derive(Debug)]
-struct Piece {
+pub struct Piece {
     index: i32,
     // Contains only completed subpieces
     completed_subpieces: BitBox,
     // Contains both completed and inflight subpieces
     inflight_subpieces: BitBox,
     last_subpiece_length: i32,
-    // TODO this should be a memory mapped region in
-    // the actual file
+    // TODO used uninit memory here instead 
     memory: Vec<u8>,
 }
 
@@ -99,10 +100,10 @@ impl Piece {
 pub struct TorrentState {
     pub completed_pieces: BitBox<u8, Msb0>,
     pub inflight_pieces: BitBox<u8, Msb0>,
-    pub pretended_file: Vec<u8>,
     pub torrent_info: bip_metainfo::Info,
     last_piece_len: u64,
     pub on_subpiece_callback: Option<Box<dyn FnMut(&[u8])>>,
+    file_handle: FileHandle,
     download_rc: Option<oneshot::Receiver<()>>,
     download_tx: Option<oneshot::Sender<()>>,
     max_unchoked: u32,
@@ -197,7 +198,8 @@ impl TorrentState {
             .unwrap_or(&false)
         {
             log::info!("Piece is available!");
-            if self.pretended_file.len()
+            unimplemented!()
+            /*if self.pretended_file.len()
                 < ((index as u64 * piece_size) + begin as u64 + length as u64) as usize
             {
                 anyhow::bail!("Invalid piece request, out of bounds of file");
@@ -208,7 +210,7 @@ impl TorrentState {
             cursor.copy_to_slice(&mut data);
             self.pretended_file = cursor.into_inner();
 
-            Ok(data)
+            Ok(data)*/
         } else {
             anyhow::bail!("Piece requested isn't available");
         }
@@ -227,10 +229,7 @@ impl TorrentState {
                 log::info!("Piece hash matched downloaded data");
                 self.completed_pieces.set(piece_index, true);
                 self.inflight_pieces.set(piece_index, false);
-                let mut cursor = Cursor::new(std::mem::take(&mut self.pretended_file));
-                cursor.set_position(self.torrent_info.piece_length() * index as u64);
-                cursor.write_all(&data).unwrap();
-                self.pretended_file = cursor.into_inner();
+                self.file_handle.write(self.torrent_info.piece_length() * index as u64, data);
 
                 // Purge disconnected peers 
                 self.peer_connections.retain(|peer| peer.have(index).is_ok());
@@ -265,7 +264,8 @@ impl TorrentState {
                             }
                         }
                     } else if self.completed_pieces.all() {
-                        log::info!("Torrent completed! Downloaded: {}",self.pretended_file.len());
+                        log::info!("Torrent completed!");
+                        self.file_handle.close().unwrap();
                         self.download_tx.take().unwrap().send(()).unwrap();
                         return;
                     } else {
@@ -312,7 +312,9 @@ impl TorrentManager {
     pub fn new(torrent_info: bip_metainfo::Info) -> Self {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         assert!(torrent_info.files().count() == 1);
-        let file_lenght = torrent_info.files().next().unwrap().length();
+        let file = torrent_info.files().next().unwrap();
+        let file_lenght = file.length();
+        let file_handle = FileHandle::new(file.path().to_path_buf());
         let last_piece_len = file_lenght % torrent_info.piece_length() as u64;
         let (tx, rc) = tokio::sync::oneshot::channel();
         let torrent_state = TorrentState {
@@ -320,9 +322,9 @@ impl TorrentManager {
             completed_pieces,
             num_unchoked: 0,
             max_unchoked: UNCHOKED_PEERS as u32,
-            pretended_file: vec![0; file_lenght as usize],
             on_subpiece_callback: None,
             peer_connections: Vec::new(),
+            file_handle,
             download_rc: Some(rc),
             download_tx: Some(tx),
             torrent_info: torrent_info.clone(),

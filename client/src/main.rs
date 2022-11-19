@@ -373,22 +373,5 @@ fn main() {
         download_progress.tick();
         torrent_manager.start().await.unwrap();
         download_progress.finish_with_message("File dowloaded!");
-
-        std::fs::write(
-            metainfo
-                .info()
-                .files()
-                .next()
-                .unwrap()
-                .path()
-                .to_str()
-                .unwrap(),
-            torrent_manager
-                .torrent_state
-                .borrow_mut()
-                .pretended_file
-                .as_slice(),
-        )
-        .unwrap();
     });
 }

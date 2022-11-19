@@ -29,10 +29,20 @@ pub struct PeerConnectionState {
     /// from the peer. Might allow for more than 1 per peer
     /// in the future
     pub(crate) currently_downloading: Option<Piece>,
+    cancellation_token: CancellationToken,
+}
+
+impl Drop for PeerConnectionState {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
+    }
 }
 
 impl PeerConnectionState {
-    pub(crate) fn new(peer_pieces: BitBox<u8, Msb0>) -> Self {
+    pub(crate) fn new(
+        peer_pieces: BitBox<u8, Msb0>,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
             is_choking: true,
             is_interested: false,
@@ -41,6 +51,7 @@ impl PeerConnectionState {
             peer_interested: false,
             peer_pieces,
             currently_downloading: None,
+            cancellation_token,
         }
     }
 
@@ -208,7 +219,6 @@ pub struct PeerConnection {
     pub peer_id: [u8; 20],
     state: Rc<RefCell<PeerConnectionState>>,
     outgoing: UnboundedSender<PeerMessage>,
-    cancellation_token: CancellationToken,
 }
 
 impl PeerConnection {
@@ -263,9 +273,11 @@ impl PeerConnection {
             let peer_pieces = (0..num_pieces).map(|_| false).collect();
             let connection = PeerConnection {
                 peer_id,
-                state: Rc::new(RefCell::new(PeerConnectionState::new(peer_pieces))),
+                state: Rc::new(RefCell::new(PeerConnectionState::new(
+                    peer_pieces,
+                    cancellation_token,
+                ))),
                 outgoing: outgoing_tx,
-                cancellation_token,
             };
 
             let connection_clone = connection.clone();
@@ -508,11 +520,5 @@ impl PeerConnection {
 
     pub fn state(&self) -> Ref<'_, PeerConnectionState> {
         self.state.borrow()
-    }
-}
-
-impl Drop for PeerConnection {
-    fn drop(&mut self) {
-        self.cancellation_token.cancel();
     }
 }
