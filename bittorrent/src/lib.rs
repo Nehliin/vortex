@@ -235,6 +235,7 @@ impl TorrentState {
                 // Purge disconnected peers 
                 self.peer_connections.retain(|peer| peer.have(index).is_ok());
 
+                let mut disconnected_peers = Vec::new();
                 // TODO use a proper piece strategy here 
                for _ in 0..5 {
                     if let Some(next_piece) = self.next_piece() {
@@ -246,6 +247,8 @@ impl TorrentState {
                                 if peer.state().is_choking {
                                     if let Err(err) = peer.unchoke() {
                                         log::error!("{err}");
+                                        disconnected_peers.push(peer.peer_id);
+                                        continue;
                                     } else {
                                         self.num_unchoked += 1;
                                     }
@@ -253,6 +256,7 @@ impl TorrentState {
                                 // Group to a single operation
                                 if let Err(err) = peer.request_piece(next_piece, self.piece_length(next_piece)) {
                                     log::error!("{err}");
+                                    disconnected_peers.push(peer.peer_id);
                                     continue;
                                 } else {
                                     self.inflight_pieces.set(next_piece as usize, true);
@@ -269,6 +273,9 @@ impl TorrentState {
                         return;
                     }
                 }
+               self 
+                .peer_connections
+                .retain(|peer| !disconnected_peers.contains(&peer.peer_id));
             }
             Some(piece_index) => log::error!(
                     "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
@@ -350,7 +357,11 @@ impl TorrentManager {
             tokio::time::sleep(Duration::from_millis(1500)).await;
             let tmp = { self.torrent_state.borrow().peer_connections.clone() };
             for peer in tmp.iter().take(UNCHOKED_PEERS) {
-                peer.interested()?;
+                if let Err(err) = peer.interested() {
+                    log::error!("Peer disconnected: {err}");
+                    disconnected_peers.push(peer.peer_id);
+                    continue;
+                }
                 let mut state = self.torrent_state.borrow_mut();
                 if let Some(piece_idx) = state.next_piece() {
                     let peer_owns_piece = peer.state().peer_pieces[piece_idx as usize];
@@ -358,6 +369,7 @@ impl TorrentManager {
                         if let Err(err) = peer.unchoke() {
                             log::error!("Peer disconnected: {err}");
                             disconnected_peers.push(peer.peer_id);
+                            continue;
                         } else {
                             state.num_unchoked += 1;
                         }
@@ -366,6 +378,7 @@ impl TorrentManager {
                         {
                             log::error!("Peer disconnected: {err}");
                             disconnected_peers.push(peer.peer_id);
+                            continue;
                         }
                         state.inflight_pieces.set(piece_idx as usize, true);
                     }
