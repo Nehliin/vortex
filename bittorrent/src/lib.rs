@@ -5,7 +5,6 @@
 
 use std::{
     cell::RefCell,
-    io::{Cursor, Write},
     net::SocketAddr,
     rc::Rc,
     sync::Arc,
@@ -14,7 +13,6 @@ use std::{
 
 use anyhow::Context;
 use bitvec::prelude::*;
-use bytes::Buf;
 use disk_io::FileHandle;
 use peer_connection::PeerConnection;
 use sha1::{Digest, Sha1};
@@ -23,6 +21,7 @@ use tokio_uring::net::{TcpListener, TcpStream};
 
 const SUBPIECE_SIZE: i32 = 16_384;
 
+pub mod network_io;
 pub mod peer_connection;
 pub mod disk_io;
 pub mod peer_message;
@@ -229,7 +228,7 @@ impl TorrentState {
                 log::info!("Piece hash matched downloaded data");
                 self.completed_pieces.set(piece_index, true);
                 self.inflight_pieces.set(piece_index, false);
-                self.file_handle.write(self.torrent_info.piece_length() * index as u64, data);
+                self.file_handle.write(self.torrent_info.piece_length() * index as u64, data).unwrap();
 
                 // Purge disconnected peers 
                 self.peer_connections.retain(|peer| peer.have(index).is_ok());

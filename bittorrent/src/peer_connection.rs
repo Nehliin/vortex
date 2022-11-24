@@ -114,6 +114,7 @@ fn parse_msgs(
                         remainder.remaining()
                     );
                 }
+                assert_eq!(remainder.remaining(), 0);
                 *pending_msg = None;
             }
             incoming = remainder;
@@ -134,10 +135,10 @@ fn parse_msgs(
 //
 // TODO this should be safe but consider passing around an
 // Arc wrapped listener instead
-struct SendableStream(TcpStream);
+pub struct SendableStream(pub TcpStream);
 unsafe impl Send for SendableStream {}
 
-fn start_network_thread(
+pub fn start_network_thread(
     peer_id: [u8; 20],
     sendable_stream: SendableStream,
     cancellation_token: CancellationToken,
@@ -166,6 +167,7 @@ fn start_network_thread(
                         log::error!("[Peer: {peer_id:?}] Sending PeerMessage failed: {err}");
                     }
                 }
+                log::info!("[Peer: {peer_id:?}] Shutting down send loop");
             });
 
             // Spec says max size of request is 2^14 so double that for safety

@@ -7,15 +7,18 @@ edition = "2021"
 [dependencies]
 bytes = "1.2"
 tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
-tokio-util = "0.7.4"
+tokio-util = { version = "0.7.4", features = ["codec"]}
 anyhow = "1.0"
 log = "0.4"
 bip_metainfo = "0.12"
 parking_lot = "0.12"
+futures = "0.3"
 bitvec = { version = "1.0", default-features = false, features = ["alloc"]}
 sha1 = "0.10.5"
 tokio = { version = "1.20.1", features = ["time", "sync", "macros"] }
 rand = "0.8.5"
+pin-project-lite = "0.2.9"
+arbitrary = { version = "1.1.3", features = ["derive"]}
 
 [dev-dependencies]
 env_logger = "0.9"
