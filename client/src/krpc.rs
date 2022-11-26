@@ -213,7 +213,7 @@ impl KrpcService {
                     } else if resp.y == "e" {
                         let _ = response_sender.send(Err(resp.e.unwrap()));
                     } else {
-                        panic!("received unexpected response")
+                        panic!("received unexpected response: {resp:?}")
                     }
                 } else {
                     // TODO probably incomming connections

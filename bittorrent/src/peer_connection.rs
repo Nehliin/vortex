@@ -1,4 +1,5 @@
 use std::cell::{Ref, RefMut};
+use std::net::SocketAddr;
 use std::rc::Weak;
 use std::{cell::RefCell, rc::Rc};
 
@@ -29,20 +30,10 @@ pub struct PeerConnectionState {
     /// from the peer. Might allow for more than 1 per peer
     /// in the future
     pub(crate) currently_downloading: Option<Piece>,
-    cancellation_token: CancellationToken,
-}
-
-impl Drop for PeerConnectionState {
-    fn drop(&mut self) {
-        self.cancellation_token.cancel();
-    }
 }
 
 impl PeerConnectionState {
-    pub(crate) fn new(
-        peer_pieces: BitBox<u8, Msb0>,
-        cancellation_token: CancellationToken,
-    ) -> Self {
+    pub(crate) fn new(peer_pieces: BitBox<u8, Msb0>) -> Self {
         Self {
             is_choking: true,
             is_interested: false,
@@ -51,7 +42,6 @@ impl PeerConnectionState {
             peer_interested: false,
             peer_pieces,
             currently_downloading: None,
-            cancellation_token,
         }
     }
 
@@ -70,150 +60,6 @@ fn handshake(info_hash: [u8; 20], peer_id: [u8; 20]) -> [u8; 68] {
     buffer
 }
 
-struct PendingMsg {
-    // Number of bytes remaining
-    remaining_bytes: i32,
-    // Bytes accumalated so far
-    partial: BytesMut,
-}
-
-// Consider using the framed writes and encode/decode traits
-fn parse_msgs(
-    incoming_tx: &UnboundedSender<PeerMessage>,
-    mut incoming: BytesMut,
-    pending_msg: &mut Option<PendingMsg>,
-) {
-    while let Some(mut pending) = pending_msg.take() {
-        // There exist enough data to finish the pending message
-        if incoming.remaining() as i32 >= pending.remaining_bytes {
-            let mut remainder = incoming.split_off(pending.remaining_bytes as usize);
-            pending.partial.unsplit(incoming.split());
-            log::trace!("Extending partial: {}", pending.remaining_bytes);
-            let msg = PeerMessage::try_from(pending.partial.freeze()).unwrap();
-            incoming_tx.send(msg).unwrap();
-            // Should we try to start parsing a new msg?
-            if remainder.remaining() >= std::mem::size_of::<i32>() {
-                let len_rem = remainder.get_i32();
-                log::debug!("Starting new message with len: {len_rem}");
-                // If we don't start from the 0 here the extend from slice will
-                // duplicate the partial data
-                let partial: BytesMut = BytesMut::new();
-                *pending_msg = Some(PendingMsg {
-                    remaining_bytes: len_rem,
-                    partial,
-                });
-            } else {
-                log::trace!("Buffer spent");
-                // This might not be true if we are unlucky
-                // and it's possible for a i32 to split between
-                // to separate receive operations
-                // THIS WILL PANIC
-                if remainder.remaining() != 0 {
-                    log::error!(
-                        "Buffer spent but not empty, remaining: {}",
-                        remainder.remaining()
-                    );
-                }
-                *pending_msg = None;
-            }
-            incoming = remainder;
-        } else {
-            log::trace!("More data needed");
-            pending.remaining_bytes -= incoming.len() as i32;
-            pending.partial.unsplit(incoming);
-            *pending_msg = Some(pending);
-            // Return to read more data!
-            return;
-        }
-    }
-}
-
-// Safe since the inner Rc have yet to
-// have been cloned at this point and importantly
-// there are not inflight operations at this point
-//
-// TODO this should be safe but consider passing around an
-// Arc wrapped listener instead
-struct SendableStream(TcpStream);
-unsafe impl Send for SendableStream {}
-
-fn start_network_thread(
-    peer_id: [u8; 20],
-    sendable_stream: SendableStream,
-    cancellation_token: CancellationToken,
-) -> (UnboundedSender<PeerMessage>, UnboundedReceiver<PeerMessage>) {
-    let (incoming_tx, incoming_rc) = tokio::sync::mpsc::unbounded_channel();
-    let (outgoing_tx, mut outgoing_rc): (
-        UnboundedSender<PeerMessage>,
-        UnboundedReceiver<PeerMessage>,
-    ) = tokio::sync::mpsc::unbounded_channel();
-
-    std::thread::spawn(move || {
-        tokio_uring::start(async move {
-            let sendable_stream = sendable_stream;
-            let stream = Rc::new(sendable_stream.0);
-            let stream_clone = stream.clone();
-
-            // Send loop, should be cancelled automatically in the next iteration when outgoing_rc is dropped.
-            tokio_uring::spawn(async move {
-                while let Some(outgoing) = outgoing_rc.recv().await {
-                    // TODO Reuse buf and also try to coalece messages
-                    // and use write vectored instead. I.e try to receive 3-5
-                    // and write vectored. Have a timeout so it's not stalled forever
-                    // and writes less if no more msgs are incoming
-                    let (result, _buf) = stream_clone.write_all(outgoing.into_bytes()).await;
-                    if let Err(err) = result {
-                        log::error!("[Peer: {peer_id:?}] Sending PeerMessage failed: {err}");
-                    }
-                }
-            });
-
-            // Spec says max size of request is 2^14 so double that for safety
-            let mut read_buf = BytesMut::zeroed(1 << 15);
-            let mut maybe_msg_len: Option<PendingMsg> = None;
-            loop {
-                debug_assert_eq!(read_buf.len(), 1 << 15);
-                tokio::select! {
-                    (result,buf) = stream.read(read_buf) => {
-                        read_buf = buf;
-                        match result {
-                            Ok(0) => {
-                                log::info!("Shutting down connection");
-                                break;
-                            }
-                            Ok(bytes_read) => {
-                                let remainder = read_buf.split_off(bytes_read);
-                                if maybe_msg_len.is_none() && bytes_read < std::mem::size_of::<i32>() {
-                                    panic!("Not enough data received");
-                                }
-                                let mut buf = read_buf.clone();
-                                if maybe_msg_len.is_none() {
-                                    let pending = PendingMsg {
-                                        remaining_bytes: buf.get_i32(),
-                                        partial: BytesMut::new(),
-                                    };
-                                    maybe_msg_len = Some(pending);
-                                }
-                                parse_msgs(&incoming_tx, buf, &mut maybe_msg_len);
-                                read_buf.unsplit(remainder);
-                            }
-                            Err(err) => {
-                                log::error!("Failed to read from peer connection: {err}");
-                                break;
-                            }
-                        }
-                    },
-                    _ = cancellation_token.cancelled() => {
-                        log::info!("Cancelling tcp stream read");
-                        break;
-                    }
-                }
-            }
-        });
-    });
-    (outgoing_tx, incoming_rc)
-}
-
 #[derive(Debug, Clone)]
 pub struct PeerConnection {
     pub peer_id: [u8; 20],
@@ -222,8 +68,86 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
+    pub(crate) async fn handshake(
+        stream: &TcpStream,
+        our_id: [u8; 20],
+        info_hash: [u8; 20],
+    ) -> anyhow::Result<[u8; 20]> {
+        let handshake_msg = handshake(info_hash, our_id).to_vec();
+        let (res, buf) = stream.write(handshake_msg).await;
+        let _res = res?;
+
+        let (res, buf) = stream.read(buf).await;
+        let read = res?;
+        let mut buf = buf.as_slice();
+        if read >= 68 {
+            log::info!("Handshake received");
+            let str_len = buf.get_u8();
+            assert_eq!(str_len, 19);
+            assert_eq!(
+                buf.get(..str_len as usize),
+                Some(b"BitTorrent protocol" as &[u8])
+            );
+            // Extensions!
+            /*assert_eq!(
+                buf.get((str_len as usize)..(str_len as usize + 8)),
+                Some(&[0_u8; 8] as &[u8])
+            );*/
+            assert_eq!(
+                Some(&info_hash as &[u8]),
+                buf.get((str_len as usize + 8)..(str_len as usize + 28))
+            );
+            // Read their peer id
+            let peer_id: [u8; 20] = buf
+                .get((str_len as usize + 28)..(str_len as usize + 48))
+                .unwrap()
+                .try_into()
+                .unwrap();
+            // TODO: handle this remaing data
+            if read > 68 {
+                log::warn!("DATA LOST DURING HANDSHAKE");
+            }
+            Ok(peer_id)
+        } else {
+            anyhow::bail!("Didn't receive enough data")
+        }
+    }
+
+    pub(crate) fn new(
+        peer_id: [u8; 20],
+        num_pieces: usize,
+        outgoing_tx: UnboundedSender<PeerMessage>,
+        mut incoming_rc: UnboundedReceiver<PeerMessage>,
+        torrent_state: Weak<RefCell<TorrentState>>,
+    ) -> Self {
+        let peer_pieces = (0..num_pieces).map(|_| false).collect();
+        let connection = PeerConnection {
+            peer_id,
+            state: Rc::new(RefCell::new(PeerConnectionState::new(peer_pieces))),
+            outgoing: outgoing_tx,
+        };
+        let connection_clone = connection.clone();
+        // process incoming, should cancel automatically when incoming_tx is dropped
+        tokio_uring::spawn(async move {
+            while let Some(incoming) = incoming_rc.recv().await {
+                if let Some(torrent_state) = torrent_state.upgrade() {
+                    let mut torrent_state = torrent_state.borrow_mut();
+                    if let Err(err) =
+                        connection_clone.process_incoming(incoming, &mut torrent_state)
+                    {
+                        log::error!("[Peer: {peer_id:?}] Error processing incoming message: {err}");
+                    }
+                } else {
+                    log::warn!("[Peer: {peer_id:?}] Torrent state is gone, shutting down incoming process loop");
+                    break;
+                }
+            }
+        });
+        connection
+    }
+
     // unsafe
-    pub(crate) async fn new(
+    /*pub(crate) async fn new(
         stream: TcpStream,
         our_id: [u8; 20],
         info_hash: [u8; 20],
@@ -303,7 +227,7 @@ impl PeerConnection {
             return Ok(connection);
         }
         anyhow::bail!("Didn't get enough data");
-    }
+    }*/
 
     #[inline(always)]
     pub fn choke(&self) -> anyhow::Result<()> {

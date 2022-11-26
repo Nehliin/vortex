@@ -234,7 +234,7 @@ fn main() {
         find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
 
         let info_hash = metainfo.info().info_hash();
-        let torrent_manager = TorrentManager::new(metainfo.info().clone());
+        let torrent_manager = TorrentManager::new(metainfo.info().clone()).await;
 
         let connection_progress = progress.add(ProgressBar::new_spinner());
         connection_progress

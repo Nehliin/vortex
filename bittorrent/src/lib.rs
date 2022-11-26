@@ -5,7 +5,6 @@
 
 use std::{
     cell::RefCell,
-    io::{Cursor, Write},
     net::SocketAddr,
     rc::Rc,
     sync::Arc,
@@ -15,7 +14,7 @@ use std::{
 use anyhow::Context;
 use bitvec::prelude::*;
 use bytes::Buf;
-use disk_io::FileHandle;
+use io::{FileHandle, IoDriver};
 use peer_connection::PeerConnection;
 use sha1::{Digest, Sha1};
 use tokio::sync::oneshot;
@@ -24,7 +23,7 @@ use tokio_uring::net::{TcpListener, TcpStream};
 const SUBPIECE_SIZE: i32 = 16_384;
 
 pub mod peer_connection;
-pub mod disk_io;
+pub mod io;
 pub mod peer_message;
 
 //#[cfg(test)]
@@ -293,6 +292,7 @@ pub struct TorrentManager {
     // TODO create newtype
     our_peer_id: [u8; 20],
     pub torrent_state: Rc<RefCell<TorrentState>>,
+    io_driver: IoDriver,
 }
 
 fn generate_peer_id() -> [u8; 20] {
@@ -309,12 +309,13 @@ fn generate_peer_id() -> [u8; 20] {
 const UNCHOKED_PEERS: usize = 4;
 
 impl TorrentManager {
-    pub fn new(torrent_info: bip_metainfo::Info) -> Self {
+    pub async fn new(torrent_info: bip_metainfo::Info) -> Self {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         assert!(torrent_info.files().count() == 1);
         let file = torrent_info.files().next().unwrap();
+        let io_driver = IoDriver::new();
         let file_lenght = file.length();
-        let file_handle = FileHandle::new(file.path().to_path_buf());
+        let file_handle = io_driver.create_file(file.path().to_path_buf()).await.unwrap();
         let last_piece_len = file_lenght % torrent_info.piece_length() as u64;
         let (tx, rc) = tokio::sync::oneshot::channel();
         let torrent_state = TorrentState {
@@ -331,6 +332,7 @@ impl TorrentManager {
             last_piece_len,
         };
         Self {
+            io_driver,
             our_peer_id: generate_peer_id(),
             torrent_info: Arc::new(torrent_info),
             torrent_state: Rc::new(RefCell::new(torrent_state)),
@@ -399,7 +401,7 @@ impl TorrentManager {
         Ok(())
     }
 
-    pub async fn accept_incoming(&self, listener: &TcpListener) {
+    /*pub async fn accept_incoming(&self, listener: &TcpListener) {
         let (stream, peer_addr) = listener.accept().await.unwrap();
         log::info!("Incomming peer connection: {peer_addr}");
         let peer_connection = PeerConnection::new(
@@ -415,20 +417,18 @@ impl TorrentManager {
             .borrow_mut()
             .peer_connections
             .push(peer_connection);
-    }
+    }*/
 
     pub async fn add_peer(&self, addr: SocketAddr) -> anyhow::Result<PeerConnection> {
-        let stream = TcpStream::connect(addr)
-            .await
-            .context("Failed to connect")?;
+        let (peer_id, outgoing_tx, incoming_rc) = self.io_driver.connect(addr, self.our_peer_id, self.torrent_info.info_hash().into()).await?;
+        
         let peer_connection = PeerConnection::new(
-            stream,
-            self.our_peer_id,
-            self.torrent_info.info_hash().into(),
+            peer_id,
             self.torrent_info.pieces().count(),
+            outgoing_tx,
+            incoming_rc,
             Rc::downgrade(&self.torrent_state),
-        )
-        .await?;
+        );
 
         self.torrent_state
             .borrow_mut()
