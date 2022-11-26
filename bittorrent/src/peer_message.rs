@@ -1,7 +1,10 @@
 use bitvec::prelude::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use tokio_uring::buf::Slice;
 
-#[derive(Debug, PartialEq, Eq)]
+use crate::io::Buffer;
+
+//#[derive(Debug, PartialEq, Eq)]
 pub enum PeerMessage {
     Choke,
     Unchoke,
@@ -26,7 +29,7 @@ pub enum PeerMessage {
         index: i32,
         begin: i32,
         lenght: i32,
-        data: Bytes,
+        data: Vec<Slice<Buffer>>,
     },
 }
 

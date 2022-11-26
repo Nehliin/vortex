@@ -1,19 +1,25 @@
 use core::slice;
-use std::{mem::ManuallyDrop, net::SocketAddr, path::PathBuf, rc::Rc};
+use std::{
+    cell::RefCell, iter, mem::ManuallyDrop, net::SocketAddr, path::PathBuf, rc::Rc,
+    thread::ThreadId,
+};
 
 use anyhow::Context;
-use bytes::{Buf, Bytes, BytesMut};
+use bitvec::prelude::BitBox;
+use bytes::{Buf, BytesMut};
 use tokio::{
     sync::mpsc::Receiver,
     sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender},
-    task::JoinHandle,
 };
 use tokio_uring::{
-    buf::{fixed::FixedBuf, IoBuf, IoBufMut},
+    buf::{
+        fixed::{FixedBuf, FixedBufRegistry},
+        BoundedBuf, BoundedBufMut, IoBuf, IoBufMut, Slice,
+    },
     fs::File,
     net::TcpStream,
 };
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::sync::CancellationToken;
 
 use crate::{peer_connection::PeerConnection, peer_message::PeerMessage};
 
@@ -22,61 +28,135 @@ use crate::{peer_connection::PeerConnection, peer_message::PeerMessage};
 // logic -> socket
 
 #[derive(Debug)]
-pub struct IoBufHandle {
-    data: ManuallyDrop<Box<[u8]>>,
-    drop_tx: Option<tokio::sync::oneshot::Sender<()>>,
+pub struct Buffer {
+    buffer: FixedBuf,
+    // Ensure this buffer is dropped in the right thread
+    thread_id: ThreadId,
 }
 
-impl IoBufHandle {
-    fn new(mut fixed_buf: FixedBuf) -> Self {
-        // Safe: Data is tied to the lifetime of the fixed buf which won't be dropped
-        // until the oneshot sender sends the notification when IoBufHandle is dropped.
-        // IoBufHandle won't double free because of the ManuallyDrop.
-        let data = unsafe {
-            ManuallyDrop::new(Box::from_raw(slice::from_raw_parts_mut(
-                fixed_buf.stable_mut_ptr(),
-                fixed_buf.bytes_init(),
-            )))
-        };
-        let (drop_tx, drop_rc) = tokio::sync::oneshot::channel();
-        // Ensure the handle is not dropped until the IoBufHandle has been dropped
-        tokio_uring::spawn(async move {
-            // Don't care if the sender is dropped prematurely
-            let _ = drop_rc.await;
-            drop(fixed_buf);
+impl PartialEq for Buffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.buffer.buf_index() == other.buffer.buf_index() && self.thread_id == other.thread_id
+    }
+}
+
+impl Eq for Buffer {}
+
+// Since it's not clonable and destruction is checked to
+// happen in the same thread it was created on this is "safe"
+// to send across threads
+unsafe impl Send for Buffer {}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        // Sanify check
+        assert_eq!(self.thread_id, std::thread::current().id());
+        OCCUPIED.with(|bitset| {
+            bitset
+                .unwrap()
+                .borrow_mut()
+                .set(self.buffer.buf_index() as usize, true)
         });
-        IoBufHandle {
-            data,
-            drop_tx: Some(drop_tx),
+    }
+}
+
+impl BoundedBufMut for Buffer {
+    type BufMut = FixedBuf;
+
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        tokio_uring::buf::BoundedBufMut::stable_mut_ptr(&mut self.buffer)
+    }
+
+    unsafe fn set_init(&mut self, pos: usize) {
+        tokio_uring::buf::BoundedBufMut::set_init(&mut self.buffer, pos)
+    }
+}
+
+impl BoundedBuf for Buffer {
+    type Buf = FixedBuf;
+
+    type Bounds = std::ops::RangeFull;
+
+    #[inline]
+    fn slice(self, range: impl std::ops::RangeBounds<usize>) -> tokio_uring::buf::Slice<Self::Buf> {
+        self.buffer.slice(range)
+    }
+
+    #[inline]
+    fn slice_full(self) -> tokio_uring::buf::Slice<Self::Buf> {
+        self.buffer.slice_full()
+    }
+
+    #[inline]
+    fn get_buf(&self) -> &Self::Buf {
+        self.buffer.get_buf()
+    }
+
+    #[inline]
+    fn bounds(&self) -> Self::Bounds {
+        self.buffer.bounds()
+    }
+
+    #[inline]
+    fn from_buf_bounds(buf: Self::Buf, bounds: Self::Bounds) -> Self {
+        Buffer {
+            buffer: FixedBuf::from_buf_bounds(buf, bounds),
+            thread_id: std::thread::current().id(),
         }
     }
-}
 
-// or simply deref?
-unsafe impl IoBuf for IoBufHandle {
-    #[inline(always)]
+    #[inline]
     fn stable_ptr(&self) -> *const u8 {
-        self.data.as_ptr()
+        tokio_uring::buf::BoundedBuf::stable_ptr(&self.buffer)
     }
 
-    #[inline(always)]
+    #[inline]
     fn bytes_init(&self) -> usize {
-        <[u8]>::len(&self.data)
+        tokio_uring::buf::BoundedBuf::bytes_init(&self.buffer)
     }
 
-    #[inline(always)]
+    #[inline]
     fn bytes_total(&self) -> usize {
-        self.bytes_init()
+        tokio_uring::buf::BoundedBuf::bytes_total(&self.buffer)
     }
 }
 
-impl Drop for IoBufHandle {
-    fn drop(&mut self) {
-        self.drop_tx
-            .take()
-            .unwrap()
-            .send(())
-            .expect("FixedBuf dropped while in use! UB most likely");
+thread_local! {
+    static OCCUPIED: Option<RefCell<BitBox>> = None;
+}
+
+#[derive(Clone)]
+struct BufferPool {
+    registry: FixedBufRegistry,
+}
+
+impl BufferPool {
+    fn new(pool_size: usize) -> Self {
+        // Spec says max size of request is 2^14 so double that for safety
+        let registry = FixedBufRegistry::new(iter::repeat(vec![0; 1 << 15]).take(pool_size));
+        let occupied = (0..pool_size).map(|_| false).collect();
+        registry.register().unwrap();
+        OCCUPIED.with(|bitset| {
+            if bitset.is_some() {
+                panic!("Only one buffer pool per thread is supported");
+            }
+            bitset = &Some(RefCell::new(occupied));
+        });
+        Self { registry }
+    }
+
+    fn get_buffer(&self) -> Buffer {
+        let fixed_buf = OCCUPIED.with(|bitset| {
+            let bitset = bitset.unwrap().borrow_mut();
+            let buf_index = bitset.first_zero().unwrap();
+            let fixed_buf = self.registry.check_out(buf_index).unwrap();
+            bitset.set(buf_index, true);
+            fixed_buf
+        });
+        Buffer {
+            buffer: fixed_buf,
+            thread_id: std::thread::current().id(),
+        }
     }
 }
 
@@ -213,6 +293,7 @@ fn parse_msgs(
 
 async fn peer_connection_creation_task(
     mut peer_connection_creator: Receiver<PeerConnectionCreationMsg>,
+    buffer_pool: BufferPool,
 ) {
     while let Some(PeerConnectionCreationMsg {
         notiy_connected,
@@ -227,12 +308,11 @@ async fn peer_connection_creation_task(
         // Spawn new task for managing the peer
         tokio_uring::spawn(async move {
             let stream = Rc::new(TcpStream::connect(addr).await.unwrap());
-            println!("Pre handshake");
             let peer_id = PeerConnection::handshake(&stream, our_id, info_hash)
                 .await
                 .unwrap();
-            println!("SENDING PERE_ID");
             notiy_connected.send(peer_id).unwrap();
+            log::info!("[Peer: {peer_id:?}] Connected");
             let stream_clone = stream.clone();
             // Send loop, should be cancelled automatically in the next iteration when outgoing_rc is dropped.
             tokio_uring::spawn(async move {
@@ -247,46 +327,54 @@ async fn peer_connection_creation_task(
                         break;
                     }
                 }
-                println!("SHUTTING DOW");
+                log::info!("[Peer: {peer_id:?}] Shutting down send task");
             });
 
-            // Spec says max size of request is 2^14 so double that for safety
-            let mut read_buf = BytesMut::zeroed(1 << 15);
-            let mut maybe_msg_len: Option<PendingMsg> = None;
+            let mut prev: Option<Slice<Buffer>> = None;
             loop {
-                debug_assert_eq!(read_buf.len(), 1 << 15);
-                tokio::select! {
-                    (result,buf) = stream.read(read_buf) => {
-                        read_buf = buf;
-                        match result {
-                            Ok(0) => {
-                                log::info!("Shutting down connection");
-                                break;
-                            }
-                            Ok(bytes_read) => {
-                                let remainder = read_buf.split_off(bytes_read);
-                                if maybe_msg_len.is_none() && bytes_read < std::mem::size_of::<i32>() {
-                                    panic!("Not enough data received");
-                                }
-                                let mut buf = read_buf.clone();
-                                if maybe_msg_len.is_none() {
-                                    let pending = PendingMsg {
-                                        remaining_bytes: buf.get_i32(),
-                                        partial: BytesMut::new(),
-                                    };
-                                    maybe_msg_len = Some(pending);
-                                }
-                                parse_msgs(&incoming_tx, buf, &mut maybe_msg_len);
-                                read_buf.unsplit(remainder);
-                            }
-                            Err(err) => {
-                                log::error!("Failed to read from peer connection: {err}");
-                                break;
-                            }
+                let read_buf: Buffer = buffer_pool.get_buffer();
+                let (result, buf) = stream.read_fixed(read_buf).await;
+                match result {
+                    Ok(0) => {
+                        // TODO: check there isn't data remaining
+                        log::info!("Shutting down connection");
+                        break;
+                    }
+                    Ok(bytes_read) => {
+                        let current_buf: Slice<Buffer> = buf.slice(..bytes_read);
+                        let current_buf_slice: &[u8] = &current_buf.get_ref().buffer;
+                        let total = if let Some(prev) = prev {
+                            let prev_buf = &prev.get_ref().buffer;
+                            prev_buf.chain(current_buf_slice)
+                        } else {
+                            current_buf_slice.chain(&[] as &[u8])
+                        };
+                        let lenght = total.get_i32();
+                        if total.remaining() as i32 >= lenght {
+
+                        } else {
+                            prev = Some(current_buf);
                         }
-                    },
-                    _ = cancellation_token.cancelled() => {
-                        log::info!("Cancelling tcp stream read");
+                        //if ass
+                        // Parse lenght
+                        // parse header
+                        // the body can be a stream of buffers?/small vec of slices
+                        /*if prev.is_none() && bytes_read < std::mem::size_of::<i32>() {
+                            panic!("Not enough data received");
+                        }
+                        let mut buf = read_buf.clone();
+                        if maybe_msg_len.is_none() {
+                            let pending = PendingMsg {
+                                remaining_bytes: buf.get_i32(),
+                                partial: BytesMut::new(),
+                            };
+                            maybe_msg_len = Some(pending);
+                        }
+                        parse_msgs(&incoming_tx, buf, &mut maybe_msg_len);
+                        read_buf.unsplit(remainder);*/
+                    }
+                    Err(err) => {
+                        log::error!("Failed to read from peer connection: {err}");
                         break;
                     }
                 }
@@ -334,7 +422,10 @@ impl IoDriver {
                     // Listen for file creation messages
                     tokio_uring::spawn(file_creation_task(file_creator_rc));
                     // Listen for peer connection creation messages
-                    tokio_uring::spawn(peer_connection_creation_task(peer_connection_creator_rc));
+                    tokio_uring::spawn(peer_connection_creation_task(
+                        peer_connection_creator_rc,
+                        buffer_pool.clone(),
+                    ));
                     child_token.cancelled().await;
                 })
             })

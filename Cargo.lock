@@ -1224,7 +1224,6 @@ dependencies = [
 [[package]]
 name = "tokio-uring"
 version = "0.4.0"
-source = "git+https://github.com/tokio-rs/tokio-uring?branch=master#8750caa5b240fd90b0849305d82f963eef7e74aa"
 dependencies = [
  "bytes",
  "io-uring",
