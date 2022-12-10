@@ -10,7 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_uring::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::peer_message::PeerMessage;
+use crate::peer_message::{parse_message, PeerMessage, PeerMessageDecoder};
 use crate::{Piece, TorrentState, SUBPIECE_SIZE};
 
 #[derive(Debug)]
@@ -70,63 +70,6 @@ fn handshake(info_hash: [u8; 20], peer_id: [u8; 20]) -> [u8; 68] {
     buffer
 }
 
-struct PendingMsg {
-    // Number of bytes remaining
-    remaining_bytes: i32,
-    // Bytes accumalated so far
-    partial: BytesMut,
-}
-
-// Consider using the framed writes and encode/decode traits
-fn parse_msgs(
-    incoming_tx: &UnboundedSender<PeerMessage>,
-    mut incoming: BytesMut,
-    pending_msg: &mut Option<PendingMsg>,
-) {
-    while let Some(mut pending) = pending_msg.take() {
-        // There exist enough data to finish the pending message
-        if incoming.remaining() as i32 >= pending.remaining_bytes {
-            let mut remainder = incoming.split_off(pending.remaining_bytes as usize);
-            pending.partial.unsplit(incoming.split());
-            log::trace!("Extending partial: {}", pending.remaining_bytes);
-            let msg = PeerMessage::try_from(pending.partial.freeze()).unwrap();
-            incoming_tx.send(msg).unwrap();
-            // Should we try to start parsing a new msg?
-            if remainder.remaining() >= std::mem::size_of::<i32>() {
-                let len_rem = remainder.get_i32();
-                log::debug!("Starting new message with len: {len_rem}");
-                // If we don't start from the 0 here the extend from slice will
-                // duplicate the partial data
-                let partial: BytesMut = BytesMut::new();
-                *pending_msg = Some(PendingMsg {
-                    remaining_bytes: len_rem,
-                    partial,
-                });
-            } else {
-                log::trace!("Buffer spent");
-                // This might not be true if we are unlucky
-                // and it's possible for a i32 to split between
-                // to separate receive operations
-                // THIS WILL PANIC
-                if remainder.remaining() != 0 {
-                    log::error!(
-                        "Buffer spent but not empty, remaining: {}",
-                        remainder.remaining()
-                    );
-                }
-                *pending_msg = None;
-            }
-            incoming = remainder;
-        } else {
-            log::trace!("More data needed");
-            pending.remaining_bytes -= incoming.len() as i32;
-            pending.partial.unsplit(incoming);
-            *pending_msg = Some(pending);
-            // Return to read more data!
-            return;
-        }
-    }
-}
 
 // Safe since the inner Rc have yet to
 // have been cloned at this point and importantly
@@ -170,8 +113,9 @@ fn start_network_thread(
 
             // Spec says max size of request is 2^14 so double that for safety
             let mut read_buf = BytesMut::zeroed(1 << 15);
-            let mut maybe_msg_len: Option<PendingMsg> = None;
+            let mut message_decoder = PeerMessageDecoder::default();
             loop {
+                read_buf.resize(1 << 15, 0);
                 debug_assert_eq!(read_buf.len(), 1 << 15);
                 tokio::select! {
                     (result,buf) = stream.read(read_buf) => {
@@ -183,7 +127,10 @@ fn start_network_thread(
                             }
                             Ok(bytes_read) => {
                                 let remainder = read_buf.split_off(bytes_read);
-                                if maybe_msg_len.is_none() && bytes_read < std::mem::size_of::<i32>() {
+                                while let Some(message) = message_decoder.decode(&mut read_buf) {
+                                    incoming_tx.send(message).unwrap();
+                                }
+                                /*if maybe_msg_len.is_none() && bytes_read < std::mem::size_of::<i32>() {
                                     panic!("Not enough data received");
                                 }
                                 let mut buf = read_buf.clone();
@@ -194,7 +141,7 @@ fn start_network_thread(
                                     };
                                     maybe_msg_len = Some(pending);
                                 }
-                                parse_msgs(&incoming_tx, buf, &mut maybe_msg_len);
+                                parse_msgs(&incoming_tx, buf, &mut maybe_msg_len);*/
                                 read_buf.unsplit(remainder);
                             }
                             Err(err) => {
