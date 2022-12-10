@@ -70,7 +70,6 @@ fn handshake(info_hash: [u8; 20], peer_id: [u8; 20]) -> [u8; 68] {
     buffer
 }
 
-
 // Safe since the inner Rc have yet to
 // have been cloned at this point and importantly
 // there are not inflight operations at this point
@@ -99,12 +98,16 @@ fn start_network_thread(
 
             // Send loop, should be cancelled automatically in the next iteration when outgoing_rc is dropped.
             tokio_uring::spawn(async move {
+                let mut send_buf = BytesMut::zeroed(1 << 15);
                 while let Some(outgoing) = outgoing_rc.recv().await {
                     // TODO Reuse buf and also try to coalece messages
                     // and use write vectored instead. I.e try to receive 3-5
                     // and write vectored. Have a timeout so it's not stalled forever
                     // and writes less if no more msgs are incoming
-                    let (result, _buf) = stream_clone.write_all(outgoing.into_bytes()).await;
+                    outgoing.encode(&mut send_buf);
+                    let (result, buf) = stream_clone.write_all(send_buf).await;
+                    send_buf = buf;
+                    send_buf.clear();
                     if let Err(err) = result {
                         log::error!("[Peer: {peer_id:?}] Sending PeerMessage failed: {err}");
                     }
@@ -325,12 +328,11 @@ impl PeerConnection {
         Ok(())
     }
 
-    fn piece(&self, index: i32, begin: i32, length: i32, data: Vec<u8>) -> anyhow::Result<()> {
+    fn piece(&self, index: i32, begin: i32, data: Vec<u8>) -> anyhow::Result<()> {
         self.outgoing
             .send(PeerMessage::Piece {
                 index,
                 begin,
-                lenght: length,
                 data: data.into(),
             })
             .context("Failed to queue outgoing msg")
@@ -400,7 +402,7 @@ impl PeerConnection {
 
                 match torrent_state.on_piece_request(index, begin, length) {
                     Ok(piece_data) => {
-                        self.piece(index, begin, length, piece_data)?;
+                        self.piece(index, begin, piece_data)?;
                     }
                     Err(err) => log::error!("Inavlid piece request: {err}"),
                 }
@@ -416,20 +418,18 @@ impl PeerConnection {
                 //TODO cancel if has yet to been sent I guess
                 unimplemented!()
             }
-            PeerMessage::Piece {
-                index,
-                begin,
-                lenght,
-                data,
-            } => {
-                log::debug!("Recived a piece index: {index}, begin: {begin}, length: {lenght}");
+            PeerMessage::Piece { index, begin, data } => {
+                log::debug!(
+                    "Recived a piece index: {index}, begin: {begin}, length: {}",
+                    data.len()
+                );
                 let currently_downloading = state.currently_downloading.take();
                 if let Some(mut piece) = currently_downloading {
                     // Should this be called unconditionally?
                     if let Some(callback) = torrent_state.on_subpiece_callback.as_mut() {
                         callback(&data[..]);
                     }
-                    piece.on_subpiece(index, begin, lenght, &data[..]);
+                    piece.on_subpiece(index, begin, &data[..]);
                     if !piece.is_complete() {
                         // Next subpice to download (that isn't already inflight)
                         if let Some(next_subpice) = piece.next_unstarted_subpice() {

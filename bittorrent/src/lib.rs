@@ -23,8 +23,8 @@ use tokio_uring::net::{TcpListener, TcpStream};
 
 const SUBPIECE_SIZE: i32 = 16_384;
 
-pub mod peer_connection;
 pub mod disk_io;
+pub mod peer_connection;
 pub mod peer_message;
 
 //#[cfg(test)]
@@ -39,7 +39,7 @@ pub struct Piece {
     // Contains both completed and inflight subpieces
     inflight_subpieces: BitBox,
     last_subpiece_length: i32,
-    // TODO used uninit memory here instead 
+    // TODO used uninit memory here instead
     memory: Vec<u8>,
 }
 
@@ -64,18 +64,17 @@ impl Piece {
         }
     }
 
-    fn on_subpiece(&mut self, index: i32, begin: i32, length: i32, data: &[u8]) {
+    fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) {
         // This subpice is part of the currently downloading piece
         assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
         log::trace!("Subpiece index received: {subpiece_index}");
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {
-            assert_eq!(length, self.last_subpiece_length);
+            assert_eq!(data.len() as i32, self.last_subpiece_length);
         } else {
-            assert_eq!(length, SUBPIECE_SIZE);
+            assert_eq!(data.len() as i32, SUBPIECE_SIZE);
         }
-        assert_eq!(data.len(), length as usize);
         self.completed_subpieces.set(subpiece_index as usize, true);
         self.memory[begin as usize..begin as usize + data.len() as usize].copy_from_slice(data);
     }
@@ -273,7 +272,7 @@ impl TorrentState {
                         return;
                     }
                 }
-               self 
+               self
                 .peer_connections
                 .retain(|peer| !disconnected_peers.contains(&peer.peer_id));
             }

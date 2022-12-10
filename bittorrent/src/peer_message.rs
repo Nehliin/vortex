@@ -1,32 +1,18 @@
+use arbitrary::Arbitrary;
 use bitvec::prelude::*;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum PeerMessage {
     Choke,
     Unchoke,
     Interested,
     NotInterested,
-    Have {
-        index: i32,
-    },
+    Have { index: i32 },
     Bitfield(BitBox<u8, Msb0>),
-    Request {
-        index: i32,
-        begin: i32,
-        length: i32,
-    },
-    Cancel {
-        index: i32,
-        begin: i32,
-        length: i32,
-    },
-    Piece {
-        index: i32,
-        begin: i32,
-        lenght: i32,
-        data: Bytes,
-    },
+    Request { index: i32, begin: i32, length: i32 },
+    Cancel { index: i32, begin: i32, length: i32 },
+    Piece { index: i32, begin: i32, data: Bytes },
 }
 
 impl PeerMessage {
@@ -40,81 +26,125 @@ impl PeerMessage {
     pub const PIECE: u8 = 7;
     pub const CANCEL: u8 = 8;
 
-    pub fn into_bytes(self) -> Bytes {
-        let mut bytes = BytesMut::new();
+    pub fn encoded_size(&self) -> usize {
+        match self {
+            PeerMessage::Choke
+            | PeerMessage::Unchoke
+            | PeerMessage::Interested
+            | PeerMessage::NotInterested => 1,
+            PeerMessage::Have { index: _ } => 5,
+            PeerMessage::Bitfield(bitfield) => 1 + bitfield.as_raw_slice().len(),
+            PeerMessage::Request { .. } | PeerMessage::Cancel { .. } => 13,
+            PeerMessage::Piece { data, .. } => 13 + data.len(),
+        }
+    }
+
+    pub fn encode(self, mut buf: impl BufMut) {
         match self {
             PeerMessage::Choke => {
-                bytes.put_i32(1);
-                bytes.put_u8(Self::CHOKE);
-                bytes.freeze()
+                buf.put_i32(1);
+                buf.put_u8(Self::CHOKE);
             }
             PeerMessage::Unchoke => {
-                bytes.put_i32(1);
-                bytes.put_u8(Self::UNCHOKE);
-                bytes.freeze()
+                buf.put_i32(1);
+                buf.put_u8(Self::UNCHOKE);
             }
             PeerMessage::Interested => {
-                bytes.put_i32(1);
-                bytes.put_u8(Self::INTERESTED);
-                bytes.freeze()
+                buf.put_i32(1);
+                buf.put_u8(Self::INTERESTED);
             }
             PeerMessage::NotInterested => {
-                bytes.put_i32(1);
-                bytes.put_u8(Self::NOT_INTERESTED);
-                bytes.freeze()
+                buf.put_i32(1);
+                buf.put_u8(Self::NOT_INTERESTED);
             }
             PeerMessage::Have { index } => {
-                bytes.put_i32(5);
-                bytes.put_u8(Self::HAVE);
-                bytes.put_i32(index);
-                bytes.freeze()
+                buf.put_i32(5);
+                buf.put_u8(Self::HAVE);
+                buf.put_i32(index);
             }
             PeerMessage::Bitfield(bitfield) => {
-                bytes.put_i32(1);
-                bytes.put_u8(Self::BITFIELD);
-                unimplemented!()
-                // TODO
-                //bytes.put_i32(bitfield);
-                //bytes.freeze()
+                buf.put_i32(1 + bitfield.as_raw_slice().len() as i32);
+                buf.put_u8(Self::BITFIELD);
+                buf.put(bitfield.as_raw_slice());
             }
             PeerMessage::Request {
                 index,
                 begin,
                 length,
             } => {
-                bytes.put_i32(13);
-                bytes.put_u8(Self::REQUEST);
-                bytes.put_i32(index);
-                bytes.put_i32(begin);
-                bytes.put_i32(length);
-                bytes.freeze()
+                buf.put_i32(13);
+                buf.put_u8(Self::REQUEST);
+                buf.put_i32(index);
+                buf.put_i32(begin);
+                buf.put_i32(length);
             }
             PeerMessage::Cancel {
                 index,
                 begin,
                 length,
             } => {
-                bytes.put_i32(13);
-                bytes.put_u8(Self::CANCEL);
-                bytes.put_i32(index);
-                bytes.put_i32(begin);
-                bytes.put_i32(length);
-                bytes.freeze()
+                buf.put_i32(13);
+                buf.put_u8(Self::CANCEL);
+                buf.put_i32(index);
+                buf.put_i32(begin);
+                buf.put_i32(length);
             }
-            PeerMessage::Piece {
-                index,
-                begin,
-                lenght: piece,
-                data,
-            } => {
-                bytes.put_i32(13 + data.len() as i32);
-                bytes.put_u8(Self::PIECE);
-                bytes.put_i32(index);
-                bytes.put_i32(begin);
-                bytes.put_i32(piece);
-                bytes.put(data);
-                bytes.freeze()
+            PeerMessage::Piece { index, begin, data } => {
+                buf.put_i32(9 + data.len() as i32);
+                buf.put_u8(Self::PIECE);
+                buf.put_i32(index);
+                buf.put_i32(begin);
+                buf.put(data);
             }
+        }
+    }
+}
+
+// TODO: put behind feature flag
+impl<'a> Arbitrary<'a> for PeerMessage {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let tag: i32 = u.int_in_range(0..=8)?;
+        match tag as u8 {
+            PeerMessage::CHOKE => Ok(PeerMessage::Choke),
+            PeerMessage::UNCHOKE => Ok(PeerMessage::Unchoke),
+            PeerMessage::INTERESTED => Ok(PeerMessage::Interested),
+            PeerMessage::NOT_INTERESTED => Ok(PeerMessage::NotInterested),
+            PeerMessage::HAVE => Ok(PeerMessage::Have {
+                index: u.arbitrary()?,
+            }),
+            PeerMessage::BITFIELD => {
+                let vec = u.arbitrary::<Vec<u8>>()?;
+                let bits = BitVec::<_, Msb0>::from_slice(&vec);
+                Ok(PeerMessage::Bitfield(bits.into_boxed_bitslice()))
+            }
+            PeerMessage::REQUEST => {
+                let index = u.arbitrary()?;
+                let begin = u.arbitrary()?;
+                let length = u.arbitrary()?;
+                if length > (1 << 14) {
+                    Err(arbitrary::Error::IncorrectFormat)
+                } else {
+                    Ok(PeerMessage::Request {
+                        index,
+                        begin,
+                        length,
+                    })
+                }
+            }
+            PeerMessage::PIECE => {
+                let vec = u.arbitrary::<Vec<u8>>()?;
+                Ok(PeerMessage::Piece {
+                    index: u.arbitrary()?,
+                    begin: u.arbitrary()?,
+                    data: vec.into(),
+                })
+            }
+            PeerMessage::CANCEL => Ok(PeerMessage::Cancel {
+                index: u.arbitrary()?,
+                begin: u.arbitrary()?,
+                length: u.arbitrary()?,
+            }),
+            _ => Err(arbitrary::Error::IncorrectFormat),
         }
     }
 }
@@ -210,14 +240,13 @@ pub fn parse_message(data: &mut impl Buf, length: i32) -> anyhow::Result<PeerMes
             })
         }
         PeerMessage::PIECE => {
-            // msg type + index + begin
+            // msg type + index + begin + length
             const HEADER_SIZE: i32 = 9;
             anyhow::ensure!(length >= HEADER_SIZE);
             anyhow::ensure!((length - HEADER_SIZE) as usize <= data.remaining());
             Ok(PeerMessage::Piece {
                 index: data.get_i32(),
                 begin: data.get_i32(),
-                lenght: length - HEADER_SIZE,
                 data: data.copy_to_bytes((length - HEADER_SIZE) as usize),
             })
         }
@@ -230,5 +259,48 @@ pub fn parse_message(data: &mut impl Buf, length: i32) -> anyhow::Result<PeerMes
             })
         }
         _ => anyhow::bail!("Invalid message type: {msg_type}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use bytes::BytesMut;
+
+    use super::*;
+
+    // Found via fuzzing
+    #[test]
+    fn piece_roundtrip_zeroed() {
+        let piece_msg = PeerMessage::Piece {
+            index: 0,
+            begin: 0,
+            data: Bytes::new(),
+        };
+
+        let mut buffer = BytesMut::new();
+        buffer.reserve(100);
+        piece_msg.clone().encode(&mut buffer);
+
+        let mut decoder = PeerMessageDecoder::default();
+        let decoded = decoder.decode(&mut buffer).unwrap();
+        assert_eq!(decoded, piece_msg);
+    }
+
+    #[test]
+    fn piece_request_lenght_one() {
+        let piece_msg = PeerMessage::Piece {
+            index: 0,
+            begin: 0,
+            data: vec![0x83].into(),
+        };
+
+        let mut buffer = BytesMut::new();
+        buffer.reserve(100);
+        piece_msg.clone().encode(&mut buffer);
+
+        let mut decoder = PeerMessageDecoder::default();
+        let decoded = decoder.decode(&mut buffer).unwrap();
+        assert_eq!(decoded, piece_msg);
     }
 }

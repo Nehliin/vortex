@@ -98,6 +98,7 @@ name = "bittorrent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arbitrary",
  "bip_metainfo",
  "bitvec",
  "bytes",
