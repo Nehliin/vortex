@@ -297,7 +297,7 @@ fn main() {
         let torrent_manager_clone = torrent_manager.clone();
         // Try to find more peers (all logic after peers have been found and added can be moved to
         // the torrrent manager)
-        tokio_uring::spawn(async move {
+        /*tokio_uring::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {
                 interval.tick().await;
@@ -360,7 +360,7 @@ fn main() {
                     }
                 }
             }
-        });
+        });*/
         let download_progress = progress.add(ProgressBar::new(
             metainfo.info().files().next().unwrap().length(),
         ));

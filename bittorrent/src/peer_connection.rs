@@ -10,7 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_uring::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::peer_message::{parse_message, PeerMessage, PeerMessageDecoder};
+use crate::peer_message::{PeerMessage, PeerMessageDecoder};
 use crate::{Piece, TorrentState, SUBPIECE_SIZE};
 
 #[derive(Debug)]
@@ -299,7 +299,7 @@ impl PeerConnection {
         let mut state = self.state_mut();
         // Don't start on a new piece before the current one is completed
         assert!(state.currently_downloading.is_none());
-        // This is racy
+        // TODO This is racy
         //assert!(state.peer_pieces[index as usize]);
         let mut piece = Piece::new(index, length);
         // First subpiece that isn't already completed or inflight
@@ -425,6 +425,10 @@ impl PeerConnection {
                 );
                 let currently_downloading = state.currently_downloading.take();
                 if let Some(mut piece) = currently_downloading {
+                    if piece.index != index {
+                        log::warn!("Stale piece received, ignoring");
+                        return Ok(());
+                    }
                     // Should this be called unconditionally?
                     if let Some(callback) = torrent_state.on_subpiece_callback.as_mut() {
                         callback(&data[..]);
@@ -460,7 +464,7 @@ impl PeerConnection {
         }
         Ok(())
     }
-
+    // remove these and don't expose it directly?
     pub fn state_mut(&self) -> RefMut<'_, PeerConnectionState> {
         self.state.borrow_mut()
     }

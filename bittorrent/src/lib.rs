@@ -228,7 +228,7 @@ impl TorrentState {
                 log::info!("Piece hash matched downloaded data");
                 self.completed_pieces.set(piece_index, true);
                 self.inflight_pieces.set(piece_index, false);
-                self.file_handle.write(self.torrent_info.piece_length() * index as u64, data);
+                self.file_handle.write(self.torrent_info.piece_length() * index as u64, data).unwrap();
 
                 // Purge disconnected peers 
                 self.peer_connections.retain(|peer| peer.have(index).is_ok());

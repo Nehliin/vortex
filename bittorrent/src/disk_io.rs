@@ -50,7 +50,7 @@ fn start_disk_io_thread(path: PathBuf) -> UnboundedSender<DiskJob> {
                             if let Err(err) = result {
                                 // TODO: This will silently corrupt the file and is currently
                                 // not recoverable
-                                log::error!("Failed to write piece: {err}");
+                                panic!("Failed to write piece: {err}");
                             }
                         });
                     }
