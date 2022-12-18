@@ -42,7 +42,7 @@ fn accepts_incoming() {
         .is_test(true)
         .try_init();
     let torrent = std::fs::read("final_test.torrent").unwrap();
-    let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
+    let metainfo = bip_metainfo::Metainfo::from_bytes(torrent).unwrap();
     // simulate seeding
     let torrent_manager = TorrentManager::new(metainfo.info().clone());
     let file = std::fs::read("final_file_og.txt").unwrap();
@@ -55,9 +55,20 @@ fn accepts_incoming() {
     let listener = TcpListener::bind("127.0.0.1:1337".parse().unwrap()).unwrap();
 
     tokio_uring::start(async move {
-        torrent_manager.accept_incoming(&listener).await;
-        log::info!("We are connected!!");
-        let handle = torrent_manager.peer(0).unwrap();
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        let mut attempt = 1;
+        loop {
+            if attempt > 2 {
+                panic!("Should succeed after first failure");
+            }
+            if let Ok(handle) = torrent_manager.accept_incoming(&listener).await {
+                log::info!("We are connected!!");
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            } else {
+                log::info!("Connection attempt {attempt} failed");
+                // First will fail since libtorrent by default attempts to encrypt the 
+                // connection
+                attempt += 1;
+            }
+        }
     });
 }

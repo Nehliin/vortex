@@ -188,71 +188,68 @@ impl PeerConnection {
         let (res, buf) = stream.read(buf).await;
         let read = res?;
         let mut buf = buf.as_slice();
-        if read >= 68 {
-            log::info!("Handshake received");
-            let str_len = buf.get_u8();
-            assert_eq!(str_len, 19);
-            assert_eq!(
-                buf.get(..str_len as usize),
-                Some(b"BitTorrent protocol" as &[u8])
+        log::info!("Received data: {read}");
+        anyhow::ensure!(read >= 68);
+        log::info!("Handshake received");
+        let str_len = buf.get_u8();
+        anyhow::ensure!(str_len == 19);
+        anyhow::ensure!(buf.get(..str_len as usize) == Some(b"BitTorrent protocol" as &[u8]));
+        buf.advance(str_len as usize);
+        // Extensions!
+        /*assert_eq!(
+            buf.get((str_len as usize)..(str_len as usize + 8)),
+            Some(&[0_u8; 8] as &[u8])
+        );*/
+        // Skip extensions for now
+        buf.advance(8);
+        anyhow::ensure!(Some(&info_hash as &[u8]) == buf.get(..20));
+        buf.advance(20_usize);
+        // Read their peer id
+        let peer_id: [u8; 20] = buf.get(..20).unwrap().try_into().unwrap();
+        buf.advance(20_usize);
+        if buf.has_remaining() {
+            log::warn!(
+                "{} is remaining after handshake data will be lost",
+                buf.remaining()
             );
-            // Extensions!
-            /*assert_eq!(
-                buf.get((str_len as usize)..(str_len as usize + 8)),
-                Some(&[0_u8; 8] as &[u8])
-            );*/
-            assert_eq!(
-                Some(&info_hash as &[u8]),
-                buf.get((str_len as usize + 8)..(str_len as usize + 28))
-            );
-            // Read their peer id
-            let peer_id: [u8; 20] = buf
-                .get((str_len as usize + 28)..(str_len as usize + 48))
-                .unwrap()
-                .try_into()
-                .unwrap();
-
-            let cancellation_token = CancellationToken::new();
-
-            let (outgoing_tx, mut incoming_rc) = start_network_thread(
-                peer_id,
-                SendableStream(stream),
-                cancellation_token.child_token(),
-            );
-
-            let peer_pieces = (0..num_pieces).map(|_| false).collect();
-            let connection = PeerConnection {
-                peer_id,
-                state: Rc::new(RefCell::new(PeerConnectionState::new(
-                    peer_pieces,
-                    cancellation_token,
-                ))),
-                outgoing: outgoing_tx,
-            };
-
-            let connection_clone = connection.clone();
-            // process incoming, should cancel automatically when incoming_tx is dropped
-            tokio_uring::spawn(async move {
-                while let Some(incoming) = incoming_rc.recv().await {
-                    if let Some(torrent_state) = torrent_state.upgrade() {
-                        let mut torrent_state = torrent_state.borrow_mut();
-                        if let Err(err) =
-                            connection_clone.process_incoming(incoming, &mut torrent_state)
-                        {
-                            log::error!(
-                                "[Peer: {peer_id:?}] Error processing incoming message: {err}"
-                            );
-                        }
-                    } else {
-                        log::warn!("[Peer: {peer_id:?}] Torrent state is gone, shutting down incoming process loop");
-                        break;
-                    }
-                }
-            });
-
-            return Ok(connection);
         }
-        anyhow::bail!("Didn't get enough data");
+        let cancellation_token = CancellationToken::new();
+
+        let (outgoing_tx, mut incoming_rc) = start_network_thread(
+            peer_id,
+            SendableStream(stream),
+            cancellation_token.child_token(),
+        );
+
+        let peer_pieces = (0..num_pieces).map(|_| false).collect();
+        let connection = PeerConnection {
+            peer_id,
+            state: Rc::new(RefCell::new(PeerConnectionState::new(
+                peer_pieces,
+                cancellation_token,
+            ))),
+            outgoing: outgoing_tx,
+        };
+
+        let connection_clone = connection.clone();
+        // process incoming, should cancel automatically when incoming_tx is dropped
+        tokio_uring::spawn(async move {
+            while let Some(incoming) = incoming_rc.recv().await {
+                if let Some(torrent_state) = torrent_state.upgrade() {
+                    let mut torrent_state = torrent_state.borrow_mut();
+                    if let Err(err) =
+                        connection_clone.process_incoming(incoming, &mut torrent_state)
+                    {
+                        log::error!("[Peer: {peer_id:?}] Error processing incoming message: {err}");
+                    }
+                } else {
+                    log::warn!("[Peer: {peer_id:?}] Torrent state is gone, shutting down incoming process loop");
+                    break;
+                }
+            }
+        });
+
+        Ok(connection)
     }
 
     #[inline(always)]
