@@ -6,8 +6,8 @@ use std::{
     time::Duration,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
 use rand::Rng;
+use serde_bytes::ByteBuf;
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::sync::oneshot;
@@ -15,26 +15,27 @@ use tokio_uring::net::UdpSocket;
 
 use crate::node::{Node, NodeId};
 
+// TODO try to avoid allocations for ids
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum Query {
     Ping {
-        id: Bytes,
+        id: ByteBuf,
     },
     FindNode {
-        id: Bytes,
-        target: Bytes,
+        id: ByteBuf,
+        target: ByteBuf,
     },
     GetPeers {
-        id: Bytes,
-        info_hash: Bytes,
+        id: ByteBuf,
+        info_hash: ByteBuf,
     },
     AnnouncePeer {
-        id: Bytes,
+        id: ByteBuf,
         implied_port: bool,
-        info_hash: Bytes,
+        info_hash: ByteBuf,
         port: u16,
-        token: Bytes,
+        token: ByteBuf,
     },
 }
 
@@ -42,25 +43,25 @@ pub enum Query {
 #[serde(untagged)]
 pub enum Response {
     GetPeers {
-        id: Bytes,
-        token: Bytes,
-        values: Option<Vec<Bytes>>,
-        nodes: Option<Bytes>,
+        id: ByteBuf,
+        token: ByteBuf,
+        values: Option<Vec<ByteBuf>>,
+        nodes: Option<ByteBuf>,
     },
     // For both ping and announce peer
     FindNode {
-        id: Bytes,
-        nodes: Bytes,
+        id: ByteBuf,
+        nodes: ByteBuf,
     },
     QueriedNodeId {
-        id: Bytes,
+        id: ByteBuf,
     },
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Error {
     pub code: u32,
-    pub description: Bytes,
+    pub description: ByteBuf,
 }
 
 impl std::fmt::Display for Error {
@@ -77,7 +78,7 @@ impl std::error::Error for Error {}
 
 #[derive(Debug, Serialize)]
 struct KrpcReq {
-    t: Bytes,
+    t: ByteBuf,
     y: char,
     q: &'static str,
     a: Query,
@@ -85,8 +86,8 @@ struct KrpcReq {
 
 #[derive(Debug, Deserialize)]
 struct KrpcRes {
-    t: Bytes,
-    y: String,
+    t: ByteBuf,
+    y: char,
     r: Option<Response>,
     e: Option<Error>,
 }
@@ -117,11 +118,11 @@ pub enum GetPeerResponseBody {
 #[derive(Debug)]
 pub struct GetPeersResponse {
     pub id: NodeId,
-    pub token: Bytes,
+    pub token: ByteBuf,
     pub body: GetPeerResponseBody,
 }
 
-fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
+fn parse_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
     // TODO this will panic on invalid input
     bytes
         .chunks(26)
@@ -140,25 +141,25 @@ fn parse_compact_nodes(bytes: Bytes) -> Vec<Node> {
 }
 
 #[derive(Clone, Default, Debug)]
-struct InflightRpcs(Rc<RefCell<HashMap<Bytes, oneshot::Sender<Result<Response, Error>>>>>);
+struct InflightRpcs(Rc<RefCell<HashMap<ByteBuf, oneshot::Sender<Result<Response, Error>>>>>);
 
 // Ensures Refcell borrow is never held across await point
 impl InflightRpcs {
-    fn insert_rpc(&self, transaction_id: Bytes) -> oneshot::Receiver<Result<Response, Error>> {
+    fn insert_rpc(&self, transaction_id: ByteBuf) -> oneshot::Receiver<Result<Response, Error>> {
         let mut table = (*self.0).borrow_mut();
         let (tx, rx) = oneshot::channel();
         table.insert(transaction_id, tx);
         rx
     }
 
-    fn exists(&self, transaction_id: &Bytes) -> bool {
+    fn exists(&self, transaction_id: &ByteBuf) -> bool {
         let table = (*self.0).borrow();
         table.contains_key(transaction_id)
     }
 
     fn remove_rpc(
         &self,
-        transaction_id: &Bytes,
+        transaction_id: &ByteBuf,
     ) -> Option<oneshot::Sender<Result<Response, Error>>> {
         let mut table = (*self.0).borrow_mut();
         table.remove(transaction_id)
@@ -193,7 +194,7 @@ impl KrpcService {
                 let (recv, _addr) = read.unwrap();
                 // TODO This might fail on errors where t can't be parsed
                 // EX: Error parsing packet: Missing Field: `t`, packet: d1:eli202e12:Server Errore1:t2:��1:y1:ee
-                let resp: KrpcRes = match serde_bencode::de::from_bytes(&buf[..recv]) {
+                let resp: KrpcRes = match serde_bencoded::from_bytes(&buf[..recv]) {
                     Ok(resp) => resp,
                     Err(err) => {
                         log::error!(
@@ -208,9 +209,9 @@ impl KrpcService {
 
                 let response_sender = connection_table_clone.remove_rpc(&resp.t);
                 if let Some(response_sender) = response_sender {
-                    if resp.y == "r" {
+                    if resp.y == 'r' {
                         let _ = response_sender.send(Ok(resp.r.unwrap()));
-                    } else if resp.y == "e" {
+                    } else if resp.y == 'e' {
                         let _ = response_sender.send(Err(resp.e.unwrap()));
                     } else {
                         panic!("received unexpected response")
@@ -233,16 +234,12 @@ impl KrpcService {
         })
     }
 
-    fn gen_transaction_id(&self) -> Bytes {
+    fn gen_transaction_id(&self) -> ByteBuf {
         use rand::distributions::Alphanumeric;
         let mut rng = rand::thread_rng();
         // handle transaction_ids in a saner way so that
         // multiple queries can be sent simultaneously per node
-        let mut id = BytesMut::new();
-        id.put_u8(rng.sample(Alphanumeric) as u8);
-        id.put_u8(rng.sample(Alphanumeric) as u8);
-        let id = id.freeze();
-
+        let id = ByteBuf::from(vec![rng.sample(Alphanumeric); 2]);
         if self.connection_table.exists(&id) {
             // need to generate another id
             self.gen_transaction_id()
@@ -252,7 +249,7 @@ impl KrpcService {
     }
 
     async fn send_req(&self, node: &Node, req: KrpcReq) -> Result<Response, Error> {
-        let encoded = serde_bencode::ser::to_bytes(&req).unwrap();
+        let encoded = serde_bencoded::to_vec(&req).unwrap();
 
         let rx = self.connection_table.insert_rpc(req.t.clone());
 
@@ -264,7 +261,7 @@ impl KrpcService {
             Ok(Ok(Ok(response))) => Ok(response),
             Err(_elapsed) => Err(Error {
                 code: 408,
-                description: b"Request timed out".as_slice().into(),
+                description: ByteBuf::from(b"Request timed out".to_vec()),
             }),
             Ok(Ok(Err(err))) => Err(err),
             Ok(Err(_)) => panic!("sender dropped"),
@@ -281,12 +278,14 @@ impl KrpcService {
             y: 'q',
             q: QUERY,
             a: Query::Ping {
-                id: querying_node.to_bytes(),
+                id: ByteBuf::from(querying_node.as_bytes()),
             },
         };
 
         if let Response::QueriedNodeId { id } = self.send_req(node, req).await? {
-            Ok(Pong { id: id.into() })
+            Ok(Pong {
+                id: id.as_slice().into(),
+            })
         } else {
             panic!("unexpected response");
         }
@@ -307,15 +306,15 @@ impl KrpcService {
             y: 'q',
             q: QUERY,
             a: Query::FindNode {
-                id: querying_node.to_bytes(),
-                target: target.to_bytes(),
+                id: ByteBuf::from(querying_node.as_bytes()),
+                target: ByteBuf::from(target.as_bytes()),
             },
         };
 
         if let Response::FindNode { id, nodes } = self.send_req(queried_node, req).await? {
             let nodes = parse_compact_nodes(nodes);
             Ok(FindNodesResponse {
-                id: id.into(),
+                id: id.as_slice().into(),
                 nodes,
             })
         } else {
@@ -326,7 +325,7 @@ impl KrpcService {
     pub async fn get_peers(
         &self,
         querying_node: &NodeId,
-        info_hash: Bytes,
+        info_hash: [u8; 20],
         node: &Node,
     ) -> Result<GetPeersResponse, Error> {
         const QUERY: &str = "get_peers";
@@ -338,8 +337,8 @@ impl KrpcService {
             y: 'q',
             q: QUERY,
             a: Query::GetPeers {
-                id: querying_node.to_bytes(),
-                info_hash,
+                id: ByteBuf::from(querying_node.as_bytes()),
+                info_hash: ByteBuf::from(info_hash),
             },
         };
 
@@ -371,7 +370,7 @@ impl KrpcService {
                         .collect();
 
                     return Ok(GetPeersResponse {
-                        id: id.into(),
+                        id: id.as_slice().into(),
                         token,
                         body: GetPeerResponseBody::Peers(peers),
                     });
@@ -381,30 +380,30 @@ impl KrpcService {
                     let nodes = parse_compact_nodes(nodes);
 
                     return Ok(GetPeersResponse {
-                        id: id.into(),
+                        id: id.as_slice().into(),
                         token,
                         body: GetPeerResponseBody::Nodes(nodes),
                     });
                 }
                 Err(Error {
                     code: 203,
-                    description: b"Response contained neither nodes nor peers"
-                        .as_slice()
-                        .into(),
+                    description: ByteBuf::from(
+                        b"Response contained neither nodes nor peers".to_vec(),
+                    ),
                 })
             }
             Response::FindNode { id, nodes } => {
                 let nodes = parse_compact_nodes(nodes);
 
                 Ok(GetPeersResponse {
-                    id: id.into(),
-                    token: Bytes::new(),
+                    id: id.as_slice().into(),
+                    token: ByteBuf::new(),
                     body: GetPeerResponseBody::Nodes(nodes),
                 })
             }
             _ => Err(Error {
                 code: 203,
-                description: b"Unexpected response from get_peers".as_slice().into(),
+                description: ByteBuf::from(b"Unexpected response from get_peers".to_vec()),
             }),
         }
     }

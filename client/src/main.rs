@@ -127,7 +127,7 @@ async fn find_peers(
         log::debug!("Closest node: {closest_node:?}");
 
         let response = match service
-            .get_peers(&routing_table.own_id, info_hash.to_bytes(), &closest_node)
+            .get_peers(&routing_table.own_id, info_hash.as_bytes(), &closest_node)
             .await
         {
             Ok(response) => response,

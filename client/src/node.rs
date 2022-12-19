@@ -6,7 +6,6 @@ use std::{
 use bytes::Bytes;
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use tokio::time::Instant;
 
 // BE endian large nums that
 // can use lexographical order
@@ -42,8 +41,8 @@ impl NodeId {
         NodeId(dist)
     }
 
-    pub fn to_bytes(self) -> Bytes {
-        Bytes::copy_from_slice(&self.0)
+    pub fn as_bytes(&self) -> [u8; 20] {
+        self.0
     }
 }
 
