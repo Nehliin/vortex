@@ -7,6 +7,7 @@ use std::{
 };
 
 use rand::Rng;
+use serde::{de::Visitor, Deserializer};
 use serde_bytes::ByteBuf;
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -39,7 +40,7 @@ pub enum Query {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Response {
     GetPeers {
@@ -58,18 +59,82 @@ pub enum Response {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq)]
 pub struct Error {
-    pub code: u32,
-    pub description: ByteBuf,
+    pub code: u64,
+    pub description: String,
+}
+
+impl Error {
+    fn generic(description: String) -> Self {
+        Self {
+            code: 201,
+            description,
+        }
+    }
+
+    fn server(description: String) -> Self {
+        Self {
+            code: 202,
+            description,
+        }
+    }
+
+    fn protocol(description: String) -> Self {
+        Self {
+            code: 203,
+            description,
+        }
+    }
+
+    fn method_unknown(description: String) -> Self {
+        Self {
+            code: 204,
+            description,
+        }
+    }
+}
+
+fn parse_error<'de, D>(de: D) -> Result<Option<Error>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ErrorVisitor;
+
+    impl<'de> Visitor<'de> for ErrorVisitor {
+        type Value = Option<Error>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("Expected bencoded list with one error code + description")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let Some(code) = seq.next_element::<u64>()? else {
+                return Ok(None);
+            };
+            let Some(description) = seq.next_element::<String>()? else {
+                return Ok(None);
+            };
+            // The next_element must be called here for parsing of the rest of the
+            // message to be successful for whatever reason. **shrug**
+            if matches!(seq.next_element::<char>(), Ok(None)) {
+                Ok(Some(Error { code, description }))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+    de.deserialize_any(ErrorVisitor)
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
-            "KrpcRequest Failed: {} {}",
-            self.code,
-            String::from_utf8_lossy(&self.description)
+            "KrpcError: {},  {}",
+            self.code, self.description
         ))
     }
 }
@@ -84,11 +149,12 @@ struct KrpcReq {
     a: Query,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 struct KrpcRes {
     t: ByteBuf,
     y: char,
     r: Option<Response>,
+    #[serde(deserialize_with = "parse_error")]
     e: Option<Error>,
 }
 
@@ -166,10 +232,6 @@ impl InflightRpcs {
     }
 }
 
-// EXAMPLE OF FAILURE:
-// Error parsing packet: Missing Field: `t`, packet: d1:eli202e12:Server Errore1:t2:lC1:y1:ee
-// Error parsing packet: Missing Field: `t`, packet: d1:eli202e12:Server Errore1:t2:zg1:y1:ee
-
 // TODO use tower!
 #[derive(Clone)]
 pub struct KrpcService {
@@ -192,8 +254,6 @@ impl KrpcService {
                     .recv_from(std::mem::take(&mut recv_buffer))
                     .await;
                 let (recv, _addr) = read.unwrap();
-                // TODO This might fail on errors where t can't be parsed
-                // EX: Error parsing packet: Missing Field: `t`, packet: d1:eli202e12:Server Errore1:t2:��1:y1:ee
                 let resp: KrpcRes = match serde_bencoded::from_bytes(&buf[..recv]) {
                     Ok(resp) => resp,
                     Err(err) => {
@@ -261,7 +321,7 @@ impl KrpcService {
             Ok(Ok(Ok(response))) => Ok(response),
             Err(_elapsed) => Err(Error {
                 code: 408,
-                description: ByteBuf::from(b"Request timed out".to_vec()),
+                description: "Request timed out".to_string(),
             }),
             Ok(Ok(Err(err))) => Err(err),
             Ok(Err(_)) => panic!("sender dropped"),
@@ -387,9 +447,7 @@ impl KrpcService {
                 }
                 Err(Error {
                     code: 203,
-                    description: ByteBuf::from(
-                        b"Response contained neither nodes nor peers".to_vec(),
-                    ),
+                    description: "Response contained neither nodes nor peers".to_string(),
                 })
             }
             Response::FindNode { id, nodes } => {
@@ -401,10 +459,44 @@ impl KrpcService {
                     body: GetPeerResponseBody::Nodes(nodes),
                 })
             }
-            _ => Err(Error {
-                code: 203,
-                description: ByteBuf::from(b"Unexpected response from get_peers".to_vec()),
-            }),
+            _ => Err(Error::protocol(
+                "Unexpected response from get_peers".to_string(),
+            )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_generic_error() {
+        let encoded = "d1:eli201e23:A Generic Error Ocurrede1:t2:aa1:y1:ee";
+        let decoded: KrpcRes = serde_bencoded::from_str(encoded).unwrap();
+        assert_eq!(
+            KrpcRes {
+                t: ByteBuf::from(b"aa".to_vec()),
+                y: 'e',
+                r: None,
+                e: Some(Error::generic("A Generic Error Ocurred".to_owned()))
+            },
+            decoded
+        );
+    }
+
+    #[test]
+    fn parse_server_error() {
+        let encoded = "d1:eli202e12:Server Errore1:t2:lC1:y1:ee";
+        let decoded: KrpcRes = serde_bencoded::from_str(encoded).unwrap();
+        assert_eq!(
+            KrpcRes {
+                t: ByteBuf::from(b"lC".to_vec()),
+                y: 'e',
+                r: None,
+                e: Some(Error::server("Server Error".to_owned()))
+            },
+            decoded
+        );
     }
 }
