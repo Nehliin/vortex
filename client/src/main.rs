@@ -155,7 +155,7 @@ fn main() {
     let log_file = std::fs::File::create("log.txt").unwrap();
     let mut log_builder = env_logger::builder();
     log_builder
-        .target(env_logger::Target::Pipe(Box::new(log_file)))
+//        .target(env_logger::Target::Pipe(Box::new(log_file)))
         .filter_level(log::LevelFilter::Info)
         .init();
 

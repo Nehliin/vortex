@@ -396,12 +396,16 @@ impl PeerConnection {
                     log::error!("Piece request is too large, ignoring. Lenght: {length}");
                     return Ok(());
                 }
-
-                match torrent_state.on_piece_request(index, begin, length) {
-                    Ok(piece_data) => {
-                        self.piece(index, begin, piece_data)?;
+                if self.state().is_choking && torrent_state.should_unchoke() {
+                    self.unchoke()?;
+                    match torrent_state.on_piece_request(index, begin, length) {
+                        Ok(piece_data) => {
+                            self.piece(index, begin, piece_data)?;
+                        }
+                        Err(err) => log::error!("Inavlid piece request: {err}"),
                     }
-                    Err(err) => log::error!("Inavlid piece request: {err}"),
+                } else {
+                    log::info!("Piece request ignored, peer can't be unchoked");
                 }
             }
             PeerMessage::Cancel {

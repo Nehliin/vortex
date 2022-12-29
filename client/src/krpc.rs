@@ -16,6 +16,10 @@ use tokio_uring::net::UdpSocket;
 
 use crate::node::{Node, NodeId};
 
+// 1. KrpcSocket: Single UDP socket, contains transaction id map and generates transaction ids  
+// does all io
+// 2. KrpcConnection: Node + weak ref to socket + all rpc methods
+
 // TODO try to avoid allocations for ids
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -49,11 +53,11 @@ pub enum Response {
         values: Option<Vec<ByteBuf>>,
         nodes: Option<ByteBuf>,
     },
-    // For both ping and announce peer
     FindNode {
         id: ByteBuf,
         nodes: ByteBuf,
     },
+    // For both ping and announce peer
     QueriedNodeId {
         id: ByteBuf,
     },
@@ -186,6 +190,11 @@ pub struct GetPeersResponse {
     pub id: NodeId,
     pub token: ByteBuf,
     pub body: GetPeerResponseBody,
+}
+
+#[derive(Debug)]
+pub struct AnnounceResponse {
+    pub id: NodeId,
 }
 
 fn parse_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
@@ -445,10 +454,9 @@ impl KrpcService {
                         body: GetPeerResponseBody::Nodes(nodes),
                     });
                 }
-                Err(Error {
-                    code: 203,
-                    description: "Response contained neither nodes nor peers".to_string(),
-                })
+                Err(Error::protocol(
+                    "Response contained neither nodes nor peers".to_string(),
+                ))
             }
             Response::FindNode { id, nodes } => {
                 let nodes = parse_compact_nodes(nodes);
@@ -464,6 +472,34 @@ impl KrpcService {
             )),
         }
     }
+
+    /*pub async fn announce_peer(
+        &self,
+        querying_node: &NodeId,
+        info_hash: [u8; 20],
+        port: u16,
+        token: ByteBuf,
+    ) -> Result<AnnounceResponse, Error> {
+        //announce_peers Query = {"t":"aa", "y":"q", "q":"announce_peer", "a": {"id":"abcdefghij0123456789", "implied_port": 1, "info_hash":"mnopqrstuvwxyz123456", "port": 6881, "token": "aoeusnth"}}
+        const QUERY: &str = "announce_peer";
+
+        let transaction_id = self.gen_transaction_id();
+
+        let req = KrpcReq {
+            t: transaction_id,
+            y: 'q',
+            q: QUERY,
+            a: Query::AnnouncePeer {
+                id: ByteBuf::from(querying_node.as_bytes()),
+                implied_port: false,
+                info_hash: ByteBuf::from(info_hash),
+                port,
+                token,
+            },
+        };
+
+        //match self.send_req(node, req)
+    }*/
 }
 
 #[cfg(test)]

@@ -76,7 +76,7 @@ impl Piece {
             assert_eq!(data.len() as i32, SUBPIECE_SIZE);
         }
         self.completed_subpieces.set(subpiece_index as usize, true);
-        self.memory[begin as usize..begin as usize + data.len() as usize].copy_from_slice(data);
+        self.memory[begin as usize..begin as usize + data.len()].copy_from_slice(data);
     }
 
     // Perhaps this can return the subpice or a peer request directly?
@@ -189,7 +189,8 @@ impl TorrentState {
         length: i32,
     ) -> anyhow::Result<Vec<u8>> {
         // TODO: Take choking into account
-        let piece_size = self.torrent_info.piece_length();
+        let piece_size = self.piece_length(index) as i32;
+        anyhow::ensure!(piece_size >= length);
         if *self
             .completed_pieces
             .get(index as usize)
@@ -198,6 +199,7 @@ impl TorrentState {
         {
             log::info!("Piece is available!");
             unimplemented!()
+            //self.file_handle.write(offset, bytes)
             /*if self.pretended_file.len()
                 < ((index as u64 * piece_size) + begin as u64 + length as u64) as usize
             {
@@ -398,10 +400,10 @@ impl TorrentManager {
         Ok(())
     }
 
-    pub async fn accept_incoming(&self, listener: &TcpListener) {
+    pub async fn accept_incoming(&self, listener: &TcpListener) -> anyhow::Result<PeerConnection> {
         let (stream, peer_addr) = listener.accept().await.unwrap();
         log::info!("Incomming peer connection: {peer_addr}");
-        let peer_connection = PeerConnection::new(
+        PeerConnection::new(
             stream,
             self.our_peer_id,
             self.torrent_info.info_hash().into(),
@@ -409,11 +411,15 @@ impl TorrentManager {
             Rc::downgrade(&self.torrent_state),
         )
         .await
-        .unwrap();
-        self.torrent_state
-            .borrow_mut()
-            .peer_connections
-            .push(peer_connection);
+        .map(|peer_connection| {
+            log::info!("Connection established: {peer_addr}");
+            let peer_connection_clone = peer_connection.clone();
+            self.torrent_state
+                .borrow_mut()
+                .peer_connections
+                .push(peer_connection_clone);
+            peer_connection
+        })
     }
 
     pub async fn add_peer(&self, addr: SocketAddr) -> anyhow::Result<PeerConnection> {

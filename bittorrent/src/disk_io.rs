@@ -7,6 +7,7 @@ use tokio_uring::fs::File;
 #[derive(Debug)]
 pub enum DiskJob {
     Write { offset: u64, bytes: Vec<u8> },
+    //Read { offset: u64, buffer: Vec<u8>,  },
     Close,
 }
 
