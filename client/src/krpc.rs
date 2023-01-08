@@ -15,7 +15,7 @@ use time::OffsetDateTime;
 use tokio::sync::oneshot;
 use tokio_uring::net::UdpSocket;
 
-use crate::node::{Node, NodeId};
+use crate::node::{Node, NodeId, NodeStatus};
 
 // 1. KrpcSocket: Single UDP socket, contains transaction id map and generates transaction ids
 // does all io
@@ -226,6 +226,7 @@ fn parse_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
                 id,
                 addr: (ip, port).into(),
                 last_seen: OffsetDateTime::now_utc(),
+                status: NodeStatus::Unknown,
             }
         })
         .collect()

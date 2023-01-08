@@ -1,8 +1,12 @@
 use std::{
+    cell::RefCell,
     net::{IpAddr, SocketAddr},
     path::Path,
+    rc::Rc,
+    time::Duration,
 };
 
+use anyhow::Context;
 use sha1::{Digest, Sha1};
 use time::OffsetDateTime;
 use trust_dns_resolver::{
@@ -51,6 +55,7 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcSocket, boost
         id: ID_ZERO,
         addr: format!("{boostrap_ip}:6881").parse().unwrap(),
         last_seen: OffsetDateTime::now_utc(),
+        status: NodeStatus::Unknown,
     };
 
     let response = service.ping(&routing_table.own_id, &node).await.unwrap();
@@ -58,9 +63,11 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcSocket, boost
     routing_table.insert_node(node);
 }
 
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 pub struct Dht {
     transport: KrpcSocket,
-    routing_table: RoutingTable,
+    routing_table: Rc<RefCell<RoutingTable>>,
 }
 
 impl Dht {
@@ -82,41 +89,78 @@ impl Dht {
 
         Ok(Dht {
             transport,
-            routing_table,
+            routing_table: Rc::new(RefCell::new(routing_table)),
         })
     }
 
-    pub async fn start(&mut self) -> anyhow::Result<()> {
+    fn insert_node(&self, node: Node) -> bool {
+        let mut routing_table = self.routing_table.borrow_mut();
+        if routing_table.insert_node(node) {
+            drop(routing_table);
+            let routing_table_clone = Rc::clone(&self.routing_table);
+            let node_id = node.id;
+            tokio_uring::spawn(async move {
+                tokio::time::sleep(REFRESH_TIMEOUT).await;
+                let mut routing_table = routing_table_clone.borrow_mut();
+                if let Some(bucket) = routing_table.get_bucket(&node_id) {
+                    if OffsetDateTime::now_utc() - bucket.last_changed() >= REFRESH_TIMEOUT {
+                        // refresh bucket?
+                        // also remember to mark as changed after pings and stuff
+                    }
+                }
+            });
+            true
+        } else {
+            false
+        }
+    }
+    // continue on this
+    // then add a "insert_node" method to this dht which inserts + starts refresh task wrap routing
+    // table in rc + refcell
+    pub async fn start(&self) -> anyhow::Result<()> {
         // Find closest nodes
         // 1. look in bootstrap for self
         // 2. recursivly look for the closest node to self in the resposne
-        let own_id = self.routing_table.own_id;
+        let own_id = self.routing_table.borrow().own_id;
         let mut prev_min = ID_MAX;
 
         loop {
             log::info!("Scanning");
-            let next_to_query = self.routing_table.get_closest_mut(&own_id).unwrap();
+            let next_to_query = *self
+                .routing_table
+                .borrow_mut()
+                .get_closest_mut(&own_id)
+                .context("No nodes in routing table")?;
 
             let distance = own_id.distance(&next_to_query.id);
             if distance < prev_min {
                 let response = match self
                     .transport
-                    .find_nodes(&own_id, &own_id, next_to_query)
+                    .find_nodes(&own_id, &own_id, &next_to_query)
                     .await
                 {
                     Ok(reponse) => {
-                        next_to_query.status = NodeStatus::Good;
+                        let mut routing_table = self.routing_table.borrow_mut();
+                        // Unwrap is fine here since it should always exists a node with the given
+                        // id in the table at this point
+                        let queried_node = routing_table.get_mut(&next_to_query.id).unwrap();
+                        queried_node.status = NodeStatus::Good;
                         reponse
                     }
                     Err(err) => {
-                        log::trace!("Node ping timeout for: {next_to_query:?}");
+                        log::warn!("Node {next_to_query:?} ping failed: {err}");
                         match next_to_query.status {
-                            NodeStatus::Good => next_to_query.status = NodeStatus::Bad,
-                            NodeStatus::Bad => {
-                                let clone = next_to_query.clone();
-                                self.routing_table.remove(&clone).unwrap();
+                            NodeStatus::Good | NodeStatus::Unknown => {
+                                let mut routing_table = self.routing_table.borrow_mut();
+                                // Unwrap is fine here since it should always exists a node with the given
+                                // id in the table at this point
+                                let queried_node =
+                                    routing_table.get_mut(&next_to_query.id).unwrap();
+                                queried_node.status = NodeStatus::Bad;
                             }
-                            NodeStatus::Unknown => next_to_query.status = NodeStatus::Bad,
+                            NodeStatus::Bad => {
+                                self.routing_table.borrow_mut().remove(&next_to_query)?;
+                            }
                         }
                         continue;
                     }
@@ -124,7 +168,7 @@ impl Dht {
 
                 log::debug!("Got nodes from: {next_to_query:?}");
                 for node in response.nodes.into_iter() {
-                    if self.routing_table.insert_node(node) {
+                    if self.insert_node(node) {
                         log::debug!("Inserted node");
                     }
                 }
@@ -138,9 +182,9 @@ impl Dht {
 }
 
 impl Drop for Dht {
-    // TODO don't block
     fn drop(&mut self) {
         log::info!("Saving table");
-        save_table(Path::new("routing_table.json"), &self.routing_table).unwrap();
+        let routing_table = self.routing_table.borrow();
+        save_table(Path::new("routing_table.json"), &routing_table).unwrap();
     }
 }

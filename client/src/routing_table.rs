@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 
 use crate::{
     krpc::KrpcSocket,
-    node::{Node, NodeId, ID_MAX, ID_ZERO, NodeStatus},
+    node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
 };
 
 // TODO implement PartialEq manually to only check min,max
@@ -55,9 +55,7 @@ impl Bucket {
         // modify max limit by finding midpoint
         self.max = crate::node::midpoint(&self.min, &self.max);
         // max should never be 0
-        if self.max == ID_ZERO {
-            panic!("should never happen");
-        }
+        assert!(self.max != ID_ZERO);
 
         let new_min = self.max;
 
@@ -94,6 +92,11 @@ impl Bucket {
         }
         bucket
     }
+
+    #[inline]
+    pub fn last_changed(&self) -> OffsetDateTime {
+        self.last_changed
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,7 +122,6 @@ impl RoutingTable {
     }
 
     pub fn insert_node(&mut self, node: Node) -> bool {
-        // TODO: naive
         for bucket in self.buckets.iter_mut() {
             if bucket.covers(&node.id) {
                 if let Some(empty_spot) = bucket.empty_spot() {
@@ -129,7 +131,6 @@ impl RoutingTable {
                 } else if bucket.covers(&self.own_id) {
                     let new_bucket = bucket.split();
                     self.buckets.push(new_bucket);
-                    // not efficient
                     return self.insert_node(node);
                 }
             }
@@ -176,14 +177,14 @@ impl RoutingTable {
     pub fn get_closest_mut(&mut self, info_hash: &NodeId) -> Option<&mut Node> {
         let closest = self
             .buckets
-            .iter()
+            .iter_mut()
             .flat_map(|bucket| &bucket.nodes)
             .min_by_key(|node| {
-                node.as_ref()
+                node.as_mut()
                     .map(|node| info_hash.distance(&node.id))
                     .unwrap_or(ID_MAX)
             })? // never empty
-            .as_ref()?;
+            .as_mut()?;
 
         // Santify check TODO FIX AND REMOVE
         let mut found = 0;
@@ -195,6 +196,26 @@ impl RoutingTable {
         }
         assert_eq!(found, 1);
         Some(closest)
+    }
+
+    pub fn get_mut(&mut self, id: &NodeId) -> Option<&mut Node> {
+        self.buckets
+            .iter_mut()
+            .flat_map(|bucket| &bucket.nodes)
+            .find(|node| node.map_or(false, |node| node.id == *id))?
+            .as_mut()
+    }
+
+    pub fn get_bucket(&self, id: &NodeId) -> Option<&Bucket> {
+        self.buckets
+            .iter()
+            .find(|bucket| bucket.covers(id))
+            .filter(|bucket| {
+                bucket
+                    .nodes
+                    .iter()
+                    .any(|node| node.map_or(false, |node| node.id == *id))
+            })
     }
 
     pub fn remove(&mut self, to_remove: &Node) -> anyhow::Result<()> {
