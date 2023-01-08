@@ -5,7 +5,7 @@ use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    krpc::KrpcService,
+    krpc::KrpcSocket,
     node::{Node, NodeId, ID_MAX, ID_ZERO},
 };
 
@@ -133,7 +133,7 @@ impl RoutingTable {
     // TODO: properly add last_changed to buckets and
     // periodically ping nodes accoriding to
     // https://www.bittorrent.org/beps/bep_0005.html
-    pub async fn ping_all_nodes(&mut self, service: &KrpcService, progress: &MultiProgress) {
+    pub async fn ping_all_nodes(&mut self, service: &KrpcSocket, progress: &MultiProgress) {
         // Will live long enough and this is temporary
         let this: &'static mut Self = unsafe { std::mem::transmute(self) };
         let ping_progress = progress.add(ProgressBar::new_spinner());

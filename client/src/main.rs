@@ -2,7 +2,7 @@ use std::{cell::RefCell, collections::BTreeMap, net::IpAddr, path::Path, rc::Rc,
 
 use bittorrent::TorrentManager;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use krpc::{KrpcService, Peer};
+use krpc::{KrpcSocket, Peer};
 use magnet_url::Magnet;
 use node::{NodeId, ID_MAX};
 use routing_table::RoutingTable;
@@ -45,7 +45,7 @@ fn save_table(path: &Path, table: &RoutingTable) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boostrap_ip: IpAddr) {
+async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcSocket, boostrap_ip: IpAddr) {
     let mut node = Node {
         id: ID_ZERO,
         addr: format!("{boostrap_ip}:6881").parse().unwrap(),
@@ -57,7 +57,7 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcService, boos
     routing_table.insert_node(node);
 }
 
-async fn refresh(routing_table: &mut RoutingTable, service: &KrpcService) {
+async fn refresh(routing_table: &mut RoutingTable, service: &KrpcSocket) {
     // Find closest nodes
     // 1. look in bootstrap for self
     // 2. recursivly look for the closest node to self in the resposne
@@ -107,7 +107,7 @@ fn pop_first(btree_map: &mut BTreeMap<NodeId, Node>) -> Node {
 }
 
 async fn find_peers(
-    service: &KrpcService,
+    service: &KrpcSocket,
     routing_table: &RoutingTable,
     info_hash: &[u8],
 ) -> Vec<Peer> {
@@ -178,7 +178,7 @@ fn main() {
 
     tokio_uring::start(async move {
         let progress = MultiProgress::new();
-        let service = KrpcService::new("0.0.0.0:1337".parse().unwrap())
+        let service = KrpcSocket::new("0.0.0.0:1337".parse().unwrap())
             .await
             .unwrap();
 

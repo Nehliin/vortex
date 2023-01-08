@@ -6,8 +6,9 @@ use std::{
     time::Duration,
 };
 
+use ahash::AHashMap;
 use rand::Rng;
-use serde::{de::Visitor, Deserializer};
+use serde::{de::Visitor, ser::SerializeSeq, Deserializer, Serializer};
 use serde_bytes::ByteBuf;
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -16,12 +17,12 @@ use tokio_uring::net::UdpSocket;
 
 use crate::node::{Node, NodeId};
 
-// 1. KrpcSocket: Single UDP socket, contains transaction id map and generates transaction ids  
+// 1. KrpcSocket: Single UDP socket, contains transaction id map and generates transaction ids
 // does all io
 // 2. KrpcConnection: Node + weak ref to socket + all rpc methods
 
 // TODO try to avoid allocations for ids
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Query {
     Ping {
@@ -44,7 +45,7 @@ pub enum Query {
     },
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Response {
     GetPeers {
@@ -134,6 +135,20 @@ where
     de.deserialize_any(ErrorVisitor)
 }
 
+fn serialize_error<S>(error: &Option<Error>, se: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let Some(Error { code, description }) = error else {
+        return se.serialize_none();
+    };
+
+    let mut seq = se.serialize_seq(Some(2))?;
+    seq.serialize_element::<u64>(code)?;
+    seq.serialize_element::<String>(description)?;
+    seq.end()
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
@@ -145,20 +160,21 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-#[derive(Debug, Serialize)]
-struct KrpcReq {
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct KrpcPacket {
     t: ByteBuf,
     y: char,
-    q: &'static str,
-    a: Query,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-struct KrpcRes {
-    t: ByteBuf,
-    y: char,
+    // TODO Borrow instead
+    #[serde(skip_serializing_if = "Option::is_none")]
+    q: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    a: Option<Query>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     r: Option<Response>,
     #[serde(deserialize_with = "parse_error")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_error")]
+    #[serde(default)]
     e: Option<Error>,
 }
 
@@ -216,7 +232,7 @@ fn parse_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
 }
 
 #[derive(Clone, Default, Debug)]
-struct InflightRpcs(Rc<RefCell<HashMap<ByteBuf, oneshot::Sender<Result<Response, Error>>>>>);
+struct InflightRpcs(Rc<RefCell<AHashMap<ByteBuf, oneshot::Sender<Result<Response, Error>>>>>);
 
 // Ensures Refcell borrow is never held across await point
 impl InflightRpcs {
@@ -241,63 +257,94 @@ impl InflightRpcs {
     }
 }
 
-// TODO use tower!
+// TODO use tower?
 #[derive(Clone)]
-pub struct KrpcService {
+pub struct KrpcSocket {
     // TODO Set cpu affinity for socket
     socket: Rc<UdpSocket>,
     connection_table: InflightRpcs,
+    incoming_rc: Rc<RefCell<tokio::sync::mpsc::Receiver<Query>>>,
 }
 
-impl KrpcService {
+impl KrpcSocket {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
+        let (incoming_tx, incoming_rc) = tokio::sync::mpsc::channel(256);
         let socket = Rc::new(UdpSocket::bind(bind_addr).await?);
         let connection_table = InflightRpcs::default();
-        let connection_table_clone = connection_table.clone();
-        // too large
-        let mut recv_buffer = vec![0; 4096];
+
+        // Recv task
         let socket_clone = Rc::clone(&socket);
+        let connection_table_clone = connection_table.clone();
         tokio_uring::spawn(async move {
+            let mut recv_buffer = vec![0; 2048];
             loop {
-                let (read, mut buf) = socket_clone
+                let (read, buf) = socket_clone
                     .recv_from(std::mem::take(&mut recv_buffer))
                     .await;
+                // TODO cancellation and addr should be sent across with packet
                 let (recv, _addr) = read.unwrap();
-                let resp: KrpcRes = match serde_bencoded::from_bytes(&buf[..recv]) {
-                    Ok(resp) => resp,
+                let packet: KrpcPacket = match serde_bencoded::from_bytes(&buf[..recv]) {
+                    Ok(packet) => packet,
                     Err(err) => {
-                        log::error!(
-                            "Error parsing packet: {err}, packet: {}",
-                            String::from_utf8_lossy(&buf[..recv])
+                        log::warn!(
+                            "Failed parsing KRPC packet: {err}, packet: {:?}",
+                            &buf[..recv]
                         );
-                        buf.clear();
                         recv_buffer = buf;
                         continue;
                     }
                 };
-
-                let response_sender = connection_table_clone.remove_rpc(&resp.t);
-                if let Some(response_sender) = response_sender {
-                    if resp.y == 'r' {
-                        let _ = response_sender.send(Ok(resp.r.unwrap()));
-                    } else if resp.y == 'e' {
-                        let _ = response_sender.send(Err(resp.e.unwrap()));
-                    } else {
-                        panic!("received unexpected response")
-                    }
-                } else {
-                    // TODO probably incomming connections
-                    log::error!(
-                        "Transaction_id: {:?} not found in the connection_table",
-                        resp.t,
-                    );
-                }
-                buf.clear();
                 recv_buffer = buf;
+
+                match packet.y {
+                    // response
+                    'r' => {
+                        if let Some(response) = packet.r {
+                            if let Some(response_sender) =
+                                connection_table_clone.remove_rpc(&packet.t)
+                            {
+                                let _ = response_sender.send(Ok(response));
+                            } else {
+                                log::warn!("Unknown KRPC response recived, transaction id: {:?} not found in connection_table", packet.t);
+                            }
+                        } else {
+                            log::warn!("Invalid KRPC message received, missing response");
+                        }
+                    }
+                    // query
+                    'q' => {
+                        match (packet.q.as_deref(), packet.a) {
+                            (Some("get_peers"), Some(query @ Query::GetPeers { .. }))
+                            | (Some("announce_peer"), Some(query @ Query::AnnouncePeer { .. }))
+                            | (Some("ping"), Some(query @ Query::Ping { .. }))
+                            | (Some("find_node"), Some(query @ Query::FindNode { .. })) => {
+                                // TODO handle
+                                incoming_tx.send(query).await.unwrap();
+                            }
+                            _ => log::warn!("Invalid incoming query"),
+                        }
+                    }
+                    // error
+                    'e' => {
+                        if let Some(error) = packet.e {
+                            if let Some(response_sender) =
+                                connection_table_clone.remove_rpc(&packet.t)
+                            {
+                                let _ = response_sender.send(Err(error));
+                            } else {
+                                log::warn!("Unknown KRPC response recived, transaction id: {:?} not found in connection_table", packet.t);
+                            }
+                        } else {
+                            log::warn!("Invalid KRPC message received, missing error");
+                        }
+                    }
+                    _ => log::warn!("Invalid KRPC message received, y: {}", packet.y),
+                }
             }
         });
 
         Ok(Self {
+            incoming_rc: Rc::new(RefCell::new(incoming_rc)),
             socket,
             connection_table,
         })
@@ -308,21 +355,19 @@ impl KrpcService {
         let mut rng = rand::thread_rng();
         // handle transaction_ids in a saner way so that
         // multiple queries can be sent simultaneously per node
-        let id = ByteBuf::from(vec![rng.sample(Alphanumeric); 2]);
-        if self.connection_table.exists(&id) {
-            // need to generate another id
-            self.gen_transaction_id()
-        } else {
-            id
+        loop {
+            let id = ByteBuf::from([rng.sample(Alphanumeric), rng.sample(Alphanumeric)]);
+            if !self.connection_table.exists(&id) {
+                return id;
+            }
         }
     }
 
-    async fn send_req(&self, node: &Node, req: KrpcReq) -> Result<Response, Error> {
+    async fn send_req(&self, node: &Node, req: KrpcPacket) -> Result<Response, Error> {
         let encoded = serde_bencoded::to_vec(&req).unwrap();
 
         let rx = self.connection_table.insert_rpc(req.t.clone());
 
-        log::debug!("Sending");
         let (res, _) = self.socket.send_to(encoded, node.addr).await;
         res.unwrap();
 
@@ -333,22 +378,22 @@ impl KrpcService {
                 description: "Request timed out".to_string(),
             }),
             Ok(Ok(Err(err))) => Err(err),
-            Ok(Err(_)) => panic!("sender dropped"),
+            Ok(Err(_)) => unreachable!(),
         }
     }
     // TODO optimize and rework error handling
     pub async fn ping(&self, querying_node: &NodeId, node: &Node) -> Result<Pong, Error> {
-        const QUERY: &str = "ping";
-
         let transaction_id = self.gen_transaction_id();
 
-        let req = KrpcReq {
+        let req = KrpcPacket {
             t: transaction_id,
             y: 'q',
-            q: QUERY,
-            a: Query::Ping {
+            q: Some("ping".to_string()),
+            a: Some(Query::Ping {
                 id: ByteBuf::from(querying_node.as_bytes()),
-            },
+            }),
+            r: None,
+            e: None,
         };
 
         if let Response::QueriedNodeId { id } = self.send_req(node, req).await? {
@@ -366,18 +411,18 @@ impl KrpcService {
         target: &NodeId,
         queried_node: &Node,
     ) -> Result<FindNodesResponse, Error> {
-        const QUERY: &str = "find_node";
-
         let transaction_id = self.gen_transaction_id();
 
-        let req = KrpcReq {
+        let req = KrpcPacket {
             t: transaction_id,
             y: 'q',
-            q: QUERY,
-            a: Query::FindNode {
+            q: Some("find_node".to_string()),
+            a: Some(Query::FindNode {
                 id: ByteBuf::from(querying_node.as_bytes()),
                 target: ByteBuf::from(target.as_bytes()),
-            },
+            }),
+            r: None,
+            e: None,
         };
 
         if let Response::FindNode { id, nodes } = self.send_req(queried_node, req).await? {
@@ -397,18 +442,18 @@ impl KrpcService {
         info_hash: [u8; 20],
         node: &Node,
     ) -> Result<GetPeersResponse, Error> {
-        const QUERY: &str = "get_peers";
-
         let transaction_id = self.gen_transaction_id();
 
-        let req = KrpcReq {
+        let req = KrpcPacket {
             t: transaction_id,
             y: 'q',
-            q: QUERY,
-            a: Query::GetPeers {
+            q: Some("get_peers".to_string()),
+            a: Some(Query::GetPeers {
                 id: ByteBuf::from(querying_node.as_bytes()),
                 info_hash: ByteBuf::from(info_hash),
-            },
+            }),
+            r: None,
+            e: None,
         };
 
         // Apparently nodes don't follow spec?
@@ -507,32 +552,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_generic_error() {
+    fn roundtrip_generic_error() {
         let encoded = "d1:eli201e23:A Generic Error Ocurrede1:t2:aa1:y1:ee";
-        let decoded: KrpcRes = serde_bencoded::from_str(encoded).unwrap();
-        assert_eq!(
-            KrpcRes {
-                t: ByteBuf::from(b"aa".to_vec()),
-                y: 'e',
-                r: None,
-                e: Some(Error::generic("A Generic Error Ocurred".to_owned()))
-            },
-            decoded
-        );
+        let decoded: KrpcPacket = serde_bencoded::from_str(encoded).unwrap();
+        let expected = KrpcPacket {
+            t: ByteBuf::from(b"aa".to_vec()),
+            y: 'e',
+            r: None,
+            e: Some(Error::generic("A Generic Error Ocurred".to_owned())),
+            q: None,
+            a: None,
+        };
+        assert_eq!(expected, decoded);
+        assert_eq!(encoded, serde_bencoded::to_string(&expected).unwrap());
     }
 
     #[test]
-    fn parse_server_error() {
+    fn roundtrip_server_error() {
         let encoded = "d1:eli202e12:Server Errore1:t2:lC1:y1:ee";
-        let decoded: KrpcRes = serde_bencoded::from_str(encoded).unwrap();
+        let decoded: KrpcPacket = serde_bencoded::from_str(encoded).unwrap();
+        let expected = KrpcPacket {
+            t: ByteBuf::from(b"lC".to_vec()),
+            y: 'e',
+            r: None,
+            e: Some(Error::server("Server Error".to_owned())),
+            q: None,
+            a: None,
+        };
+        assert_eq!(expected, decoded);
+        assert_eq!(encoded, serde_bencoded::to_string(&expected).unwrap());
+    }
+
+    #[test]
+    fn roundtrip_ping() {
+        let packet = KrpcPacket {
+            t: ByteBuf::from(*b"ta"),
+            y: 'q',
+            q: Some("ping".to_string()),
+            a: Some(Query::Ping {
+                id: ByteBuf::from(crate::node::ID_MAX.as_bytes()),
+            }),
+            r: None,
+            e: None,
+        };
+        let encoded = serde_bencoded::to_vec(&packet).unwrap();
+        assert_eq!(packet, serde_bencoded::from_bytes(&encoded).unwrap());
+    }
+
+    #[test]
+    fn basic() {
+        let encoded: &[u8] = &[
+            100, 50, 58, 105, 112, 54, 58, 83, 249, 52, 208, 5, 57, 49, 58, 114, 100, 50, 58, 105,
+            100, 50, 48, 58, 50, 245, 78, 105, 115, 81, 255, 74, 236, 41, 205, 186, 171, 242, 251,
+            227, 70, 124, 194, 103, 101, 49, 58, 116, 50, 58, 121, 121, 49, 58, 121, 49, 58, 114,
+            101,
+        ];
+        let decoded: KrpcPacket = serde_bencoded::from_bytes(encoded).unwrap();
         assert_eq!(
-            KrpcRes {
-                t: ByteBuf::from(b"lC".to_vec()),
-                y: 'e',
-                r: None,
-                e: Some(Error::server("Server Error".to_owned()))
-            },
-            decoded
+            decoded,
+            KrpcPacket {
+                t: ByteBuf::from([121, 121]),
+                y: 'r',
+                q: None,
+                a: None,
+                r: Some(Response::QueriedNodeId {
+                    id: ByteBuf::from([
+                        50, 245, 78, 105, 115, 81, 255, 74, 236, 41, 205, 186, 171, 242, 251, 227,
+                        70, 124, 194, 103
+                    ])
+                }),
+                e: None,
+            }
         );
     }
 }
