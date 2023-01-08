@@ -6,11 +6,11 @@ use time::OffsetDateTime;
 
 use crate::{
     krpc::KrpcSocket,
-    node::{Node, NodeId, ID_MAX, ID_ZERO},
+    node::{Node, NodeId, ID_MAX, ID_ZERO, NodeStatus},
 };
 
 // TODO implement PartialEq manually to only check min,max
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Bucket {
     min: NodeId,
     max: NodeId,
@@ -26,7 +26,14 @@ impl Bucket {
 
     #[inline]
     fn empty_spot(&mut self) -> Option<&mut Option<Node>> {
-        self.nodes.iter_mut().find(|spot| spot.is_none())
+        let empty_spot = self.nodes.iter_mut().find(|spot| spot.is_none());
+        if empty_spot.is_some() {
+            return empty_spot;
+        }
+        self.nodes.iter_mut().find(|spot| {
+            spot.map(|node| node.status == NodeStatus::Bad)
+                .unwrap_or(true)
+        })
     }
 
     #[inline]
@@ -89,7 +96,7 @@ impl Bucket {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingTable {
     pub buckets: Vec<Bucket>,
     pub own_id: NodeId,
@@ -166,7 +173,7 @@ impl RoutingTable {
     }
 
     // TODO maybe not use nodeid as type for info_hash
-    pub fn get_closest(&self, info_hash: &NodeId) -> Option<&Node> {
+    pub fn get_closest_mut(&mut self, info_hash: &NodeId) -> Option<&mut Node> {
         let closest = self
             .buckets
             .iter()

@@ -140,9 +140,17 @@ impl core::fmt::Debug for NodeId {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub enum NodeStatus {
+    Good,
+    Bad,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Node {
     pub id: NodeId,
     pub addr: SocketAddr,
+    pub status: NodeStatus,
     pub last_seen: OffsetDateTime,
 }
 
