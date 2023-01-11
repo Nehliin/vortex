@@ -15,7 +15,7 @@ use trust_dns_resolver::{
 };
 
 use crate::{
-    krpc::KrpcSocket,
+    krpc::{Error, KrpcSocket},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
     routing_table::RoutingTable,
 };
@@ -55,7 +55,7 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcSocket, boost
         id: ID_ZERO,
         addr: format!("{boostrap_ip}:6881").parse().unwrap(),
         last_seen: OffsetDateTime::now_utc(),
-        status: NodeStatus::Unknown,
+        last_status: NodeStatus::Unknown,
     };
 
     let response = service.ping(&routing_table.own_id, &node).await.unwrap();
@@ -93,7 +93,7 @@ impl Dht {
         })
     }
 
-    fn insert_node(&self, node: Node) -> bool {
+    async fn insert_node(&self, node: Node) -> bool {
         let mut routing_table = self.routing_table.borrow_mut();
         if routing_table.insert_node(node) {
             drop(routing_table);
@@ -101,7 +101,7 @@ impl Dht {
             let node_id = node.id;
             tokio_uring::spawn(async move {
                 tokio::time::sleep(REFRESH_TIMEOUT).await;
-                let mut routing_table = routing_table_clone.borrow_mut();
+                let routing_table = routing_table_clone.borrow_mut();
                 if let Some(bucket) = routing_table.get_bucket(&node_id) {
                     if OffsetDateTime::now_utc() - bucket.last_changed() >= REFRESH_TIMEOUT {
                         // refresh bucket?
@@ -111,12 +111,70 @@ impl Dht {
             });
             true
         } else {
+            // A bucket must exist at this point
+            let bucket = routing_table.get_bucket(&node.id).unwrap();
+            let our_id = routing_table.own_id;
+            let mut unknown_nodes: Vec<_> = bucket
+                .nodes()
+                .cloned()
+                .filter(|node| node.current_status() == NodeStatus::Unknown)
+                .collect();
+            unknown_nodes.sort_unstable_by(|a, b| a.last_seen.cmp(&b.last_seen));
+
+            drop(bucket);
+            drop(routing_table);
+            'outer: loop {
+                // track if all nodes are good
+                let mut all_good = false;
+                // Ping all unknown nodes to see if they might be replaced until either all are
+                // good or a bad one is found
+                for mut node in unknown_nodes
+                    .iter_mut()
+                    .filter(|node| node.current_status() == NodeStatus::Unknown)
+                {
+                    all_good = true;
+                    match self.transport.ping(&our_id, &node).await {
+                        Ok(_) => {
+                            node.last_seen = OffsetDateTime::now_utc();
+                            node.last_status = NodeStatus::Good;
+                        }
+                        Err(err) if err.is_timeout() && node.last_status == NodeStatus::Good => {
+                            node.last_status = NodeStatus::Unknown;
+                        }
+                        Err(err) if err.is_timeout() && node.last_status == NodeStatus::Unknown => {
+                            node.last_status = NodeStatus::Bad;
+                            break 'outer;
+                        }
+                        Err(err) if node.last_status == NodeStatus::Good => {
+                            node.last_status = NodeStatus::Unknown;
+                            node.last_seen = OffsetDateTime::now_utc();
+                        }
+                        Err(err) => {
+                            node.last_status = NodeStatus::Bad;
+                            node.last_seen = OffsetDateTime::now_utc();
+                            break 'outer;
+                        }
+                    }
+                }
+                if all_good {
+                    break;
+                }
+            }
+
+            let mut routing_table = self.routing_table.borrow_mut();
+            let bucket = routing_table.get_bucket_mut(&node.id).unwrap();
+            // These buckets are very small so fine with O(N^2) here for now
+            for updated_node in unknown_nodes {
+                for node in bucket.nodes_mut() {
+                    if updated_node.id == node.id {
+                        *node = updated_node;
+                    }
+                }
+            }
             false
         }
     }
-    // continue on this
-    // then add a "insert_node" method to this dht which inserts + starts refresh task wrap routing
-    // table in rc + refcell
+
     pub async fn start(&self) -> anyhow::Result<()> {
         // Find closest nodes
         // 1. look in bootstrap for self
@@ -144,19 +202,27 @@ impl Dht {
                         // Unwrap is fine here since it should always exists a node with the given
                         // id in the table at this point
                         let queried_node = routing_table.get_mut(&next_to_query.id).unwrap();
-                        queried_node.status = NodeStatus::Good;
+                        queried_node.last_status = NodeStatus::Good;
                         reponse
                     }
                     Err(err) => {
                         log::warn!("Node {next_to_query:?} ping failed: {err}");
-                        match next_to_query.status {
-                            NodeStatus::Good | NodeStatus::Unknown => {
+                        match next_to_query.last_status {
+                            NodeStatus::Good => {
                                 let mut routing_table = self.routing_table.borrow_mut();
                                 // Unwrap is fine here since it should always exists a node with the given
                                 // id in the table at this point
                                 let queried_node =
                                     routing_table.get_mut(&next_to_query.id).unwrap();
-                                queried_node.status = NodeStatus::Bad;
+                                queried_node.last_status = NodeStatus::Unknown;
+                            }
+                            NodeStatus::Unknown => {
+                                let mut routing_table = self.routing_table.borrow_mut();
+                                // Unwrap is fine here since it should always exists a node with the given
+                                // id in the table at this point
+                                let queried_node =
+                                    routing_table.get_mut(&next_to_query.id).unwrap();
+                                queried_node.last_status = NodeStatus::Bad;
                             }
                             NodeStatus::Bad => {
                                 self.routing_table.borrow_mut().remove(&next_to_query)?;
@@ -168,7 +234,7 @@ impl Dht {
 
                 log::debug!("Got nodes from: {next_to_query:?}");
                 for node in response.nodes.into_iter() {
-                    if self.insert_node(node) {
+                    if self.insert_node(node).await {
                         log::debug!("Inserted node");
                     }
                 }
