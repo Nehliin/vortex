@@ -29,11 +29,13 @@ impl Bucket {
         let empty_spot = self.nodes.iter_mut().find(|spot| spot.is_none());
         if empty_spot.is_some() {
             return empty_spot;
+        } else {
+            drop(empty_spot);
+            self.nodes.iter_mut().find(|spot| {
+                spot.map(|node| node.last_status == NodeStatus::Bad)
+                    .unwrap_or(true)
+            })
         }
-        self.nodes.iter_mut().find(|spot| {
-            spot.map(|node| node.status == NodeStatus::Bad)
-                .unwrap_or(true)
-        })
     }
 
     #[inline]
@@ -178,30 +180,30 @@ impl RoutingTable {
         let closest = self
             .buckets
             .iter_mut()
-            .flat_map(|bucket| &bucket.nodes)
+            .flat_map(|bucket| &mut bucket.nodes)
             .min_by_key(|node| {
-                node.as_mut()
+                node.as_ref()
                     .map(|node| info_hash.distance(&node.id))
                     .unwrap_or(ID_MAX)
             })? // never empty
             .as_mut()?;
 
         // Santify check TODO FIX AND REMOVE
-        let mut found = 0;
+        /*let mut found = 0;
         for bucket in self.buckets.iter() {
             if bucket.covers(&closest.id) {
                 found += 1;
                 assert!(bucket.nodes.contains(&Some(closest.clone())));
             }
         }
-        assert_eq!(found, 1);
+        assert_eq!(found, 1);*/
         Some(closest)
     }
 
     pub fn get_mut(&mut self, id: &NodeId) -> Option<&mut Node> {
         self.buckets
             .iter_mut()
-            .flat_map(|bucket| &bucket.nodes)
+            .flat_map(|bucket| &mut bucket.nodes)
             .find(|node| node.map_or(false, |node| node.id == *id))?
             .as_mut()
     }
@@ -209,6 +211,18 @@ impl RoutingTable {
     pub fn get_bucket(&self, id: &NodeId) -> Option<&Bucket> {
         self.buckets
             .iter()
+            .find(|bucket| bucket.covers(id))
+            .filter(|bucket| {
+                bucket
+                    .nodes
+                    .iter()
+                    .any(|node| node.map_or(false, |node| node.id == *id))
+            })
+    }
+
+    pub fn get_bucket_mut(&mut self, id: &NodeId) -> Option<&mut Bucket> {
+        self.buckets
+            .iter_mut()
             .find(|bucket| bucket.covers(id))
             .filter(|bucket| {
                 bucket
@@ -280,7 +294,7 @@ mod test {
 
     #[test]
     fn test_get_closest() {
-        let routing_table: RoutingTable =
+        let mut routing_table: RoutingTable =
             serde_json::from_reader(std::fs::File::open("get_closest.json").unwrap()).unwrap();
         for bucket_a in routing_table.buckets.iter() {
             verify_bucket(bucket_a);
@@ -299,11 +313,12 @@ mod test {
         ];
         let info_hash = NodeId::from(info_bytes);
 
-        let closest = routing_table.get_closest(&info_hash).unwrap();
+        let buckets_clone = routing_table.buckets.clone();
+        let closest = routing_table.get_closest_mut(&info_hash).unwrap();
 
         // Santify check
         let mut found = 0;
-        for bucket in routing_table.buckets.iter() {
+        for bucket in buckets_clone.iter() {
             if bucket.covers(&info_hash) {
                 found += 1;
                 assert!(bucket.nodes.contains(&Some(closest.clone())));
@@ -335,6 +350,7 @@ mod test {
                 id: id.as_slice().into(),
                 addr: "0.0.0.0:0".parse().unwrap(),
                 last_seen: OffsetDateTime::now_utc(),
+                last_status: NodeStatus::Unknown,
             });
 
             if i < 17 {
@@ -397,6 +413,7 @@ mod test {
                 id: id.as_slice().into(),
                 addr: "0.0.0.0:0".parse().unwrap(),
                 last_seen: OffsetDateTime::now_utc(),
+                last_status: NodeStatus::Unknown,
             });
         }
 
