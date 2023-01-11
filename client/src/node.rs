@@ -1,6 +1,7 @@
 use std::{
     net::SocketAddr,
     ops::{Add, Deref, Sub},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -150,8 +151,27 @@ pub enum NodeStatus {
 pub struct Node {
     pub id: NodeId,
     pub addr: SocketAddr,
-    pub status: NodeStatus,
+    pub last_status: NodeStatus,
     pub last_seen: OffsetDateTime,
+}
+
+impl Node {
+    // TODO: maybe &mut and update it here
+    pub fn current_status(&self) -> NodeStatus {
+        match self.last_status {
+            NodeStatus::Good => {
+                let stale =
+                    OffsetDateTime::now_utc() - self.last_seen > Duration::from_secs(15 * 60);
+                if stale {
+                    NodeStatus::Unknown
+                } else {
+                    NodeStatus::Good
+                }
+            }
+            NodeStatus::Unknown => NodeStatus::Unknown,
+            NodeStatus::Bad => NodeStatus::Bad,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,5 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     rc::Rc,
     time::Duration,
@@ -71,6 +70,10 @@ pub struct Error {
 }
 
 impl Error {
+    // Perhaps with code constants instead
+    pub fn is_timeout(&self) -> bool {
+        self.code == 408
+    }
     fn generic(description: String) -> Self {
         Self {
             code: 201,
@@ -226,7 +229,7 @@ fn parse_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
                 id,
                 addr: (ip, port).into(),
                 last_seen: OffsetDateTime::now_utc(),
-                status: NodeStatus::Unknown,
+                last_status: NodeStatus::Unknown,
             }
         })
         .collect()
@@ -372,7 +375,7 @@ impl KrpcSocket {
         let (res, _) = self.socket.send_to(encoded, node.addr).await;
         res.unwrap();
 
-        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        match tokio::time::timeout(Duration::from_secs(3), rx).await {
             Ok(Ok(Ok(response))) => Ok(response),
             Err(_elapsed) => Err(Error {
                 code: 408,
