@@ -1,11 +1,9 @@
-use std::time::Duration;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde_derive::{Deserialize, Serialize};
+use slotmap::{new_key_type, DenseSlotMap, Key};
 use time::OffsetDateTime;
 
 use crate::{
-    krpc::KrpcSocket,
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
 };
 
@@ -24,6 +22,11 @@ impl Bucket {
         &self.min <= node_id && node_id < &self.max
     }
 
+    #[inline(always)]
+    pub fn random_id(&self) -> NodeId {
+        NodeId::new_in_range(&self.min, &self.max)
+    }
+
     #[inline]
     fn empty_spot(&mut self) -> Option<&mut Option<Node>> {
         let empty_spot = self.nodes.iter_mut().find(|spot| spot.is_none());
@@ -32,6 +35,20 @@ impl Bucket {
         } else {
             drop(empty_spot);
             self.nodes.iter_mut().find(|spot| {
+                spot.map(|node| node.last_status == NodeStatus::Bad)
+                    .unwrap_or(true)
+            })
+        }
+    }
+
+    #[inline]
+    fn is_full(&self) -> bool {
+        let empty_spot = self.nodes.iter().find(|spot| spot.is_none());
+        if empty_spot.is_some() {
+            return false;
+        } else {
+            drop(empty_spot);
+            self.nodes.iter().any(|spot| {
                 spot.map(|node| node.last_status == NodeStatus::Bad)
                     .unwrap_or(true)
             })
@@ -101,49 +118,62 @@ impl Bucket {
     }
 }
 
+new_key_type! {
+    pub struct BucketId;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingTable {
-    pub buckets: Vec<Bucket>,
+    pub buckets: DenseSlotMap<BucketId, Bucket>,
     pub own_id: NodeId,
 }
 
 impl RoutingTable {
     pub fn new(own_id: NodeId) -> RoutingTable {
-        RoutingTable {
-            buckets: vec![Bucket {
-                min: ID_ZERO,
-                max: ID_MAX,
-                nodes: [
-                    None, None, None, None, None, None, None, None, None, None, None, None, None,
-                    None, None, None,
-                ],
-                last_changed: OffsetDateTime::now_utc(),
-            }],
-            own_id,
-        }
+        let mut buckets = DenseSlotMap::with_key();
+        buckets.insert(Bucket {
+            min: ID_ZERO,
+            max: ID_MAX,
+            nodes: [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None,
+            ],
+            last_changed: OffsetDateTime::now_utc(),
+        });
+        RoutingTable { buckets, own_id }
     }
 
-    pub fn insert_node(&mut self, node: Node) -> bool {
-        for bucket in self.buckets.iter_mut() {
+    pub fn insert_node(&mut self, node: Node) -> [BucketId; 2] {
+        let mut result = [BucketId::null(), BucketId::null()];
+        for (bucket_id, bucket) in self.buckets.iter_mut() {
             if bucket.covers(&node.id) {
                 if let Some(empty_spot) = bucket.empty_spot() {
                     *empty_spot = Some(node);
                     bucket.last_changed = OffsetDateTime::now_utc();
-                    return true;
+                    // If the first result is null there was no recursion
+                    // so we need to set the bucket id here. If this is non null
+                    // we know the recursion happend so both result ids have already been set
+                    if result[0].is_null() {
+                        result[0] = bucket_id;
+                    }
+                    return result;
                 } else if bucket.covers(&self.own_id) {
+                    result[0] = bucket_id;
                     let new_bucket = bucket.split();
-                    self.buckets.push(new_bucket);
+                    result[1] = self.buckets.insert(new_bucket);
                     return self.insert_node(node);
                 }
             }
         }
-        false
+        result
     }
+
+    //    fn insert_node_helper(&mut self, node: Node, mut result: [BucketId; 2], )
 
     // TODO: properly add last_changed to buckets and
     // periodically ping nodes accoriding to
     // https://www.bittorrent.org/beps/bep_0005.html
-    pub async fn ping_all_nodes(&mut self, service: &KrpcSocket, progress: &MultiProgress) {
+    /*pub async fn ping_all_nodes(&mut self, service: &KrpcSocket, progress: &MultiProgress) {
         // Will live long enough and this is temporary
         let this: &'static mut Self = unsafe { std::mem::transmute(self) };
         let ping_progress = progress.add(ProgressBar::new_spinner());
@@ -173,13 +203,14 @@ impl RoutingTable {
             fut.await.unwrap();
         }
         ping_progress.finish_with_message("Pinged all nodes");
-    }
+    }*/
 
     // TODO maybe not use nodeid as type for info_hash
     pub fn get_closest_mut(&mut self, info_hash: &NodeId) -> Option<&mut Node> {
         let closest = self
             .buckets
             .iter_mut()
+            .map(|(_, v)| v)
             .flat_map(|bucket| &mut bucket.nodes)
             .min_by_key(|node| {
                 node.as_ref()
@@ -200,19 +231,24 @@ impl RoutingTable {
         Some(closest)
     }
 
+    pub fn is_full(&self, bucket: &Bucket) -> bool {
+        !bucket.covers(&self.own_id) && !bucket.is_full()
+    }
+
     pub fn get_mut(&mut self, id: &NodeId) -> Option<&mut Node> {
         self.buckets
             .iter_mut()
+            .map(|(_, bucket)| bucket)
             .flat_map(|bucket| &mut bucket.nodes)
             .find(|node| node.map_or(false, |node| node.id == *id))?
             .as_mut()
     }
 
-    pub fn get_bucket(&self, id: &NodeId) -> Option<&Bucket> {
+    pub fn find_bucket(&self, id: &NodeId) -> Option<(BucketId, &Bucket)> {
         self.buckets
             .iter()
-            .find(|bucket| bucket.covers(id))
-            .filter(|bucket| {
+            .find(|(_, bucket)| bucket.covers(id))
+            .filter(|(_, bucket)| {
                 bucket
                     .nodes
                     .iter()
@@ -220,45 +256,23 @@ impl RoutingTable {
             })
     }
 
-    pub fn get_bucket_mut(&mut self, id: &NodeId) -> Option<&mut Bucket> {
-        self.buckets
-            .iter_mut()
-            .find(|bucket| bucket.covers(id))
-            .filter(|bucket| {
-                bucket
-                    .nodes
-                    .iter()
-                    .any(|node| node.map_or(false, |node| node.id == *id))
-            })
+    #[inline(always)]
+    pub fn get_bucket_mut(&mut self, bucket_id: BucketId) -> Option<&mut Bucket> {
+        self.buckets.get_mut(bucket_id)
     }
 
     pub fn remove(&mut self, to_remove: &Node) -> anyhow::Result<()> {
         let to_remove = self
             .buckets
             .iter_mut()
+            .map(|(_, bucket)| bucket)
             .flat_map(|bucket| bucket.nodes.iter_mut())
             .find(|node| node.as_ref().map(|node| node == to_remove).unwrap_or(false))
             .ok_or_else(|| anyhow::anyhow!("Node not found in routing table"))?;
 
+        // TODO: Remove buckets?
         to_remove.take();
         Ok(())
-    }
-
-    pub fn force_insert(&mut self, node: Node) -> bool {
-        if !self.insert_node(node.clone()) {
-            // TODO: naive
-            for bucket in self.buckets.iter_mut() {
-                if bucket.covers(&node.id) {
-                    // has to be full
-                    let mut to_remove = bucket.nodes.iter_mut().max_by_key(|bucket_node| {
-                        bucket_node.as_ref().unwrap().id.distance(&node.id)
-                    });
-                    **to_remove.as_mut().unwrap() = Some(node);
-                    return true;
-                }
-            }
-        }
-        false
     }
 }
 
@@ -296,9 +310,9 @@ mod test {
     fn test_get_closest() {
         let mut routing_table: RoutingTable =
             serde_json::from_reader(std::fs::File::open("get_closest.json").unwrap()).unwrap();
-        for bucket_a in routing_table.buckets.iter() {
+        for (_, bucket_a) in routing_table.buckets.iter() {
             verify_bucket(bucket_a);
-            for bucket_b in routing_table.buckets.iter() {
+            for (_, bucket_b) in routing_table.buckets.iter() {
                 if bucket_b == bucket_a {
                     continue;
                 }
@@ -318,7 +332,7 @@ mod test {
 
         // Santify check
         let mut found = 0;
-        for bucket in buckets_clone.iter() {
+        for (_, bucket) in buckets_clone.iter() {
             if bucket.covers(&info_hash) {
                 found += 1;
                 assert!(bucket.nodes.contains(&Some(closest.clone())));
@@ -327,7 +341,7 @@ mod test {
         assert_eq!(found, 1);
     }
 
-    #[test]
+    /*#[test]
     fn test_bucket_split_basic() {
         let mut routing_table = RoutingTable::new(ID_ZERO);
 
@@ -384,14 +398,14 @@ mod test {
                 assert_eq!(min, end.clone() / 2);
                 assert_eq!(routing_table.buckets[1].max, ID_MAX);
 
-                for bucket in routing_table.buckets.iter() {
+                for (_, bucket) in routing_table.buckets.iter() {
                     verify_bucket(bucket);
                     assert!(bucket.nodes.len() == 16);
                 }
                 assert_non_overlapping(&routing_table.buckets[0], &routing_table.buckets[1])
             }
         }
-    }
+    }*/
 
     #[test]
     fn test_only_split_own_id() {
@@ -417,9 +431,9 @@ mod test {
             });
         }
 
-        for bucket_a in routing_table.buckets.iter() {
+        for (_, bucket_a) in routing_table.buckets.iter() {
             verify_bucket(bucket_a);
-            for bucket_b in routing_table.buckets.iter() {
+            for (_, bucket_b) in routing_table.buckets.iter() {
                 if bucket_b == bucket_a {
                     continue;
                 }
@@ -450,5 +464,15 @@ mod test {
         verify_bucket(&bucket);
         verify_bucket(&new_bucket);
         assert_non_overlapping(&bucket, &new_bucket);
+    }
+
+    #[test]
+    fn is_bucket_full() {
+        assert!(false);
+    }
+
+    #[test]
+    fn empty_spot() {
+        assert!(false);
     }
 }

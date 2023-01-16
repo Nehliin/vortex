@@ -460,7 +460,7 @@ impl KrpcSocket {
             e: None,
         };
 
-        // Apparently nodes don't follow spec?
+        // get_peers may return other nodes 
         match self.send_req(node, req).await? {
             Response::GetPeers {
                 id,

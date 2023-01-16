@@ -17,7 +17,7 @@ use trust_dns_resolver::{
 use crate::{
     krpc::{Error, KrpcSocket},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
-    routing_table::RoutingTable,
+    routing_table::{Bucket, RoutingTable},
 };
 
 // Bootstrap nodes
@@ -61,10 +61,13 @@ async fn bootstrap(routing_table: &mut RoutingTable, service: &KrpcSocket, boost
     let response = service.ping(&routing_table.own_id, &node).await.unwrap();
     node.id = response.id;
     routing_table.insert_node(node);
+    // This should be done with the correct "insert_node"
+    todo!()
 }
 
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+// TODO: refresh our own id occasionally as well
 pub struct Dht {
     transport: KrpcSocket,
     routing_table: Rc<RefCell<RoutingTable>>,
@@ -93,15 +96,66 @@ impl Dht {
         })
     }
 
+    // TODO: update last refreshed timestamp
+    // can't borrow bucket here
+    async fn refresh_bucket(&self, target_id: &NodeId) {
+        // 1. Generate random id within bucket range
+        let id = bucket.random_id();
+        let (our_id, is_full) = {
+            let routing_table = self.routing_table.borrow();
+            (routing_table.own_id, routing_table.is_full(bucket))
+        };
+
+        // 2. if the bucket is full (and not splittable) just ping all the nodes and update timestamps
+        // (Försök pinga bara candidate noden men om det failar fortsätt pinga de andra)
+        // kan göra samma när man anropar get_peers
+        if is_full {
+            let candiate = bucket.nodes().min_by_key(|node| id.distance(&node.id))
+            for node in bucket.nodes() {
+                //let routing_table_clone = Rc::clone(&self.routing_table);
+                let transport = self.transport.clone();
+                let mut node = *node;
+                tokio_uring::spawn(async move {
+                    match transport.ping(&our_id, &node).await {
+                        Ok(_) => {
+                            node.last_seen = OffsetDateTime::now_utc();
+                            node.last_status = NodeStatus::Good;
+                        }
+                        Err(err) if err.is_timeout() && node.last_status == NodeStatus::Good => {
+                            node.last_status = NodeStatus::Unknown;
+                        }
+                        Err(err) if err.is_timeout() && node.last_status == NodeStatus::Unknown => {
+                            node.last_status = NodeStatus::Bad;
+                        }
+                        Err(_err) if node.last_status == NodeStatus::Good => {
+                            node.last_status = NodeStatus::Unknown;
+                            node.last_seen = OffsetDateTime::now_utc();
+                        }
+                        Err(_err) => {
+                            node.last_status = NodeStatus::Bad;
+                            node.last_seen = OffsetDateTime::now_utc();
+                        }
+                    }
+                    node
+                });
+            }
+        } else {
+            // 3. if the bucket is not full run find nodes (or get peers) on the node closest to the target and insert
+            // found nodes
+        }
+    }
+
     async fn insert_node(&self, node: Node) -> bool {
         let mut routing_table = self.routing_table.borrow_mut();
+        // Insert node checks if it's "splittable"
         if routing_table.insert_node(node) {
             drop(routing_table);
             let routing_table_clone = Rc::clone(&self.routing_table);
             let node_id = node.id;
+            // TODO: don't spawn these unconditionally since only one is relevant at a time
             tokio_uring::spawn(async move {
                 tokio::time::sleep(REFRESH_TIMEOUT).await;
-                let routing_table = routing_table_clone.borrow_mut();
+                let mut routing_table = routing_table_clone.borrow_mut();
                 if let Some(bucket) = routing_table.get_bucket(&node_id) {
                     if OffsetDateTime::now_utc() - bucket.last_changed() >= REFRESH_TIMEOUT {
                         // refresh bucket?
@@ -112,7 +166,7 @@ impl Dht {
             true
         } else {
             // A bucket must exist at this point
-            let bucket = routing_table.get_bucket(&node.id).unwrap();
+            let (bucket_id, bucket) = routing_table.find_bucket(&node.id).unwrap();
             let our_id = routing_table.own_id;
             let mut unknown_nodes: Vec<_> = bucket
                 .nodes()
@@ -139,17 +193,19 @@ impl Dht {
                             node.last_status = NodeStatus::Good;
                         }
                         Err(err) if err.is_timeout() && node.last_status == NodeStatus::Good => {
+                            all_good = false;
                             node.last_status = NodeStatus::Unknown;
                         }
                         Err(err) if err.is_timeout() && node.last_status == NodeStatus::Unknown => {
                             node.last_status = NodeStatus::Bad;
                             break 'outer;
                         }
-                        Err(err) if node.last_status == NodeStatus::Good => {
+                        Err(_err) if node.last_status == NodeStatus::Good => {
+                            all_good = false;
                             node.last_status = NodeStatus::Unknown;
                             node.last_seen = OffsetDateTime::now_utc();
                         }
-                        Err(err) => {
+                        Err(_err) => {
                             node.last_status = NodeStatus::Bad;
                             node.last_seen = OffsetDateTime::now_utc();
                             break 'outer;
@@ -162,7 +218,7 @@ impl Dht {
             }
 
             let mut routing_table = self.routing_table.borrow_mut();
-            let bucket = routing_table.get_bucket_mut(&node.id).unwrap();
+            let bucket = routing_table.get_bucket_mut(bucket_id).unwrap();
             // These buckets are very small so fine with O(N^2) here for now
             for updated_node in unknown_nodes {
                 for node in bucket.nodes_mut() {

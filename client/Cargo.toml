@@ -24,6 +24,7 @@ sha1 = "0.10.1"
 trust-dns-resolver = "0.21"
 log = "0.4"
 env_logger = "0.9"
+slotmap = { version = "1.0.6", features = ["serde"]}
 base32 = "0.4"
 libc = "0.2"
 bittorrent = { path = "../bittorrent" }

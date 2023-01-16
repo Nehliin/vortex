@@ -5,9 +5,11 @@ use std::{
 };
 
 use bytes::Bytes;
+use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+// TODO: migrate to u128 + u32
 // BE endian large nums that
 // can use lexographical order
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Deserialize, Serialize)]
@@ -44,6 +46,16 @@ impl NodeId {
 
     pub fn as_bytes(&self) -> [u8; 20] {
         self.0
+    }
+
+    /// Generates a new node id in range [min, max)
+    pub fn new_in_range(min: &NodeId, max: &NodeId) -> NodeId {
+        let mut delta = max - min;
+        let mut rng = rand::thread_rng();
+        for delta_byte in delta.0.iter_mut() {
+            *delta_byte = (rng.gen::<f32>() * *delta_byte as f32) as u8;
+        }
+        &delta + min
     }
 }
 
@@ -103,7 +115,7 @@ impl Sub for &NodeId {
 
 #[inline]
 pub fn midpoint(low: &NodeId, high: &NodeId) -> NodeId {
-    debug_assert!(low < high);
+    assert!(low < high);
     let mut diff = high - low;
     diff.halve();
     low + &diff
