@@ -279,6 +279,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dht"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bytes",
+ "env_logger",
+ "futures",
+ "indicatif",
+ "log",
+ "magnet-url",
+ "num-bigint 0.4.3",
+ "rand 0.8.5",
+ "serde",
+ "serde_bencoded",
+ "serde_bytes",
+ "serde_derive",
+ "serde_json",
+ "sha1",
+ "slotmap",
+ "time 0.3.17",
+ "tokio",
+ "tokio-uring",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
