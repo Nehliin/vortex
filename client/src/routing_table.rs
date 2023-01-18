@@ -1,11 +1,8 @@
-
 use serde_derive::{Deserialize, Serialize};
 use slotmap::{new_key_type, DenseSlotMap, Key};
 use time::OffsetDateTime;
 
-use crate::{
-    node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
-};
+use crate::node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO};
 
 // TODO implement PartialEq manually to only check min,max
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -18,7 +15,7 @@ pub struct Bucket {
 
 impl Bucket {
     #[inline]
-    fn covers(&self, node_id: &NodeId) -> bool {
+    pub fn covers(&self, node_id: &NodeId) -> bool {
         &self.min <= node_id && node_id < &self.max
     }
 
@@ -29,32 +26,29 @@ impl Bucket {
 
     #[inline]
     fn empty_spot(&mut self) -> Option<&mut Option<Node>> {
-        let empty_spot = self.nodes.iter_mut().find(|spot| spot.is_none());
-        if empty_spot.is_some() {
-            return empty_spot;
-        } else {
-            drop(empty_spot);
+        if !self.is_full() {
             self.nodes.iter_mut().find(|spot| {
                 spot.map(|node| node.last_status == NodeStatus::Bad)
                     .unwrap_or(true)
             })
+        } else {
+            None
         }
     }
 
     #[inline]
-    fn is_full(&self) -> bool {
-        let empty_spot = self.nodes.iter().find(|spot| spot.is_none());
-        if empty_spot.is_some() {
-            return false;
+    pub fn is_full(&self) -> bool {
+        if self.nodes.iter().any(|spot| spot.is_none()) {
+            false
         } else {
-            drop(empty_spot);
-            self.nodes.iter().any(|spot| {
+            !self.nodes.iter().any(|spot| {
                 spot.map(|node| node.last_status == NodeStatus::Bad)
                     .unwrap_or(true)
             })
         }
     }
 
+    // TODO Perhaps filter bad nodes here?
     #[inline]
     pub fn nodes(&self) -> impl Iterator<Item = &Node> {
         self.nodes
@@ -62,6 +56,7 @@ impl Bucket {
             .filter_map(|maybe_node| maybe_node.as_ref())
     }
 
+    // TODO Perhaps filter bad nodes here?
     #[inline]
     pub fn nodes_mut(&mut self) -> impl Iterator<Item = &mut Node> {
         self.nodes
@@ -115,6 +110,11 @@ impl Bucket {
     #[inline]
     pub fn last_changed(&self) -> OffsetDateTime {
         self.last_changed
+    }
+
+    #[inline]
+    pub fn update_last_changed(&mut self) {
+        self.last_changed = OffsetDateTime::now_utc();
     }
 }
 
@@ -229,10 +229,6 @@ impl RoutingTable {
         }
         assert_eq!(found, 1);*/
         Some(closest)
-    }
-
-    pub fn is_full(&self, bucket: &Bucket) -> bool {
-        !bucket.covers(&self.own_id) && !bucket.is_full()
     }
 
     pub fn get_mut(&mut self, id: &NodeId) -> Option<&mut Node> {

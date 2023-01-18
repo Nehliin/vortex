@@ -16,7 +16,7 @@ use trust_dns_resolver::{
 };
 
 use crate::{
-    krpc::{Error, KrpcSocket},
+    krpc::{Error, FindNodesResponse, KrpcSocket},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
     routing_table::{self, Bucket, BucketId, RoutingTable},
 };
@@ -102,6 +102,8 @@ impl Dht {
     // also remember to mark as changed after pings and stuff
     async fn refresh_bucket(&self, bucket_id: BucketId) {
         let mut routing_table = self.routing_table.borrow_mut();
+        let our_id = routing_table.own_id;
+
         let Some(bucket) = routing_table.get_bucket_mut(bucket_id) else {
             log::error!("Bucket with id {bucket_id:?} to be refreshed no longer exist");
             return;
@@ -112,50 +114,94 @@ impl Dht {
             log::debug!("Refresh task for bucket with id {bucket_id:?} is stale, skipping refresh");
             return;
         }
+
+        bucket.update_last_changed();
+
         // 1. Generate random id within bucket range
         let id = bucket.random_id();
-        let (our_id, is_full) = {
-            let routing_table = self.routing_table.borrow();
-            (routing_table.own_id, routing_table.is_full(bucket))
-        };
 
+        let is_full = !bucket.covers(&our_id) && bucket.is_full();
+
+        let Some(candiate) = bucket
+            .nodes_mut()
+            .filter(|node| node.last_status != NodeStatus::Bad)
+            .min_by_key(|node| id.distance(&node.id)) else {
+            // TODO: Remove bucket
+            log::error!("No nodes left in bucket, refresh failed");
+            return;
+        };
+        let mut need_refresh_scheduled = true;
         // 2. if the bucket is full (and not splittable) just ping all the nodes and update timestamps
         // (Försök pinga bara candidate noden men om det failar fortsätt pinga de andra)
         // kan göra samma när man anropar get_peers
         if is_full {
-            let candiate = bucket.nodes().min_by_key(|node| id.distance(&node.id));
-            for node in bucket.nodes() {
-                //let routing_table_clone = Rc::clone(&self.routing_table);
-                let transport = self.transport.clone();
-                let mut node = *node;
-                tokio_uring::spawn(async move {
-                    match transport.ping(&our_id, &node).await {
-                        Ok(_) => {
-                            node.last_seen = OffsetDateTime::now_utc();
-                            node.last_status = NodeStatus::Good;
-                        }
-                        Err(err) if err.is_timeout() && node.last_status == NodeStatus::Good => {
-                            node.last_status = NodeStatus::Unknown;
-                        }
-                        Err(err) if err.is_timeout() && node.last_status == NodeStatus::Unknown => {
-                            node.last_status = NodeStatus::Bad;
-                        }
-                        Err(_err) if node.last_status == NodeStatus::Good => {
-                            node.last_status = NodeStatus::Unknown;
-                            node.last_seen = OffsetDateTime::now_utc();
-                        }
-                        Err(_err) => {
-                            node.last_status = NodeStatus::Bad;
-                            node.last_seen = OffsetDateTime::now_utc();
-                        }
-                    }
-                    node
-                });
+            match self.transport.ping(&our_id, &candiate).await {
+                Ok(_) => {
+                    candiate.last_seen = OffsetDateTime::now_utc();
+                    candiate.last_status = NodeStatus::Good;
+                }
+                Err(err) if err.is_timeout() && candiate.last_status == NodeStatus::Good => {
+                    candiate.last_status = NodeStatus::Unknown;
+                }
+                Err(err) if err.is_timeout() && candiate.last_status == NodeStatus::Unknown => {
+                    candiate.last_status = NodeStatus::Bad;
+                }
+                Err(_err) if candiate.last_status == NodeStatus::Good => {
+                    candiate.last_status = NodeStatus::Unknown;
+                    candiate.last_seen = OffsetDateTime::now_utc();
+                }
+                Err(_err) => {
+                    candiate.last_status = NodeStatus::Bad;
+                    candiate.last_seen = OffsetDateTime::now_utc();
+                }
             }
         } else {
             // 3. if the bucket is not full run find nodes (or get peers) on the node closest to the target and insert
-            // found nodes
+            // found nodes (TODO: See if get_peers is more widely supported and perhaps use that
+            // instead)
+            match self.transport.find_nodes(&our_id, &id, &candiate).await {
+                Ok(FindNodesResponse { id: _, nodes }) => {
+                    candiate.last_seen = OffsetDateTime::now_utc();
+                    candiate.last_status = NodeStatus::Good;
+                    for node in nodes {
+                        if self.insert_node(node).await {
+                            // Insert will schedule refreshes on it's own
+                            need_refresh_scheduled = false;
+                            log::debug!("Refreshed bucket found new node: {:?}", node.id);
+                        }
+                    }
+                }
+                Err(err) if err.is_timeout() && candiate.last_status == NodeStatus::Good => {
+                    candiate.last_status = NodeStatus::Unknown;
+                }
+                Err(err) if err.is_timeout() && candiate.last_status == NodeStatus::Unknown => {
+                    candiate.last_status = NodeStatus::Bad;
+                }
+                Err(_err) if candiate.last_status == NodeStatus::Good => {
+                    candiate.last_status = NodeStatus::Unknown;
+                    candiate.last_seen = OffsetDateTime::now_utc();
+                }
+                Err(_err) => {
+                    candiate.last_status = NodeStatus::Bad;
+                    candiate.last_seen = OffsetDateTime::now_utc();
+                }
+            }
         }
+        if need_refresh_scheduled {
+            // Schedule new refresh later on
+            self.schedule_refresh(bucket_id);
+        }
+    }
+
+    fn schedule_refresh(&self, bucket_id: BucketId) {
+        assert!(!bucket_id.is_null());
+        let this = self.clone();
+        // TODO: don't spawn these unconditionally since only one is relevant at a time
+        tokio_uring::spawn(async move {
+            log::debug!("Spawning refresh task for bucket with id {bucket_id:?}");
+            tokio::time::sleep(REFRESH_TIMEOUT).await;
+            this.refresh_bucket(bucket_id).await;
+        });
     }
 
     async fn insert_node(&self, node: Node) -> bool {
@@ -168,13 +214,7 @@ impl Dht {
         for bucket_id in updated_buckets {
             // If the bucket was updated
             if !bucket_id.is_null() {
-                let this = self.clone();
-                // TODO: don't spawn these unconditionally since only one is relevant at a time
-                tokio_uring::spawn(async move {
-                    log::debug!("Spawning refresh task for bucket with id {bucket_id:?}");
-                    tokio::time::sleep(REFRESH_TIMEOUT).await;
-                    this.refresh_bucket(bucket_id).await;
-                });
+                self.schedule_refresh(bucket_id);
                 inserted = true;
             } else {
                 // A bucket must exist at this point
