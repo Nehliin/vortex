@@ -47,24 +47,6 @@ fn save_table(path: &Path, table: &RoutingTable) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn bootstrap(
-    routing_table: &mut RoutingTable,
-    service: &KrpcSocket,
-    boostrap_addr: SocketAddr,
-) {
-    let mut node = Node {
-        id: ID_ZERO,
-        addr: boostrap_addr,
-        last_seen: OffsetDateTime::now_utc(),
-        last_status: NodeStatus::Unknown,
-    };
-
-    let response = service.ping(&routing_table.own_id, &node).await.unwrap();
-    node.id = response.id;
-    routing_table.insert_node(node);
-    // This should be done with the correct "insert_node"
-    todo!()
-}
 
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
@@ -78,22 +60,48 @@ pub struct Dht {
 impl Dht {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
         let transport = KrpcSocket::new(bind_addr).await?;
-        let mut routing_table;
-        if let Some(table) = load_table(Path::new("routing_table.json")) {
-            log::info!("Loading table!");
-            routing_table = table;
+        let routing_table = if let Some(table) = load_table(Path::new("routing_table.json")) {
+            log::info!("Loading existing table");
+            table
         } else {
-            let mut ip = tokio::net::lookup_host(BOOTSTRAP).await.unwrap();
-            let ip = ip.next().unwrap();
             let node_id = generate_node_id();
-            routing_table = RoutingTable::new(node_id);
-            bootstrap(&mut routing_table, &transport, ip).await;
-        }
+            RoutingTable::new(node_id)
+        };
 
-        Ok(Dht {
+        let dht = Dht {
             transport,
             routing_table: Rc::new(RefCell::new(routing_table)),
-        })
+        };
+
+        log::info!("Bootstrapping");
+        dht.bootstrap().await?;
+        log::info!("Bootstrap successful");
+
+        Ok(dht)
+    }
+
+    async fn bootstrap(&self) -> anyhow::Result<()> {
+        let mut addrs = tokio::net::lookup_host(BOOTSTRAP).await?;
+        let addr = addrs.next().context("Bootstap failed, no nodes found")?;
+        log::debug!("Found bootstrap node addr: {addr}");
+        let mut node = Node {
+            id: ID_ZERO,
+            addr,
+            last_seen: OffsetDateTime::now_utc(),
+            last_status: NodeStatus::Unknown,
+        };
+
+        let our_id = self.routing_table.borrow().own_id;
+
+        if let Ok(pong) = self.transport.ping(&our_id, &node).await {
+            node.last_seen = OffsetDateTime::now_utc();
+            node.last_status = NodeStatus::Good;
+            node.id = pong.id;
+            assert!(self.insert_node(node).await);
+            Ok(())
+        } else {
+            anyhow::bail!("Bootstrap failed, node not responsive");
+        }
     }
 
     // TODO: update last refreshed timestamp
@@ -229,7 +237,7 @@ impl Dht {
                         .filter(|node| node.current_status() == NodeStatus::Unknown)
                     {
                         all_good = true;
-                        match self.transport.ping(&our_id, &node).await {
+                        match self.transport.ping(&our_id, node).await {
                             Ok(_) => {
                                 node.last_seen = OffsetDateTime::now_utc();
                                 node.last_status = NodeStatus::Good;
