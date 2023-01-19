@@ -88,7 +88,7 @@ impl Dht {
         }
     }
 
-    async fn save(&self, path: &Path) -> anyhow::Result<()> {
+    pub async fn save(&self, path: &Path) -> anyhow::Result<()> {
         log::info!("Saving table");
         let routing_table = self.routing_table.borrow();
         let table_json = serde_json::to_string(&*routing_table)?;
