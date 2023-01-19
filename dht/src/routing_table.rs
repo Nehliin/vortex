@@ -241,15 +241,17 @@ impl RoutingTable {
     }
 
     pub fn find_bucket(&self, id: &NodeId) -> Option<(BucketId, &Bucket)> {
-        self.buckets
-            .iter()
-            .find(|(_, bucket)| bucket.covers(id))
-            .filter(|(_, bucket)| {
-                bucket
-                    .nodes
-                    .iter()
-                    .any(|node| node.map_or(false, |node| node.id == *id))
-            })
+        self.buckets.iter().find(|(_, bucket)| bucket.covers(id))
+        /* .filter(|(_, bucket)| {
+            bucket
+                .nodes
+                .iter()
+                .any(|node| node.map_or(false, |node| node.id == *id))
+        })*/
+    }
+
+    pub fn bucket_ids<'a>(&'a self) -> impl Iterator<Item = BucketId> + 'a {
+        self.buckets.iter().map(|(k, _)| k)
     }
 
     #[inline(always)]

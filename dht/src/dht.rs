@@ -60,24 +60,34 @@ pub struct Dht {
 impl Dht {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
         let transport = KrpcSocket::new(bind_addr).await?;
-        let routing_table = if let Some(table) = load_table(Path::new("routing_table.json")) {
+        if let Some(table) = load_table(Path::new("routing_table.json")) {
             log::info!("Loading existing table");
-            table
+            let bucket_ids: Vec<_> = table.bucket_ids().collect();
+            let dht = Dht {
+                transport,
+                routing_table: Rc::new(RefCell::new(table)),
+            };
+            for bucket_id in bucket_ids {
+                dht.schedule_refresh(bucket_id);
+            }
+            Ok(dht)
         } else {
             let node_id = generate_node_id();
-            RoutingTable::new(node_id)
-        };
+            let routing_table = RoutingTable::new(node_id);
 
-        let dht = Dht {
-            transport,
-            routing_table: Rc::new(RefCell::new(routing_table)),
-        };
+            let dht = Dht {
+                transport,
+                routing_table: Rc::new(RefCell::new(routing_table)),
+            };
 
-        log::info!("Bootstrapping");
-        dht.bootstrap().await?;
-        log::info!("Bootstrap successful");
+            log::info!("Bootstrapping");
+            dht.bootstrap().await?;
+            log::info!("Bootstrap successful");
 
-        Ok(dht)
+            Ok(dht)
+        }
+    }
+
     async fn save(&self, path: &Path) -> anyhow::Result<()> {
         log::info!("Saving table");
         let routing_table = self.routing_table.borrow();
@@ -320,7 +330,7 @@ impl Dht {
     }
 
     fn find_bucket_unknown_nodes(&self, target_id: &NodeId) -> Option<(BucketId, Vec<Node>)> {
-        let mut routing_table = self.routing_table.borrow_mut();
+        let routing_table = self.routing_table.borrow_mut();
         let (bucket_id, bucket) = routing_table.find_bucket(target_id)?;
         let mut unknown_nodes: Vec<_> = bucket
             .nodes()
