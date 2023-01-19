@@ -78,6 +78,12 @@ impl Dht {
         log::info!("Bootstrap successful");
 
         Ok(dht)
+    async fn save(&self, path: &Path) -> anyhow::Result<()> {
+        log::info!("Saving table");
+        let routing_table = self.routing_table.borrow();
+        let table_json = serde_json::to_string(&*routing_table)?;
+        std::fs::write(path, table_json)?;
+        Ok(())
     }
 
     async fn bootstrap(&self) -> anyhow::Result<()> {
@@ -368,13 +374,5 @@ impl Dht {
             }
         }
         Ok(())
-    }
-}
-
-impl Drop for Dht {
-    fn drop(&mut self) {
-        log::info!("Saving table");
-        let routing_table = self.routing_table.borrow();
-        save_table(Path::new("routing_table.json"), &routing_table).unwrap();
     }
 }
