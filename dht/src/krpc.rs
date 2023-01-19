@@ -24,9 +24,6 @@ use crate::node::{Node, NodeId, NodeStatus};
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Query {
-    Ping {
-        id: ByteBuf,
-    },
     FindNode {
         id: ByteBuf,
         target: ByteBuf,
@@ -41,6 +38,9 @@ pub enum Query {
         info_hash: ByteBuf,
         port: u16,
         token: ByteBuf,
+    },
+    Ping {
+        id: ByteBuf,
     },
 }
 
