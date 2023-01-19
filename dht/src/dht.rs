@@ -113,39 +113,44 @@ impl Dht {
     // TODO: update last refreshed timestamp
     // also remember to mark as changed after pings and stuff
     async fn refresh_bucket(&self, bucket_id: BucketId) {
-        let mut routing_table = self.routing_table.borrow_mut();
-        let our_id = routing_table.own_id;
+        let (is_full, mut candiate, our_id, id) = {
+            let mut routing_table = self.routing_table.borrow_mut();
+            let our_id = routing_table.own_id;
 
-        let Some(bucket) = routing_table.get_bucket_mut(bucket_id) else {
-            log::error!("Bucket with id {bucket_id:?} to be refreshed no longer exist");
-            return;
+            let Some(bucket) = routing_table.get_bucket_mut(bucket_id) else {
+                log::error!("Bucket with id {bucket_id:?} to be refreshed no longer exist");
+                return;
+            };
+            // If the bucket has been updated since this refresh task was called a new
+            // refresh task should have been spawned so this can be skipped.
+            if OffsetDateTime::now_utc() - bucket.last_changed() < REFRESH_TIMEOUT {
+                log::debug!(
+                    "Refresh task for bucket with id {bucket_id:?} is stale, skipping refresh"
+                );
+                return;
+            }
+
+            log::debug!("Refreshing bucket: {bucket_id:?}");
+            bucket.update_last_changed();
+
+            // 1. Generate random id within bucket range
+            let id = bucket.random_id();
+
+            let is_full = !bucket.covers(&our_id) && bucket.is_full();
+
+            let Some(candiate) = bucket
+                .nodes_mut()
+                .filter(|node| node.last_status != NodeStatus::Bad)
+                .min_by_key(|node| id.distance(&node.id)) else {
+                // TODO: Remove bucket
+                log::error!("No nodes left in bucket, refresh failed");
+                return;
+            };
+            (is_full, *candiate, our_id, id)
         };
-        // If the bucket has been updated since this refresh task was called a new
-        // refresh task should have been spawned so this can be skipped.
-        if OffsetDateTime::now_utc() - bucket.last_changed() < REFRESH_TIMEOUT {
-            log::debug!("Refresh task for bucket with id {bucket_id:?} is stale, skipping refresh");
-            return;
-        }
 
-        bucket.update_last_changed();
-
-        // 1. Generate random id within bucket range
-        let id = bucket.random_id();
-
-        let is_full = !bucket.covers(&our_id) && bucket.is_full();
-
-        let Some(candiate) = bucket
-            .nodes_mut()
-            .filter(|node| node.last_status != NodeStatus::Bad)
-            .min_by_key(|node| id.distance(&node.id)) else {
-            // TODO: Remove bucket
-            log::error!("No nodes left in bucket, refresh failed");
-            return;
-        };
         let mut need_refresh_scheduled = true;
-        // 2. if the bucket is full (and not splittable) just ping all the nodes and update timestamps
-        // (Försök pinga bara candidate noden men om det failar fortsätt pinga de andra)
-        // kan göra samma när man anropar get_peers
+        // 2. if the bucket is full (and not splittable) ping the node and update the timestamp
         if is_full {
             match self.transport.ping(&our_id, &candiate).await {
                 Ok(_) => {
@@ -166,6 +171,11 @@ impl Dht {
                     candiate.last_status = NodeStatus::Bad;
                     candiate.last_seen = OffsetDateTime::now_utc();
                 }
+            }
+            // Need to reinsert the node, theoretically the node or bucket
+            // might have been removed when attepting the ping
+            if let Some(node) = self.routing_table.borrow_mut().get_mut(&candiate.id) {
+                *node = candiate;
             }
         } else {
             // 3. if the bucket is not full run find nodes (or get peers) on the node closest to the target and insert
