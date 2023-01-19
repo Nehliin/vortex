@@ -9,7 +9,7 @@ use crate::node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO};
 pub struct Bucket {
     min: NodeId,
     max: NodeId,
-    nodes: [Option<Node>; 16],
+    nodes: [Option<Node>; 8],
     last_changed: OffsetDateTime,
 }
 
@@ -78,11 +78,7 @@ impl Bucket {
         let mut bucket = Bucket {
             min: new_min,
             max: old_max,
-            // wtf why do I have to write these out manually
-            nodes: [
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None,
-            ],
+            nodes: [None; 8],
             last_changed,
         };
 
@@ -134,10 +130,7 @@ impl RoutingTable {
         buckets.insert(Bucket {
             min: ID_ZERO,
             max: ID_MAX,
-            nodes: [
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None,
-            ],
+            nodes: [None; 8],
             last_changed: OffsetDateTime::now_utc(),
         });
         RoutingTable { buckets, own_id }
@@ -450,10 +443,7 @@ mod test {
         let mut bucket = Bucket {
             min: min.as_slice().into(),
             max: max.as_slice().into(),
-            nodes: [
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None,
-            ],
+            nodes: [None; 8],
             last_changed: OffsetDateTime::now_utc(),
         };
 
