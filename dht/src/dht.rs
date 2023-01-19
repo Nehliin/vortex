@@ -228,76 +228,92 @@ impl Dht {
 
     async fn insert_node(&self, node: Node) -> bool {
         let mut inserted = false;
-        let (our_id, updated_buckets) = {
+        let (our_id, updated_buckets @ [bucket_id_one, bucket_id_two]) = {
             let mut routing_table = self.routing_table.borrow_mut();
             (routing_table.own_id, routing_table.insert_node(node))
         };
-        // Insert node checks if it's "splittable"
-        for bucket_id in updated_buckets {
-            // If the bucket was updated
-            if !bucket_id.is_null() {
+
+        let failed_insert = bucket_id_one.is_null() && bucket_id_two.is_null();
+
+        if failed_insert {
+            // A bucket must exist at this point
+            let (bucket_id, mut unknown_nodes) = self.find_bucket_unknown_nodes(&node.id).unwrap();
+
+            // track if all nodes are good
+            let mut all_good = false;
+            'outer: loop {
+                // Ping all unknown nodes to see if they might be replaced until either all are
+                // good or a bad one is found
+                for mut unknown_node in unknown_nodes
+                    .iter_mut()
+                    .filter(|node| node.current_status() == NodeStatus::Unknown)
+                {
+                    all_good = true;
+                    match self.transport.ping(&our_id, unknown_node).await {
+                        Ok(_) => {
+                            unknown_node.last_seen = OffsetDateTime::now_utc();
+                            unknown_node.last_status = NodeStatus::Good;
+                        }
+                        Err(err)
+                            if err.is_timeout() && unknown_node.last_status == NodeStatus::Good =>
+                        {
+                            all_good = false;
+                            unknown_node.last_status = NodeStatus::Unknown;
+                        }
+                        Err(err)
+                            if err.is_timeout()
+                                && unknown_node.last_status == NodeStatus::Unknown =>
+                        {
+                            unknown_node.last_status = NodeStatus::Bad;
+                            break 'outer;
+                        }
+                        Err(_err) if unknown_node.last_status == NodeStatus::Good => {
+                            all_good = false;
+                            unknown_node.last_status = NodeStatus::Unknown;
+                            unknown_node.last_seen = OffsetDateTime::now_utc();
+                        }
+                        Err(_err) => {
+                            unknown_node.last_status = NodeStatus::Bad;
+                            unknown_node.last_seen = OffsetDateTime::now_utc();
+                            break 'outer;
+                        }
+                    }
+                }
+                if all_good {
+                    break;
+                }
+            }
+
+            let mut routing_table = self.routing_table.borrow_mut();
+            let bucket = routing_table.get_bucket_mut(bucket_id).unwrap();
+            // These buckets are very small so fine with O(N^2) here for now
+            for updated_node in unknown_nodes {
+                for current_node in bucket.nodes_mut() {
+                    if updated_node.id == current_node.id {
+                        *current_node = updated_node;
+                    }
+                    if current_node.last_status == NodeStatus::Bad {
+                        // Overwrite the bad one
+                        *current_node = node;
+                    }
+                }
+            }
+            // We only inserted if we found a bad node
+            inserted = !all_good;
+            if inserted {
+                // Need to manually update last changed since
+                // the node wasn't written via insert_node
+                bucket.update_last_changed();
                 self.schedule_refresh(bucket_id);
-                inserted = true;
-            } else {
-                // A bucket must exist at this point
-                let (bucket_id, mut unknown_nodes) =
-                    self.find_bucket_unknown_nodes(&node.id).unwrap();
-
-                'outer: loop {
-                    // track if all nodes are good
-                    let mut all_good = false;
-                    // Ping all unknown nodes to see if they might be replaced until either all are
-                    // good or a bad one is found
-                    for mut node in unknown_nodes
-                        .iter_mut()
-                        .filter(|node| node.current_status() == NodeStatus::Unknown)
-                    {
-                        all_good = true;
-                        match self.transport.ping(&our_id, node).await {
-                            Ok(_) => {
-                                node.last_seen = OffsetDateTime::now_utc();
-                                node.last_status = NodeStatus::Good;
-                            }
-                            Err(err)
-                                if err.is_timeout() && node.last_status == NodeStatus::Good =>
-                            {
-                                all_good = false;
-                                node.last_status = NodeStatus::Unknown;
-                            }
-                            Err(err)
-                                if err.is_timeout() && node.last_status == NodeStatus::Unknown =>
-                            {
-                                node.last_status = NodeStatus::Bad;
-                                break 'outer;
-                            }
-                            Err(_err) if node.last_status == NodeStatus::Good => {
-                                all_good = false;
-                                node.last_status = NodeStatus::Unknown;
-                                node.last_seen = OffsetDateTime::now_utc();
-                            }
-                            Err(_err) => {
-                                node.last_status = NodeStatus::Bad;
-                                node.last_seen = OffsetDateTime::now_utc();
-                                break 'outer;
-                            }
-                        }
-                    }
-                    if all_good {
-                        break;
-                    }
+            }
+        } else {
+            // Insert node checks if it's "splittable"
+            for bucket_id in updated_buckets {
+                // If the bucket was updated
+                if !bucket_id.is_null() {
+                    self.schedule_refresh(bucket_id);
+                    inserted = true;
                 }
-
-                let mut routing_table = self.routing_table.borrow_mut();
-                let bucket = routing_table.get_bucket_mut(bucket_id).unwrap();
-                // These buckets are very small so fine with O(N^2) here for now
-                for updated_node in unknown_nodes {
-                    for node in bucket.nodes_mut() {
-                        if updated_node.id == node.id {
-                            *node = updated_node;
-                        }
-                    }
-                }
-                inserted = false;
             }
         }
         inserted
