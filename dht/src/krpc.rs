@@ -325,7 +325,10 @@ impl KrpcSocket {
                                 // TODO handle
                                 incoming_tx.send(query).await.unwrap();
                             }
-                            _ => log::warn!("Invalid incoming query"),
+                            _ => log::warn!(
+                                "Invalid incoming query: {}",
+                                packet.q.as_deref().unwrap_or("<none>")
+                            ),
                         }
                     }
                     // error
@@ -460,7 +463,7 @@ impl KrpcSocket {
             e: None,
         };
 
-        // get_peers may return other nodes 
+        // get_peers may return other nodes
         match self.send_req(node, req).await? {
             Response::GetPeers {
                 id,
