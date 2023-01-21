@@ -164,21 +164,21 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-struct KrpcPacket {
-    t: ByteBuf,
-    y: char,
+pub struct KrpcPacket {
+    pub t: ByteBuf,
+    pub y: char,
     // TODO Borrow instead
     #[serde(skip_serializing_if = "Option::is_none")]
-    q: Option<String>,
+    pub q: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    a: Option<Query>,
+    pub a: Option<Query>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    r: Option<Response>,
+    pub r: Option<Response>,
     #[serde(deserialize_with = "parse_error")]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "serialize_error")]
     #[serde(default)]
-    e: Option<Error>,
+    pub e: Option<Error>,
 }
 
 #[derive(Debug)]
@@ -267,18 +267,24 @@ pub struct KrpcSocket {
     // TODO Set cpu affinity for socket
     socket: Rc<UdpSocket>,
     connection_table: InflightRpcs,
-    incoming_rc: Rc<RefCell<tokio::sync::mpsc::Receiver<Query>>>,
 }
 
 impl KrpcSocket {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
-        let (incoming_tx, incoming_rc) = tokio::sync::mpsc::channel(256);
         let socket = Rc::new(UdpSocket::bind(bind_addr).await?);
         let connection_table = InflightRpcs::default();
 
+        Ok(Self {
+            socket,
+            connection_table,
+        })
+    }
+
+    pub fn listen(&self) -> tokio::sync::mpsc::Receiver<(ByteBuf, Query, SocketAddr)> {
         // Recv task
-        let socket_clone = Rc::clone(&socket);
-        let connection_table_clone = connection_table.clone();
+        let socket_clone = Rc::clone(&self.socket);
+        let connection_table_clone = self.connection_table.clone();
+        let (incoming_tx, incoming_rc) = tokio::sync::mpsc::channel(256);
         tokio_uring::spawn(async move {
             let mut recv_buffer = vec![0; 2048];
             loop {
@@ -286,7 +292,7 @@ impl KrpcSocket {
                     .recv_from(std::mem::take(&mut recv_buffer))
                     .await;
                 // TODO cancellation and addr should be sent across with packet
-                let (recv, _addr) = read.unwrap();
+                let (recv, addr) = read.unwrap();
                 let packet: KrpcPacket = match serde_bencoded::from_bytes(&buf[..recv]) {
                     Ok(packet) => packet,
                     Err(err) => {
@@ -323,7 +329,7 @@ impl KrpcSocket {
                             | (Some("ping"), Some(query @ Query::Ping { .. }))
                             | (Some("find_node"), Some(query @ Query::FindNode { .. })) => {
                                 // TODO handle
-                                incoming_tx.send(query).await.unwrap();
+                                incoming_tx.send((packet.t, query, addr)).await.unwrap();
                             }
                             _ => log::warn!(
                                 "Invalid incoming query: {}",
@@ -349,12 +355,7 @@ impl KrpcSocket {
                 }
             }
         });
-
-        Ok(Self {
-            incoming_rc: Rc::new(RefCell::new(incoming_rc)),
-            socket,
-            connection_table,
-        })
+        incoming_rc
     }
 
     fn gen_transaction_id(&self) -> ByteBuf {
@@ -370,12 +371,12 @@ impl KrpcSocket {
         }
     }
 
-    async fn send_req(&self, node: &Node, req: KrpcPacket) -> Result<Response, Error> {
+    pub async fn send_req(&self, addr: SocketAddr, req: KrpcPacket) -> Result<Response, Error> {
         let encoded = serde_bencoded::to_vec(&req).unwrap();
 
         let rx = self.connection_table.insert_rpc(req.t.clone());
 
-        let (res, _) = self.socket.send_to(encoded, node.addr).await;
+        let (res, _) = self.socket.send_to(encoded, addr).await;
         res.unwrap();
 
         match tokio::time::timeout(Duration::from_secs(3), rx).await {
@@ -403,7 +404,7 @@ impl KrpcSocket {
             e: None,
         };
 
-        if let Response::QueriedNodeId { id } = self.send_req(node, req).await? {
+        if let Response::QueriedNodeId { id } = self.send_req(node.addr, req).await? {
             Ok(Pong {
                 id: id.as_slice().into(),
             })
@@ -432,7 +433,7 @@ impl KrpcSocket {
             e: None,
         };
 
-        if let Response::FindNode { id, nodes } = self.send_req(queried_node, req).await? {
+        if let Response::FindNode { id, nodes } = self.send_req(queried_node.addr, req).await? {
             let nodes = parse_compact_nodes(nodes);
             Ok(FindNodesResponse {
                 id: id.as_slice().into(),
@@ -464,7 +465,7 @@ impl KrpcSocket {
         };
 
         // get_peers may return other nodes
-        match self.send_req(node, req).await? {
+        match self.send_req(node.addr, req).await? {
             Response::GetPeers {
                 id,
                 token,

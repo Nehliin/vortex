@@ -1,6 +1,7 @@
 use std::{cell::RefCell, net::SocketAddr, path::Path, rc::Rc, time::Duration};
 
 use anyhow::Context;
+use krpc::Query;
 use sha1::{Digest, Sha1};
 use slotmap::Key;
 use time::OffsetDateTime;
@@ -50,7 +51,7 @@ pub struct Dht {
 impl Dht {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
         let transport = KrpcSocket::new(bind_addr).await?;
-        if let Some(table) = load_table(Path::new("routing_table.json")) {
+        let dht = if let Some(table) = load_table(Path::new("routing_table.json")) {
             log::info!("Loading existing table");
             let bucket_ids: Vec<_> = table.bucket_ids().collect();
             let dht = Dht {
@@ -60,7 +61,7 @@ impl Dht {
             for bucket_id in bucket_ids {
                 dht.schedule_refresh(bucket_id);
             }
-            Ok(dht)
+            dht
         } else {
             let node_id = generate_node_id();
             let routing_table = RoutingTable::new(node_id);
@@ -74,8 +75,52 @@ impl Dht {
             dht.bootstrap().await?;
             log::info!("Bootstrap successful");
 
-            Ok(dht)
-        }
+            dht
+        };
+        dht.handle_incoming();
+        Ok(dht)
+    }
+
+    fn handle_incoming(&self) {
+        let this = self.clone();
+        tokio_uring::spawn(async move {
+            let mut incoming_queries = this.transport.listen();
+            while let Some((transaction_id, query, addr)) = incoming_queries.recv().await {
+                log::debug!("Received query: {query:?}");
+                match query {
+                    Query::FindNode { id, target } => {},
+                    Query::GetPeers { id, info_hash } => {},
+                    Query::AnnouncePeer {
+                        id,
+                        implied_port,
+                        info_hash,
+                        port,
+                        token,
+                    } => {},
+                    Query::Ping { id: _ } => {
+                        let our_id = this.routing_table.borrow().own_id;
+                        // Should we only respond to pings from nodes in the routing table?
+                        // probably not, but some ratelimiting might be necessary in the future
+                        this.transport
+                            .send_req(
+                                addr,
+                                krpc::KrpcPacket {
+                                    t: transaction_id,
+                                    y: 'r',
+                                    q: None,
+                                    a: None,
+                                    r: Some(krpc::Response::QueriedNodeId {
+                                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                                    }),
+                                    e: None,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        });
     }
 
     pub async fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -362,7 +407,7 @@ impl Dht {
                         reponse
                     }
                     Err(err) => {
-                        log::warn!("Node {next_to_query:?} ping failed: {err}");
+                        log::warn!("{next_to_query:?} ping failed: {err}");
                         match next_to_query.last_status {
                             NodeStatus::Good => {
                                 let mut routing_table = self.routing_table.borrow_mut();
