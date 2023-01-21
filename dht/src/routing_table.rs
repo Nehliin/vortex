@@ -205,6 +205,7 @@ impl RoutingTable {
             .iter_mut()
             .map(|(_, v)| v)
             .flat_map(|bucket| &mut bucket.nodes)
+            .filter(|node| node.map_or(false, |node| node.last_status != NodeStatus::Bad))
             .min_by_key(|node| {
                 node.as_ref()
                     .map(|node| info_hash.distance(&node.id))
@@ -243,7 +244,7 @@ impl RoutingTable {
         })*/
     }
 
-    pub fn bucket_ids<'a>(&'a self) -> impl Iterator<Item = BucketId> + 'a {
+    pub fn bucket_ids(&self) -> impl Iterator<Item = BucketId> + '_ {
         self.buckets.iter().map(|(k, _)| k)
     }
 
