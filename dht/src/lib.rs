@@ -1,6 +1,7 @@
 use std::{cell::RefCell, net::SocketAddr, path::Path, rc::Rc, time::Duration};
 
 use anyhow::Context;
+use futures::future::join_all;
 use krpc::Query;
 use sha1::{Digest, Sha1};
 use slotmap::Key;
@@ -16,14 +17,13 @@ mod krpc;
 mod node;
 mod routing_table;
 
-// Bootstrap nodes
-//dht.transmissionbt.com 6881
-//router.bittorrent.com  6881
-//router.bitcomet.com    6881
-//dht.aelitis.com        6881
-//bootstrap.jami.net     4222
-
-const BOOTSTRAP: &str = "router.bittorrent.com:6881";
+const BOOTSTRAP_NODES: [&str; 5] = [
+    "router.bittorrent.com:6881",
+    "dht.transmissionbt.com:6881",
+    "router.bitcomet.com:6881",
+    "dht.aelitis.com:6881",
+    "bootstrap.jami.net:4222",
+];
 
 #[inline]
 fn generate_node_id() -> NodeId {
@@ -51,7 +51,7 @@ pub struct Dht {
 impl Dht {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
         let transport = KrpcSocket::new(bind_addr).await?;
-        let dht = if let Some(table) = load_table(Path::new("routing_table.json")) {
+        if let Some(table) = load_table(Path::new("routing_table.json")) {
             log::info!("Loading existing table");
             let bucket_ids: Vec<_> = table.bucket_ids().collect();
             let dht = Dht {
@@ -61,7 +61,8 @@ impl Dht {
             for bucket_id in bucket_ids {
                 dht.schedule_refresh(bucket_id);
             }
-            dht
+            dht.handle_incoming();
+            Ok(dht)
         } else {
             let node_id = generate_node_id();
             let routing_table = RoutingTable::new(node_id);
@@ -72,13 +73,12 @@ impl Dht {
             };
 
             log::info!("Bootstrapping");
+            dht.handle_incoming();
             dht.bootstrap().await?;
             log::info!("Bootstrap successful");
 
-            dht
-        };
-        dht.handle_incoming();
-        Ok(dht)
+            Ok(dht)
+        }
     }
 
     fn handle_incoming(&self) {
@@ -88,15 +88,15 @@ impl Dht {
             while let Some((transaction_id, query, addr)) = incoming_queries.recv().await {
                 log::debug!("Received query: {query:?}");
                 match query {
-                    Query::FindNode { id, target } => {},
-                    Query::GetPeers { id, info_hash } => {},
+                    Query::FindNode { id, target } => {}
+                    Query::GetPeers { id, info_hash } => {}
                     Query::AnnouncePeer {
                         id,
                         implied_port,
                         info_hash,
                         port,
                         token,
-                    } => {},
+                    } => {}
                     Query::Ping { id: _ } => {
                         let our_id = this.routing_table.borrow().own_id;
                         // Should we only respond to pings from nodes in the routing table?
@@ -132,26 +132,50 @@ impl Dht {
     }
 
     async fn bootstrap(&self) -> anyhow::Result<()> {
-        let mut addrs = tokio::net::lookup_host(BOOTSTRAP).await?;
-        let addr = addrs.next().context("Bootstap failed, no nodes found")?;
-        log::debug!("Found bootstrap node addr: {addr}");
-        let mut node = Node {
-            id: ID_ZERO,
-            addr,
-            last_seen: OffsetDateTime::now_utc(),
-            last_status: NodeStatus::Unknown,
-        };
-
         let our_id = self.routing_table.borrow().own_id;
+        log::debug!("Resolving bootstrap node addrs");
+        let resolve_result = join_all(
+            BOOTSTRAP_NODES
+                .iter()
+                .map(|node_addr| tokio_uring::spawn(tokio::net::lookup_host(node_addr))),
+        )
+        .await;
 
-        if let Ok(pong) = self.transport.ping(&our_id, &node).await {
-            node.last_seen = OffsetDateTime::now_utc();
-            node.last_status = NodeStatus::Good;
-            node.id = pong.id;
-            assert!(self.insert_node(node).await);
-            Ok(())
-        } else {
+        log::debug!("Pinging bootstrap nodes");
+        let bootstrap_ping_futures = resolve_result
+            .into_iter()
+            // Ignore any potential failures
+            .filter_map(|result| result.map(|inner| inner.ok()).ok().flatten())
+            // Pick the first addr we resolved too
+            .filter_map(|mut node_addrs| node_addrs.next())
+            .map(|addr| Node {
+                id: ID_ZERO,
+                addr,
+                last_seen: OffsetDateTime::now_utc(),
+                last_status: NodeStatus::Unknown,
+            })
+            .map(|node| async move {
+                log::debug!("Pinging {}", node.addr);
+                let result = self.transport.ping(&our_id, &node).await;
+                (node, result)
+            });
+
+        let mut any_success = false;
+        for (mut node, result) in join_all(bootstrap_ping_futures).await {
+            if let Ok(pong) = result {
+                node.last_seen = OffsetDateTime::now_utc();
+                node.last_status = NodeStatus::Good;
+                node.id = pong.id;
+                log::debug!("Node {} responded", node.addr);
+                assert!(self.insert_node(node).await);
+                any_success = true;
+            }
+        }
+
+        if !any_success {
             anyhow::bail!("Bootstrap failed, node not responsive");
+        } else {
+            Ok(())
         }
     }
 

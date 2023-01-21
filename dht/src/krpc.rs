@@ -279,7 +279,9 @@ impl KrpcSocket {
             connection_table,
         })
     }
-
+    
+    // TODO refactor: This needs to be called before anything otherwise the socket becomes 
+    // useless since responses aren't handled 
     pub fn listen(&self) -> tokio::sync::mpsc::Receiver<(ByteBuf, Query, SocketAddr)> {
         // Recv task
         let socket_clone = Rc::clone(&self.socket);
