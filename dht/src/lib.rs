@@ -8,9 +8,9 @@ use slotmap::Key;
 use time::OffsetDateTime;
 
 use crate::{
-    krpc::{FindNodesResponse, KrpcSocket},
+    krpc::{serialize_compact_nodes, FindNodesResponse, KrpcSocket},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
-    routing_table::{BucketId, RoutingTable},
+    routing_table::{BucketId, RoutingTable, BUCKET_SIZE},
 };
 
 mod krpc;
@@ -87,9 +87,63 @@ impl Dht {
             let mut incoming_queries = this.transport.listen();
             while let Some((transaction_id, query, addr)) = incoming_queries.recv().await {
                 log::debug!("Received query: {query:?}");
+                let our_id = this.routing_table.borrow().own_id;
                 match query {
-                    Query::FindNode { id, target } => {}
-                    Query::GetPeers { id, info_hash } => {}
+                    Query::FindNode { id: _, target } => {
+                        let target = NodeId::from(target.as_slice());
+                        let closet = this
+                            .routing_table
+                            .borrow()
+                            .get_k_closest(BUCKET_SIZE, &target);
+                        log::debug!("Found: {} nodes closet to {target:?}", closet.len());
+                        this.transport
+                            .send_req(
+                                addr,
+                                krpc::KrpcPacket {
+                                    t: transaction_id,
+                                    y: 'r',
+                                    q: None,
+                                    a: None,
+                                    r: Some(krpc::Response::FindNode {
+                                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                                        nodes: serialize_compact_nodes(&closet),
+                                    }),
+                                    e: None,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    Query::GetPeers { id: _, info_hash } => {
+                        // Somehow inspect peer list and provide peers if they
+                        // exist or otherwise return closest nodes. Consider having
+                        // a trait that specifices the peer list interface that may be used.
+                        // otherwise return find nodes response. Until then, just return find node
+                        // response.
+                        let target = NodeId::from(info_hash.as_slice());
+                        let closet = this
+                            .routing_table
+                            .borrow()
+                            .get_k_closest(BUCKET_SIZE, &target);
+                        log::debug!("Found: {} nodes closet to {target:?}", closet.len());
+                        this.transport
+                            .send_req(
+                                addr,
+                                krpc::KrpcPacket {
+                                    t: transaction_id,
+                                    y: 'r',
+                                    q: None,
+                                    a: None,
+                                    r: Some(krpc::Response::FindNode {
+                                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                                        nodes: serialize_compact_nodes(&closet),
+                                    }),
+                                    e: None,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                    }
                     Query::AnnouncePeer {
                         id,
                         implied_port,
@@ -98,7 +152,6 @@ impl Dht {
                         token,
                     } => {}
                     Query::Ping { id: _ } => {
-                        let our_id = this.routing_table.borrow().own_id;
                         // Should we only respond to pings from nodes in the routing table?
                         // probably not, but some ratelimiting might be necessary in the future
                         this.transport

@@ -6,6 +6,7 @@ use std::{
 };
 
 use ahash::AHashMap;
+use bytes::{BufMut, BytesMut};
 use rand::Rng;
 use serde::{de::Visitor, ser::SerializeSeq, Deserializer, Serializer};
 use serde_bytes::ByteBuf;
@@ -216,12 +217,12 @@ pub struct AnnounceResponse {
     pub id: NodeId,
 }
 
-fn parse_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
+fn deserialize_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
     // TODO this will panic on invalid input
     bytes
         .chunks(26)
         .map(|chunk| {
-            // Seems to be working?
+            // Seems to be working? Should i reverse this?
             let id = chunk[..20].into();
             let ip: IpAddr = [chunk[20], chunk[21], chunk[22], chunk[23]].into();
             let port = u16::from_be_bytes([chunk[24], chunk[25]]);
@@ -233,6 +234,21 @@ fn parse_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
             }
         })
         .collect()
+}
+
+pub fn serialize_compact_nodes(nodes: &[Node]) -> ByteBuf {
+    let mut result = BytesMut::with_capacity(nodes.len() * (20 + 4 + 2));
+
+    for node in nodes {
+        result.put(node.id.as_bytes().as_slice());
+        let IpAddr::V4(ip_v4) = node.addr.ip() else {
+            log::error!("Only IPv4 addresses are supported for nodes");
+            continue;
+        };
+        result.put(ip_v4.octets().as_slice());
+        result.put_u16(node.addr.port());
+    }
+    ByteBuf::from(result)
 }
 
 #[derive(Clone, Default, Debug)]
@@ -279,9 +295,9 @@ impl KrpcSocket {
             connection_table,
         })
     }
-    
-    // TODO refactor: This needs to be called before anything otherwise the socket becomes 
-    // useless since responses aren't handled 
+
+    // TODO refactor: This needs to be called before anything otherwise the socket becomes
+    // useless since responses aren't handled
     pub fn listen(&self) -> tokio::sync::mpsc::Receiver<(ByteBuf, Query, SocketAddr)> {
         // Recv task
         let socket_clone = Rc::clone(&self.socket);
@@ -436,7 +452,7 @@ impl KrpcSocket {
         };
 
         if let Response::FindNode { id, nodes } = self.send_req(queried_node.addr, req).await? {
-            let nodes = parse_compact_nodes(nodes);
+            let nodes = deserialize_compact_nodes(nodes);
             Ok(FindNodesResponse {
                 id: id.as_slice().into(),
                 nodes,
@@ -501,7 +517,7 @@ impl KrpcSocket {
                 }
 
                 if let Some(nodes) = nodes {
-                    let nodes = parse_compact_nodes(nodes);
+                    let nodes = deserialize_compact_nodes(nodes);
 
                     return Ok(GetPeersResponse {
                         id: id.as_slice().into(),
@@ -514,7 +530,7 @@ impl KrpcSocket {
                 ))
             }
             Response::FindNode { id, nodes } => {
-                let nodes = parse_compact_nodes(nodes);
+                let nodes = deserialize_compact_nodes(nodes);
 
                 Ok(GetPeersResponse {
                     id: id.as_slice().into(),
@@ -559,6 +575,8 @@ impl KrpcSocket {
 
 #[cfg(test)]
 mod tests {
+    use crate::node::{ID_MAX, ID_ZERO};
+
     use super::*;
 
     #[test]
@@ -634,5 +652,31 @@ mod tests {
                 e: None,
             }
         );
+    }
+
+    #[test]
+    fn roundtrip_compact_nodes() {
+        let nodes = vec![
+            Node {
+                id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                addr: "127.0.2.1:6666".parse().unwrap(),
+                last_status: NodeStatus::Good,
+                last_seen: OffsetDateTime::now_utc(),
+            },
+            Node {
+                id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                addr: "127.1.2.1:1337".parse().unwrap(),
+                last_status: NodeStatus::Good,
+                last_seen: OffsetDateTime::now_utc(),
+            },
+        ];
+
+        let compact = serialize_compact_nodes(&nodes);
+        let deserialized = deserialize_compact_nodes(compact);
+
+        for (a, b) in deserialized.iter().zip(nodes.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.addr, b.addr);
+        }
     }
 }

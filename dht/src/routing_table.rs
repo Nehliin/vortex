@@ -4,12 +4,14 @@ use time::OffsetDateTime;
 
 use crate::node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO};
 
+pub const BUCKET_SIZE: usize = 8;
+
 // TODO implement PartialEq manually to only check min,max
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Bucket {
     min: NodeId,
     max: NodeId,
-    nodes: [Option<Node>; 8],
+    nodes: [Option<Node>; BUCKET_SIZE],
     last_changed: OffsetDateTime,
 }
 
@@ -161,42 +163,22 @@ impl RoutingTable {
         result
     }
 
-    //    fn insert_node_helper(&mut self, node: Node, mut result: [BucketId; 2], )
-
-    // TODO: properly add last_changed to buckets and
-    // periodically ping nodes accoriding to
-    // https://www.bittorrent.org/beps/bep_0005.html
-    /*pub async fn ping_all_nodes(&mut self, service: &KrpcSocket, progress: &MultiProgress) {
-        // Will live long enough and this is temporary
-        let this: &'static mut Self = unsafe { std::mem::transmute(self) };
-        let ping_progress = progress.add(ProgressBar::new_spinner());
-        ping_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
-        ping_progress.enable_steady_tick(Duration::from_millis(100));
-        ping_progress.set_message("Pinging nodes...");
-        let futures = this
+    // TODO: Smallvec?
+    pub fn get_k_closest(&self, k: usize, info_hash: &NodeId) -> Vec<Node> {
+        let mut nodes: Vec<_> = self
             .buckets
-            .iter_mut()
-            .flat_map(|bucket| bucket.nodes.iter_mut())
-            .map(|maybe_node| {
-                let service_clone = service.clone();
-                let own_id = this.own_id;
-                tokio_uring::spawn(async move {
-                    if let Some(node) = maybe_node {
-                        if let Err(err) = service_clone.ping(&own_id, node).await {
-                            log::warn!("Ping failed for node: {node:?}, error: {err}");
-                            maybe_node.take();
-                        } else {
-                            log::info!("Ping succeeded");
-                        }
-                    }
-                })
+            .iter()
+            .map(|(_, v)| v)
+            .flat_map(|bucket| &bucket.nodes)
+            .filter(|maybe_node| {
+                maybe_node.map_or(false, |node| node.last_status != NodeStatus::Bad)
             })
-            .collect::<Vec<_>>();
-        for fut in futures {
-            fut.await.unwrap();
-        }
-        ping_progress.finish_with_message("Pinged all nodes");
-    }*/
+            .map(|node| node.unwrap())
+            .collect();
+
+        nodes.sort_unstable_by_key(|node| info_hash.distance(&node.id));
+        nodes.into_iter().take(k).collect()
+    }
 
     // TODO maybe not use nodeid as type for info_hash
     pub fn get_closest_mut(&mut self, info_hash: &NodeId) -> Option<&mut Node> {
@@ -327,7 +309,7 @@ mod test {
         for (_, bucket) in buckets_clone.iter() {
             if bucket.covers(&info_hash) {
                 found += 1;
-                assert!(bucket.nodes.contains(&Some(closest.clone())));
+                assert!(bucket.nodes.contains(&Some(*closest)));
             }
         }
         assert_eq!(found, 1);
