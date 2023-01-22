@@ -407,6 +407,15 @@ impl KrpcSocket {
             Ok(Err(_)) => unreachable!(),
         }
     }
+
+    pub async fn send_response(&self, addr: SocketAddr, req: KrpcPacket) -> Result<(), Error> {
+        let encoded = serde_bencoded::to_vec(&req).unwrap();
+
+        let (res, _) = self.socket.send_to(encoded, addr).await;
+        res.unwrap();
+
+        Ok(())
+    }
     // TODO optimize and rework error handling
     pub async fn ping(&self, querying_node: &NodeId, node: &Node) -> Result<Pong, Error> {
         let transaction_id = self.gen_transaction_id();

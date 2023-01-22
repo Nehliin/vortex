@@ -1,11 +1,14 @@
-use std::{cell::RefCell, net::SocketAddr, path::Path, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell, collections::BTreeMap, net::SocketAddr, path::Path, rc::Rc, time::Duration,
+};
 
 use anyhow::Context;
 use futures::future::join_all;
-use krpc::Query;
+use krpc::{Peer, Query};
 use sha1::{Digest, Sha1};
 use slotmap::Key;
 use time::OffsetDateTime;
+use tokio::sync::Notify;
 
 use crate::{
     krpc::{serialize_compact_nodes, FindNodesResponse, KrpcSocket},
@@ -46,6 +49,8 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub struct Dht {
     transport: KrpcSocket,
     routing_table: Rc<RefCell<RoutingTable>>,
+    // (This doesn't need to be multi threaded)
+    node_added_notify: Rc<Notify>,
 }
 
 impl Dht {
@@ -57,6 +62,7 @@ impl Dht {
             let dht = Dht {
                 transport,
                 routing_table: Rc::new(RefCell::new(table)),
+                node_added_notify: Rc::new(Notify::new()),
             };
             for bucket_id in bucket_ids {
                 dht.schedule_refresh(bucket_id);
@@ -70,6 +76,7 @@ impl Dht {
             let dht = Dht {
                 transport,
                 routing_table: Rc::new(RefCell::new(routing_table)),
+                node_added_notify: Rc::new(Notify::new()),
             };
 
             log::info!("Bootstrapping");
@@ -79,6 +86,67 @@ impl Dht {
 
             Ok(dht)
         }
+    }
+
+    pub fn find_peers(&self, info_hash: &[u8]) -> tokio::sync::mpsc::Receiver<Vec<Peer>> {
+        let this = self.clone();
+        let (tx, rc) = tokio::sync::mpsc::channel(64);
+        let info_hash = NodeId::from(info_hash);
+        tokio_uring::spawn(async move {
+            'outer: loop {
+                if tx.is_closed() {
+                    break 'outer;
+                }
+
+                let mut routing_table = this.routing_table.borrow_mut();
+                let Some(closest_node) = routing_table.get_closest_mut(&info_hash) else {
+                        continue;
+                };
+
+                let mut btree_map = BTreeMap::new();
+                btree_map.insert(info_hash.distance(&closest_node.id), *closest_node);
+                drop(routing_table);
+                loop {
+                    let Some((_, closest_node)) = btree_map.pop_first() else {
+                        // Wait for more nodes
+                        break;
+                    };
+                    log::debug!("Closest node: {closest_node:?}");
+                    let our_id = this.routing_table.borrow().own_id;
+
+                    // TODO update node status
+                    let response = match this
+                        .transport
+                        .get_peers(&our_id, info_hash.as_bytes(), &closest_node)
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(err) => {
+                            log::error!("Failed get_peers request: {err}");
+                            continue;
+                        }
+                    };
+
+                    match response.body {
+                        krpc::GetPeerResponseBody::Nodes(nodes) => {
+                            for node in nodes.into_iter() {
+                                btree_map.insert(info_hash.distance(&node.id), node);
+                                this.insert_node(node).await;
+                            }
+                        }
+                        krpc::GetPeerResponseBody::Peers(peers) => {
+                            if tx.send(peers).await.is_err() {
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+
+                // Wait untill more nodes have been added
+                this.node_added_notify.notified().await;
+            }
+        });
+        rc
     }
 
     fn handle_incoming(&self) {
@@ -97,7 +165,7 @@ impl Dht {
                             .get_k_closest(BUCKET_SIZE, &target);
                         log::debug!("Found: {} nodes closet to {target:?}", closet.len());
                         this.transport
-                            .send_req(
+                            .send_response(
                                 addr,
                                 krpc::KrpcPacket {
                                     t: transaction_id,
@@ -127,7 +195,7 @@ impl Dht {
                             .get_k_closest(BUCKET_SIZE, &target);
                         log::debug!("Found: {} nodes closet to {target:?}", closet.len());
                         this.transport
-                            .send_req(
+                            .send_response(
                                 addr,
                                 krpc::KrpcPacket {
                                     t: transaction_id,
@@ -155,7 +223,7 @@ impl Dht {
                         // Should we only respond to pings from nodes in the routing table?
                         // probably not, but some ratelimiting might be necessary in the future
                         this.transport
-                            .send_req(
+                            .send_response(
                                 addr,
                                 krpc::KrpcPacket {
                                     t: transaction_id,
@@ -437,6 +505,9 @@ impl Dht {
                     inserted = true;
                 }
             }
+        }
+        if inserted {
+            self.node_added_notify.notify_one();
         }
         inserted
     }

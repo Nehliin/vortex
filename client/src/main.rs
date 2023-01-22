@@ -2,73 +2,7 @@ use std::{cell::RefCell, collections::BTreeMap, net::IpAddr, path::Path, rc::Rc,
 
 use bittorrent::TorrentManager;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use krpc::{KrpcSocket, Peer};
-use magnet_url::Magnet;
-use node::{NodeId, ID_MAX};
-use routing_table::RoutingTable;
 use sha1::{Digest, Sha1};
-use time::OffsetDateTime;
-use trust_dns_resolver::{
-    config::{ResolverConfig, ResolverOpts},
-    Resolver,
-};
-
-use crate::node::{Node, ID_ZERO};
-
-mod dht;
-mod krpc;
-mod node;
-mod routing_table;
-
-fn pop_first(btree_map: &mut BTreeMap<NodeId, Node>) -> Node {
-    // TODO: somehow this fails randomly?
-    let key = *btree_map.iter().next().unwrap().0;
-    btree_map.remove(&key).unwrap()
-}
-
-async fn find_peers(
-    service: &KrpcSocket,
-    routing_table: &mut RoutingTable,
-    info_hash: &[u8],
-) -> Vec<Peer> {
-    /*let bytes = base32::decode(
-        base32::Alphabet::RFC4648 { padding: false },
-        magent_url.xt.as_ref().unwrap(),
-    );*/
-
-    let info_hash = NodeId::from(info_hash);
-
-    let closest_node = routing_table.get_closest_mut(&info_hash).unwrap();
-
-    let mut btree_map = BTreeMap::new();
-    btree_map.insert(info_hash.distance(&closest_node.id), closest_node.clone());
-    loop {
-        let closest_node = pop_first(&mut btree_map);
-        log::debug!("Closest node: {closest_node:?}");
-
-        let response = match service
-            .get_peers(&routing_table.own_id, info_hash.as_bytes(), &closest_node)
-            .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                log::error!("Failed get_peers request: {err}");
-                continue;
-            }
-        };
-
-        match response.body {
-            krpc::GetPeerResponseBody::Nodes(nodes) => {
-                for node in nodes.into_iter() {
-                    btree_map.insert(info_hash.distance(&node.id), node);
-                }
-            }
-            krpc::GetPeerResponseBody::Peers(peers) => {
-                break peers;
-            }
-        }
-    }
-}
 
 fn main() {
     // Might not exist
@@ -81,7 +15,7 @@ fn main() {
 
     tokio_uring::start(async move {
         let progress = MultiProgress::new();
-        let service = KrpcSocket::new("0.0.0.0:1337".parse().unwrap())
+        let dht = dht::Dht::new("0.0.0.0:1337".parse().unwrap())
             .await
             .unwrap();
 
@@ -89,18 +23,9 @@ fn main() {
         let refresh_progress = progress.add(ProgressBar::new_spinner());
         refresh_progress.enable_steady_tick(Duration::from_millis(100));
         refresh_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
-        refresh_progress.set_message("Refreshing routing table...");
-        // refresh(&mut routing_table, &service).await;
-        refresh_progress.finish_with_message("Routing table refreshed");
-
-        log::info!("Done with pings");
-
-        /*let remaining = routing_table
-        .buckets
-        .iter()
-        .flat_map(|bucket| bucket.nodes())
-        .count();*/
-        //log::info!("Remaining nodes: {remaining}");
+        refresh_progress.set_message("Starting up DHT...");
+        dht.start().await.unwrap();
+        refresh_progress.finish_with_message("DHT started");
 
         // Linux mint magnet link + torrent file
         //let magnet_link = "magnet:?xt=urn:btih:CS5SSRQ4EJB2UKD43JUBJCHFPSPOWJNP".to_string();
@@ -114,17 +39,13 @@ fn main() {
             .set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
         find_peer_progress.set_message("Finding peers...");
 
-        /* let peers = find_peers(
-            &service,
-            &mut routing_table,
-            metainfo.info().info_hash().as_ref(),
-        )
-        .await;*/
-        let peers: Vec<Peer> = Vec::new();
+        let info_hash = metainfo.info().info_hash();
+        let mut peers_reciver = dht.find_peers(info_hash.as_ref());
+
+        let peers = peers_reciver.recv().await.unwrap();
 
         find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
 
-        let info_hash = metainfo.info().info_hash();
         let torrent_manager = TorrentManager::new(metainfo.info().clone());
 
         let connection_progress = progress.add(ProgressBar::new_spinner());

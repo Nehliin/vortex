@@ -28,6 +28,7 @@ slotmap = { version = "1.0.6", features = ["serde"]}
 base32 = "0.4"
 libc = "0.2"
 bittorrent = { path = "../bittorrent" }
+dht = { path = "../dht" }
 bip_metainfo = "0.12"
 indicatif = "0.17.2"
 futures = "0.3"
