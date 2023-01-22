@@ -1,5 +1,5 @@
 [package]
-name = "vortex"
+name = "dht"
 version = "0.1.0"
 edition = "2021"
 
@@ -21,17 +21,11 @@ time = { version = "0.3", features = ["serde", "local-offset"]}
 bytes = { version = "1.2", features = ["serde"]}
 tokio = { version = "1.20.1", features = ["time", "sync", "macros"] }
 sha1 = "0.10.1"
-trust-dns-resolver = "0.21"
 log = "0.4"
-env_logger = "0.9"
 slotmap = { version = "1.0.6", features = ["serde"]}
-base32 = "0.4"
-libc = "0.2"
-bittorrent = { path = "../bittorrent" }
-dht = { path = "../dht" }
-bip_metainfo = "0.12"
 indicatif = "0.17.2"
 futures = "0.3"
 
 [dev-dependencies]
 num-bigint = "0.4.3"
+env_logger = "0.9"

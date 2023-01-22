@@ -1,12 +1,15 @@
 use std::{
     net::SocketAddr,
     ops::{Add, Deref, Sub},
+    time::Duration,
 };
 
 use bytes::Bytes;
+use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+// TODO: migrate to u128 + u32
 // BE endian large nums that
 // can use lexographical order
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Deserialize, Serialize)]
@@ -43,6 +46,16 @@ impl NodeId {
 
     pub fn as_bytes(&self) -> [u8; 20] {
         self.0
+    }
+
+    /// Generates a new node id in range [min, max)
+    pub fn new_in_range(min: &NodeId, max: &NodeId) -> NodeId {
+        let mut delta = max - min;
+        let mut rng = rand::thread_rng();
+        for delta_byte in delta.0.iter_mut() {
+            *delta_byte = (rng.gen::<f32>() * *delta_byte as f32) as u8;
+        }
+        &delta + min
     }
 }
 
@@ -102,7 +115,7 @@ impl Sub for &NodeId {
 
 #[inline]
 pub fn midpoint(low: &NodeId, high: &NodeId) -> NodeId {
-    debug_assert!(low < high);
+    assert!(low < high);
     let mut diff = high - low;
     diff.halve();
     low + &diff
@@ -139,11 +152,38 @@ impl core::fmt::Debug for NodeId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Deserialize, Serialize)]
+pub enum NodeStatus {
+    Good,
+    Bad,
+    Unknown,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Node {
     pub id: NodeId,
     pub addr: SocketAddr,
+    pub last_status: NodeStatus,
     pub last_seen: OffsetDateTime,
+}
+
+impl Node {
+    // TODO: maybe &mut and update it here
+    pub fn current_status(&self) -> NodeStatus {
+        match self.last_status {
+            NodeStatus::Good => {
+                let stale =
+                    OffsetDateTime::now_utc() - self.last_seen > Duration::from_secs(15 * 60);
+                if stale {
+                    NodeStatus::Unknown
+                } else {
+                    NodeStatus::Good
+                }
+            }
+            NodeStatus::Unknown => NodeStatus::Unknown,
+            NodeStatus::Bad => NodeStatus::Bad,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -65,7 +65,7 @@ fn accepts_incoming() {
                 tokio::time::sleep(Duration::from_secs(10)).await;
             } else {
                 log::info!("Connection attempt {attempt} failed");
-                // First will fail since libtorrent by default attempts to encrypt the 
+                // First will fail since libtorrent by default attempts to encrypt the
                 // connection
                 attempt += 1;
             }

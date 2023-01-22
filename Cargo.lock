@@ -18,6 +18,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f26201604c87b1e01bd3d98f8d5d9a8fcbb815e8cedb41ffccbeb4bf593a35fe"
 
 [[package]]
+name = "ahash"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf6ccdb167abbf410dcb915cabd428929d7f6a04980b54a11f26a39f1c7f7107"
+dependencies = [
+ "cfg-if",
+ "getrandom",
+ "once_cell",
+ "version_check",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "0.7.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -264,6 +276,32 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dht"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bytes",
+ "env_logger",
+ "futures",
+ "indicatif",
+ "log",
+ "magnet-url",
+ "num-bigint 0.4.3",
+ "rand 0.8.5",
+ "serde",
+ "serde_bencoded",
+ "serde_bytes",
+ "serde_derive",
+ "serde_json",
+ "sha1",
+ "slotmap",
+ "time 0.3.17",
+ "tokio",
+ "tokio-uring",
 ]
 
 [[package]]
@@ -783,6 +821,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "once_cell"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f61fba1741ea2b3d6a1e3178721804bb716a68a6aeba1149b5d52e3d464ea66"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1029,6 +1073,9 @@ name = "serde"
 version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "256b9932320c590e707b94576e3cc1f7c9024d0ee6612dfbcf1cb106cbe8e055"
+dependencies = [
+ "serde_derive",
+]
 
 [[package]]
 name = "serde_bencoded"
@@ -1090,6 +1137,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4614a76b2a8be0058caa9dbbaf66d988527d86d003c11a94fbd335d7661edcef"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "slotmap"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1e08e261d0e8f5c43123b7adf3e4ca1690d655377ac93a03b2c9d3e98de1342"
+dependencies = [
+ "serde",
+ "version_check",
 ]
 
 [[package]]
@@ -1398,11 +1455,13 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 name = "vortex"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "base32",
  "bip_metainfo",
  "bittorrent",
  "bytes",
+ "dht",
  "env_logger",
  "futures",
  "indicatif",
@@ -1417,6 +1476,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "sha1",
+ "slotmap",
  "time 0.3.17",
  "tokio",
  "tokio-uring",
