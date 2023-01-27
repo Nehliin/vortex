@@ -97,7 +97,6 @@ impl Dht {
                 if tx.is_closed() {
                     break 'outer;
                 }
-
                 let mut routing_table = this.routing_table.borrow_mut();
                 let Some(closest_node) = routing_table.get_closest_mut(&info_hash) else {
                         continue;
@@ -122,6 +121,13 @@ impl Dht {
                     {
                         Ok(response) => response,
                         Err(err) => {
+                            let mut routing_table = this.routing_table.borrow_mut();
+                            if let Some(node) = routing_table.get_mut(&closest_node.id) {
+                                match node.last_status {
+                                    NodeStatus::Good => node.last_status = NodeStatus::Unknown,
+                                    _ => node.last_status = NodeStatus::Bad,
+                                }
+                            }
                             log::error!("Failed get_peers request: {err}");
                             continue;
                         }
@@ -131,6 +137,7 @@ impl Dht {
                         krpc::GetPeerResponseBody::Nodes(nodes) => {
                             for node in nodes.into_iter() {
                                 btree_map.insert(info_hash.distance(&node.id), node);
+                                log::debug!("Inserting: {node:?}");
                                 this.insert_node(node).await;
                             }
                         }
@@ -142,8 +149,13 @@ impl Dht {
                     }
                 }
 
+                log::debug!("Waiting for notify more nodes");
                 // Wait untill more nodes have been added
-                this.node_added_notify.notified().await;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    this.node_added_notify.notified(),
+                )
+                .await;
             }
         });
         rc
@@ -429,16 +441,16 @@ impl Dht {
             // A bucket must exist at this point
             let (bucket_id, mut unknown_nodes) = self.find_bucket_unknown_nodes(&node.id).unwrap();
 
-            // track if all nodes are good
-            let mut all_good = false;
-            'outer: loop {
+            while unknown_nodes
+                .iter()
+                .any(|node| node.current_status() == NodeStatus::Unknown)
+            {
                 // Ping all unknown nodes to see if they might be replaced until either all are
                 // good or a bad one is found
                 for mut unknown_node in unknown_nodes
                     .iter_mut()
                     .filter(|node| node.current_status() == NodeStatus::Unknown)
                 {
-                    all_good = true;
                     match self.transport.ping(&our_id, unknown_node).await {
                         Ok(_) => {
                             unknown_node.last_seen = OffsetDateTime::now_utc();
@@ -447,7 +459,6 @@ impl Dht {
                         Err(err)
                             if err.is_timeout() && unknown_node.last_status == NodeStatus::Good =>
                         {
-                            all_good = false;
                             unknown_node.last_status = NodeStatus::Unknown;
                         }
                         Err(err)
@@ -455,25 +466,18 @@ impl Dht {
                                 && unknown_node.last_status == NodeStatus::Unknown =>
                         {
                             unknown_node.last_status = NodeStatus::Bad;
-                            break 'outer;
                         }
                         Err(_err) if unknown_node.last_status == NodeStatus::Good => {
-                            all_good = false;
                             unknown_node.last_status = NodeStatus::Unknown;
                             unknown_node.last_seen = OffsetDateTime::now_utc();
                         }
                         Err(_err) => {
                             unknown_node.last_status = NodeStatus::Bad;
                             unknown_node.last_seen = OffsetDateTime::now_utc();
-                            break 'outer;
                         }
                     }
                 }
-                if all_good {
-                    break;
-                }
             }
-
             let mut routing_table = self.routing_table.borrow_mut();
             let bucket = routing_table.get_bucket_mut(bucket_id).unwrap();
             // These buckets are very small so fine with O(N^2) here for now
@@ -483,13 +487,13 @@ impl Dht {
                         *current_node = updated_node;
                     }
                     if current_node.last_status == NodeStatus::Bad {
+                        // We only inserted if we found a bad node
+                        inserted = true;
                         // Overwrite the bad one
                         *current_node = node;
                     }
                 }
             }
-            // We only inserted if we found a bad node
-            inserted = !all_good;
             if inserted {
                 // Need to manually update last changed since
                 // the node wasn't written via insert_node

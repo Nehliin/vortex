@@ -10,7 +10,7 @@ fn main() {
     let mut log_builder = env_logger::builder();
     log_builder
         //        .target(env_logger::Target::Pipe(Box::new(log_file)))
-        .filter_level(log::LevelFilter::Info)
+        .filter_level(log::LevelFilter::Debug)
         .init();
 
     tokio_uring::start(async move {
@@ -20,12 +20,12 @@ fn main() {
             .unwrap();
 
         // TODO Refactor out to ui module
-        let refresh_progress = progress.add(ProgressBar::new_spinner());
+        /*let refresh_progress = progress.add(ProgressBar::new_spinner());
         refresh_progress.enable_steady_tick(Duration::from_millis(100));
         refresh_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
-        refresh_progress.set_message("Starting up DHT...");
+        refresh_progress.set_message("Starting up DHT...");*/
         dht.start().await.unwrap();
-        refresh_progress.finish_with_message("DHT started");
+        //refresh_progress.finish_with_message("DHT started");
 
         // Linux mint magnet link + torrent file
         //let magnet_link = "magnet:?xt=urn:btih:CS5SSRQ4EJB2UKD43JUBJCHFPSPOWJNP".to_string();
@@ -33,18 +33,18 @@ fn main() {
         let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
 
         println!("sum: {:x?}", metainfo.info().files().next().unwrap());
-        let find_peer_progress = progress.add(ProgressBar::new_spinner());
+        /*let find_peer_progress = progress.add(ProgressBar::new_spinner());
         find_peer_progress.enable_steady_tick(Duration::from_millis(100));
         find_peer_progress
             .set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
-        find_peer_progress.set_message("Finding peers...");
+        find_peer_progress.set_message("Finding peers...");*/
 
         let info_hash = metainfo.info().info_hash();
         let mut peers_reciver = dht.find_peers(info_hash.as_ref());
 
         let peers = peers_reciver.recv().await.unwrap();
 
-        find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
+//        find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
 
         let torrent_manager = TorrentManager::new(metainfo.info().clone());
 
