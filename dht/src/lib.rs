@@ -88,6 +88,8 @@ impl Dht {
         }
     }
 
+    // TODO look at the RFC overview. Can probably break out the recurisve search from this 
+    // and the start method and reuse it for both.
     pub fn find_peers(&self, info_hash: &[u8]) -> tokio::sync::mpsc::Receiver<Vec<Peer>> {
         let this = self.clone();
         let (tx, rc) = tokio::sync::mpsc::channel(64);
@@ -97,14 +99,15 @@ impl Dht {
                 if tx.is_closed() {
                     break 'outer;
                 }
-                let mut routing_table = this.routing_table.borrow_mut();
-                let Some(closest_node) = routing_table.get_closest_mut(&info_hash) else {
-                        continue;
-                };
-
                 let mut btree_map = BTreeMap::new();
-                btree_map.insert(info_hash.distance(&closest_node.id), *closest_node);
-                drop(routing_table);
+                {
+                    let mut routing_table = this.routing_table.borrow_mut();
+                    let Some(closest_node) = routing_table.get_closest_mut(&info_hash) else {
+                        continue;
+                    };
+                    btree_map.insert(info_hash.distance(&closest_node.id), *closest_node);
+                }
+
                 loop {
                     let Some((_, closest_node)) = btree_map.pop_first() else {
                         // Wait for more nodes
@@ -113,7 +116,6 @@ impl Dht {
                     log::debug!("Closest node: {closest_node:?}");
                     let our_id = this.routing_table.borrow().own_id;
 
-                    // TODO update node status
                     let response = match this
                         .transport
                         .get_peers(&our_id, info_hash.as_bytes(), &closest_node)
