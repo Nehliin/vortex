@@ -44,6 +44,7 @@ impl NodeId {
         NodeId(dist)
     }
 
+    // TODO: duplicated with deref impl
     pub fn as_bytes(&self) -> [u8; 20] {
         self.0
     }

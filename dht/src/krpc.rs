@@ -21,7 +21,7 @@ use crate::node::{Node, NodeId, NodeStatus};
 // does all io
 // 2. KrpcConnection: Node + weak ref to socket + all rpc methods
 //
-// KrpcQuery builder just like request builder, same with response 
+// KrpcQuery builder just like request builder, same with response
 // within those you can provide timeout per request (but they have a default value)
 // Both implement IntoKrpcPacket which is what the socket accept
 
@@ -448,7 +448,7 @@ impl KrpcSocket {
         &self,
         querying_node: &NodeId,
         target: &NodeId,
-        queried_node: &Node,
+        node: &Node,
     ) -> Result<FindNodesResponse, Error> {
         let transaction_id = self.gen_transaction_id();
 
@@ -464,7 +464,7 @@ impl KrpcSocket {
             e: None,
         };
 
-        if let Response::FindNode { id, nodes } = self.send_req(queried_node.addr, req).await? {
+        if let Response::FindNode { id, nodes } = self.send_req(node.addr, req).await? {
             let nodes = deserialize_compact_nodes(nodes);
             Ok(FindNodesResponse {
                 id: id.as_slice().into(),
@@ -557,33 +557,39 @@ impl KrpcSocket {
         }
     }
 
-    /*pub async fn announce_peer(
+    pub async fn announce_peer(
         &self,
         querying_node: &NodeId,
         info_hash: [u8; 20],
+        implied_port: bool,
         port: u16,
         token: ByteBuf,
+        node: &Node,
     ) -> Result<AnnounceResponse, Error> {
-        //announce_peers Query = {"t":"aa", "y":"q", "q":"announce_peer", "a": {"id":"abcdefghij0123456789", "implied_port": 1, "info_hash":"mnopqrstuvwxyz123456", "port": 6881, "token": "aoeusnth"}}
-        const QUERY: &str = "announce_peer";
-
         let transaction_id = self.gen_transaction_id();
-
-        let req = KrpcReq {
+        let req = KrpcPacket {
             t: transaction_id,
             y: 'q',
-            q: QUERY,
-            a: Query::AnnouncePeer {
+            q: Some("announce_peer".to_string()),
+            a: Some(Query::AnnouncePeer {
                 id: ByteBuf::from(querying_node.as_bytes()),
-                implied_port: false,
+                implied_port,
                 info_hash: ByteBuf::from(info_hash),
                 port,
                 token,
-            },
+            }),
+            r: None,
+            e: None,
         };
 
-        //match self.send_req(node, req)
-    }*/
+        if let Response::QueriedNodeId { id } = self.send_req(node.addr, req).await? {
+            Ok(AnnounceResponse {
+                id: id.as_slice().into(),
+            })
+        } else {
+            panic!("unexpected response");
+        }
+    }
 }
 
 #[cfg(test)]
