@@ -1,6 +1,5 @@
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
     net::{IpAddr, SocketAddr},
     path::Path,
     rc::Rc,
@@ -115,7 +114,7 @@ impl Dht {
         tokio_uring::spawn(async move {
             while !tx.is_closed() {
                 log::debug!("Start search for peers");
-                this.search(info_hash).await.unwrap();
+                this.search(info_hash, true).await.unwrap();
                 let nodes = this
                     .routing_table
                     .borrow()
@@ -195,6 +194,7 @@ impl Dht {
                             .unwrap();
                     }
                     Query::GetPeers { id: _, info_hash } => {
+                        // TODO verify tokens
                         // Somehow inspect peer list and provide peers if they
                         // exist or otherwise return closest nodes. Consider having
                         // a trait that specifices the peer list interface that may be used.
@@ -300,7 +300,7 @@ impl Dht {
                 node.last_status = NodeStatus::Good;
                 node.id = pong.id;
                 log::debug!("Node {} responded", node.addr);
-                assert!(self.insert_node(node).await);
+                assert!(self.insert_node(node, None).await);
                 any_success = true;
             }
         }
@@ -388,7 +388,7 @@ impl Dht {
                     candiate.last_seen = OffsetDateTime::now_utc();
                     candiate.last_status = NodeStatus::Good;
                     for node in nodes {
-                        if self.insert_node(node).await {
+                        if self.insert_node(node, None).await {
                             // Insert will schedule refreshes on it's own
                             need_refresh_scheduled = false;
                             log::debug!("Refreshed bucket found new node: {:?}", node.id);
@@ -428,7 +428,7 @@ impl Dht {
         });
     }
 
-    async fn insert_node(&self, node: Node) -> bool {
+    async fn insert_node(&self, node: Node, target_id: Option<NodeId>) -> bool {
         let mut inserted = false;
         let (our_id, updated_buckets @ [bucket_id_one, bucket_id_two]) = {
             let mut routing_table = self.routing_table.borrow_mut();
@@ -499,6 +499,20 @@ impl Dht {
                 // the node wasn't written via insert_node
                 bucket.update_last_changed();
                 self.schedule_refresh(bucket_id);
+            } else if let Some(target_id) = target_id {
+                // Find the node in the bucket that is furthest away from the target
+                // (Unwrap is fine since the bucket must be full at this point so the iterator can't
+                // be empty)
+                let furthest_away = bucket
+                    .nodes_mut()
+                    .max_by_key(|node| node.id.distance(&target_id))
+                    .unwrap();
+                *furthest_away = node;
+                inserted = true;
+                // Need to manually update last changed since
+                // the node wasn't written via insert_node
+                bucket.update_last_changed();
+                self.schedule_refresh(bucket_id);
             }
         } else {
             // Insert node checks if it's "splittable"
@@ -529,11 +543,11 @@ impl Dht {
     }
 
     // Recursivly searches the routing table for the closest nodes to the target
-    async fn search(&self, target: NodeId) -> anyhow::Result<()> {
+    async fn search(&self, target: NodeId, force_insert: bool) -> anyhow::Result<()> {
         let mut prev_min = ID_MAX;
         let own_id = self.routing_table.borrow().own_id;
         loop {
-            log::info!("Searching v2 for: {target:?}");
+            log::info!("Searching for: {target:?}");
             let next_to_query = *self
                 .routing_table
                 .borrow_mut()
@@ -553,9 +567,11 @@ impl Dht {
                         // id in the table at this point
                         let queried_node = routing_table.get_mut(&next_to_query.id).unwrap();
                         queried_node.last_status = NodeStatus::Good;
+                        queried_node.last_seen = OffsetDateTime::now_utc();
                         reponse
                     }
                     Err(err) => {
+                        // TODO: Update last_seen
                         log::warn!("{next_to_query:?} find nodes query failed: {err}");
                         match next_to_query.last_status {
                             NodeStatus::Good => {
@@ -585,8 +601,8 @@ impl Dht {
                 };
                 log::debug!("Got nodes from: {next_to_query:?}");
                 for node in response.nodes {
-                    // TODO: Should this force insert?
-                    if self.insert_node(node).await {
+                    let target = force_insert.then_some(target);
+                    if self.insert_node(node, target).await {
                         log::debug!("Inserted node");
                     } else {
                         log::debug!("Did not insert node because of full routing table");
@@ -658,12 +674,8 @@ impl Dht {
                 GetPeerResponseBody::Nodes(nodes) => {
                     log::debug!("Got nodes from: {node:?}");
                     for node in nodes.into_iter() {
-                        // TODO: Should this force insert?
-                        if self.insert_node(node).await {
-                            log::debug!("Inserted node");
-                        } else {
-                            log::debug!("Did not insert node because of full routing table");
-                        }
+                        assert!(self.insert_node(node, Some(*target)).await);
+                        log::debug!("Inserted node");
                     }
                 }
                 GetPeerResponseBody::Peers(peers) => {
@@ -679,7 +691,7 @@ impl Dht {
 
     pub async fn start(&self) -> anyhow::Result<()> {
         let own_id = self.routing_table.borrow().own_id;
-        self.search(own_id).await
+        self.search(own_id, false).await
     }
 }
 
