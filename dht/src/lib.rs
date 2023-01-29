@@ -43,6 +43,11 @@ fn load_table(path: &Path) -> Option<RoutingTable> {
     serde_json::from_reader(std::fs::File::open(path).ok()?).ok()?
 }
 
+
+// Notes on integrating with the client:
+// Dht handle that contains channel with operations (aka actor model). The handle can contain the
+// receiver of the dht statistics as well
+
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 // TODO: refresh our own id occasionally as well

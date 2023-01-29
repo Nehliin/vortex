@@ -20,6 +20,10 @@ use crate::node::{Node, NodeId, NodeStatus};
 // 1. KrpcSocket: Single UDP socket, contains transaction id map and generates transaction ids
 // does all io
 // 2. KrpcConnection: Node + weak ref to socket + all rpc methods
+//
+// KrpcQuery builder just like request builder, same with response 
+// within those you can provide timeout per request (but they have a default value)
+// Both implement IntoKrpcPacket which is what the socket accept
 
 // TODO try to avoid allocations for ids
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
