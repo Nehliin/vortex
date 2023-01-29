@@ -19,6 +19,7 @@ use crate::{
 mod krpc;
 mod node;
 mod routing_table;
+mod token_store;
 
 const BOOTSTRAP_NODES: [&str; 5] = [
     "router.bittorrent.com:6881",
