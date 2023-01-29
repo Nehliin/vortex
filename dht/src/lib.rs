@@ -1,5 +1,10 @@
 use std::{
-    cell::RefCell, collections::BTreeMap, net::SocketAddr, path::Path, rc::Rc, time::Duration,
+    cell::RefCell,
+    collections::BTreeMap,
+    net::{IpAddr, SocketAddr},
+    path::Path,
+    rc::Rc,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -8,10 +13,11 @@ use krpc::{Peer, Query};
 use sha1::{Digest, Sha1};
 use slotmap::Key;
 use time::OffsetDateTime;
+use token_store::TokenStore;
 use tokio::sync::Notify;
 
 use crate::{
-    krpc::{serialize_compact_nodes, FindNodesResponse, KrpcSocket},
+    krpc::{serialize_compact_nodes, FindNodesResponse, GetPeerResponseBody, KrpcSocket},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
     routing_table::{BucketId, RoutingTable, BUCKET_SIZE},
 };
@@ -43,7 +49,6 @@ fn load_table(path: &Path) -> Option<RoutingTable> {
     serde_json::from_reader(std::fs::File::open(path).ok()?).ok()?
 }
 
-
 // Notes on integrating with the client:
 // Dht handle that contains channel with operations (aka actor model). The handle can contain the
 // receiver of the dht statistics as well
@@ -55,6 +60,7 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub struct Dht {
     transport: KrpcSocket,
     routing_table: Rc<RefCell<RoutingTable>>,
+    token_store: TokenStore,
     // (This doesn't need to be multi threaded)
     node_added_notify: Rc<Notify>,
 }
@@ -69,6 +75,7 @@ impl Dht {
                 transport,
                 routing_table: Rc::new(RefCell::new(table)),
                 node_added_notify: Rc::new(Notify::new()),
+                token_store: TokenStore::new(),
             };
             for bucket_id in bucket_ids {
                 dht.schedule_refresh(bucket_id);
@@ -83,6 +90,7 @@ impl Dht {
                 transport,
                 routing_table: Rc::new(RefCell::new(routing_table)),
                 node_added_notify: Rc::new(Notify::new()),
+                token_store: TokenStore::new(),
             };
 
             log::info!("Bootstrapping");
@@ -94,69 +102,53 @@ impl Dht {
         }
     }
 
-    // TODO look at the RFC overview. Can probably break out the recurisve search from this 
-    // and the start method and reuse it for both.
     pub fn find_peers(&self, info_hash: &[u8]) -> tokio::sync::mpsc::Receiver<Vec<Peer>> {
+        // Search may take the sender as optional argument
+        // 1  search for nodes close to target
+        // 2. get k_closest
+        // 3. get_peers
+        // 4. announce to those (ensure token exists)
+        // 3. periodically start from 1 again
         let this = self.clone();
         let (tx, rc) = tokio::sync::mpsc::channel(64);
         let info_hash = NodeId::from(info_hash);
         tokio_uring::spawn(async move {
-            'outer: loop {
-                if tx.is_closed() {
-                    break 'outer;
-                }
-                let mut btree_map = BTreeMap::new();
-                {
-                    let mut routing_table = this.routing_table.borrow_mut();
-                    let Some(closest_node) = routing_table.get_closest_mut(&info_hash) else {
-                        continue;
-                    };
-                    btree_map.insert(info_hash.distance(&closest_node.id), *closest_node);
-                }
-
-                loop {
-                    let Some((_, closest_node)) = btree_map.pop_first() else {
-                        // Wait for more nodes
-                        break;
-                    };
-                    log::debug!("Closest node: {closest_node:?}");
-                    let our_id = this.routing_table.borrow().own_id;
-
-                    let response = match this
-                        .transport
-                        .get_peers(&our_id, info_hash.as_bytes(), &closest_node)
-                        .await
-                    {
-                        Ok(response) => response,
-                        Err(err) => {
-                            let mut routing_table = this.routing_table.borrow_mut();
-                            if let Some(node) = routing_table.get_mut(&closest_node.id) {
-                                match node.last_status {
-                                    NodeStatus::Good => node.last_status = NodeStatus::Unknown,
-                                    _ => node.last_status = NodeStatus::Bad,
-                                }
+            while !tx.is_closed() {
+                log::debug!("Start search for peers");
+                this.search(info_hash).await.unwrap();
+                let nodes = this
+                    .routing_table
+                    .borrow()
+                    .get_k_closest(BUCKET_SIZE, &info_hash);
+                this.get_peers_from_nodes(&info_hash, &nodes, tx.clone())
+                    .await
+                    .unwrap();
+                let own_id = this.routing_table.borrow().own_id;
+                for node in nodes {
+                    if let IpAddr::V4(addr) = node.addr.ip() {
+                        if let Some(token) = this.token_store.get_token(addr) {
+                            if this
+                                .transport
+                                .announce_peer(
+                                    &own_id,
+                                    *info_hash,
+                                    true,
+                                    1337,
+                                    serde_bytes::ByteBuf::from(token),
+                                    &node,
+                                )
+                                .await
+                                .is_err()
+                            {
+                                log::error!("Announce failed!");
                             }
-                            log::error!("Failed get_peers request: {err}");
-                            continue;
+                        } else {
+                            log::warn!("Token not found for: {addr}");
                         }
-                    };
-
-                    match response.body {
-                        krpc::GetPeerResponseBody::Nodes(nodes) => {
-                            for node in nodes.into_iter() {
-                                btree_map.insert(info_hash.distance(&node.id), node);
-                                log::debug!("Inserting: {node:?}");
-                                this.insert_node(node).await;
-                            }
-                        }
-                        krpc::GetPeerResponseBody::Peers(peers) => {
-                            if tx.send(peers).await.is_err() {
-                                break 'outer;
-                            }
-                        }
+                    } else {
+                        panic!("Tokens may only be stored for nodes with Ipv4 addrs.");
                     }
                 }
-
                 log::debug!("Waiting for notify more nodes");
                 // Wait untill more nodes have been added
                 let _ = tokio::time::timeout(
@@ -536,26 +528,23 @@ impl Dht {
         Some((bucket_id, unknown_nodes))
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
-        // Find closest nodes
-        // 1. look in bootstrap for self
-        // 2. recursivly look for the closest node to self in the resposne
-        let own_id = self.routing_table.borrow().own_id;
+    // Recursivly searches the routing table for the closest nodes to the target
+    async fn search(&self, target: NodeId) -> anyhow::Result<()> {
         let mut prev_min = ID_MAX;
-
+        let own_id = self.routing_table.borrow().own_id;
         loop {
-            log::info!("Scanning");
+            log::info!("Searching v2 for: {target:?}");
             let next_to_query = *self
                 .routing_table
                 .borrow_mut()
-                .get_closest_mut(&own_id)
+                .get_closest_mut(&target)
                 .context("No nodes in routing table")?;
 
-            let distance = own_id.distance(&next_to_query.id);
+            let distance = target.distance(&next_to_query.id);
             if distance < prev_min {
                 let response = match self
                     .transport
-                    .find_nodes(&own_id, &own_id, &next_to_query)
+                    .find_nodes(&own_id, &target, &next_to_query)
                     .await
                 {
                     Ok(reponse) => {
@@ -567,7 +556,7 @@ impl Dht {
                         reponse
                     }
                     Err(err) => {
-                        log::warn!("{next_to_query:?} ping failed: {err}");
+                        log::warn!("{next_to_query:?} find nodes query failed: {err}");
                         match next_to_query.last_status {
                             NodeStatus::Good => {
                                 let mut routing_table = self.routing_table.borrow_mut();
@@ -584,19 +573,23 @@ impl Dht {
                                 let queried_node =
                                     routing_table.get_mut(&next_to_query.id).unwrap();
                                 queried_node.last_status = NodeStatus::Bad;
+                                log::debug!("Setting status of {next_to_query:?} to bad");
                             }
                             NodeStatus::Bad => {
+                                log::debug!("Removing {next_to_query:?} from table");
                                 self.routing_table.borrow_mut().remove(&next_to_query)?;
                             }
                         }
                         continue;
                     }
                 };
-
                 log::debug!("Got nodes from: {next_to_query:?}");
-                for node in response.nodes.into_iter() {
+                for node in response.nodes {
+                    // TODO: Should this force insert?
                     if self.insert_node(node).await {
                         log::debug!("Inserted node");
+                    } else {
+                        log::debug!("Did not insert node because of full routing table");
                     }
                 }
                 prev_min = distance;
@@ -605,6 +598,88 @@ impl Dht {
             }
         }
         Ok(())
+    }
+
+    // Expected to be called after a search has been made
+    async fn get_peers_from_nodes(
+        &self,
+        target: &NodeId,
+        nodes: &[Node],
+        peer_listener: tokio::sync::mpsc::Sender<Vec<Peer>>,
+    ) -> anyhow::Result<()> {
+        let own_id = self.routing_table.borrow().own_id;
+
+        for node in nodes {
+            let response = match self
+                .transport
+                .get_peers(&own_id, target.as_bytes(), node)
+                .await
+            {
+                Ok(reponse) => {
+                    let mut routing_table = self.routing_table.borrow_mut();
+                    // Unwrap is fine here since it should always exists a node with the given
+                    // id in the table at this point
+                    let queried_node = routing_table.get_mut(&node.id).unwrap();
+                    queried_node.last_status = NodeStatus::Good;
+                    reponse
+                }
+                Err(err) => {
+                    log::warn!("{node:?} ping failed: {err}");
+                    match node.last_status {
+                        NodeStatus::Good => {
+                            let mut routing_table = self.routing_table.borrow_mut();
+                            // Unwrap is fine here since it should always exists a node with the given
+                            // id in the table at this point
+                            let queried_node = routing_table.get_mut(&node.id).unwrap();
+                            queried_node.last_status = NodeStatus::Unknown;
+                        }
+                        NodeStatus::Unknown => {
+                            let mut routing_table = self.routing_table.borrow_mut();
+                            // Unwrap is fine here since it should always exists a node with the given
+                            // id in the table at this point
+                            let queried_node = routing_table.get_mut(&node.id).unwrap();
+                            queried_node.last_status = NodeStatus::Bad;
+                        }
+                        NodeStatus::Bad => {
+                            self.routing_table.borrow_mut().remove(node)?;
+                        }
+                    }
+                    continue;
+                }
+            };
+            if let IpAddr::V4(addr) = node.addr.ip() {
+                self.token_store
+                    .store_token(addr, response.token.into_vec().into());
+            } else {
+                log::error!("Tokens may only be stored for nodes with Ipv4 addrs.");
+            }
+
+            match response.body {
+                GetPeerResponseBody::Nodes(nodes) => {
+                    log::debug!("Got nodes from: {node:?}");
+                    for node in nodes.into_iter() {
+                        // TODO: Should this force insert?
+                        if self.insert_node(node).await {
+                            log::debug!("Inserted node");
+                        } else {
+                            log::debug!("Did not insert node because of full routing table");
+                        }
+                    }
+                }
+                GetPeerResponseBody::Peers(peers) => {
+                    log::info!("Got peers! ({})", peers.len());
+                    if peer_listener.send(peers).await.is_err() {
+                        log::debug!("Peer listener disconnected");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn start(&self) -> anyhow::Result<()> {
+        let own_id = self.routing_table.borrow().own_id;
+        self.search(own_id).await
     }
 }
 
