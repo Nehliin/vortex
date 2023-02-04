@@ -195,14 +195,118 @@ pub struct KrpcPacket {
 }
 
 #[derive(Debug)]
+pub struct Ping {
+    id: NodeId,
+}
+
+impl Rpc for Ping {
+    type Response = Pong;
+
+    fn into_packet(self, transaction_id: ByteBuf) -> KrpcPacket {
+        KrpcPacket {
+            t: transaction_id,
+            y: 'q',
+            q: Some("ping".to_string()),
+            a: Some(Query::Ping {
+                id: ByteBuf::from(self.id.as_bytes()),
+            }),
+            r: None,
+            e: None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Pong {
     pub id: NodeId,
+}
+
+impl TryFrom<Answer> for Pong {
+    type Error = KrpcError;
+
+    fn try_from(answer: Answer) -> Result<Self, Self::Error> {
+        match answer {
+            Answer::QueriedNodeId { id } => Ok(Pong {
+                id: id.as_slice().into(),
+            }),
+            _ => Err(KrpcError::protocol(
+                "Unexpected answer, expected pong".to_owned(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FindNodes {
+    id: NodeId,
+    target: NodeId,
+}
+
+impl Rpc for FindNodes {
+    type Response = FindNodesResponse;
+
+    fn into_packet(self, transaction_id: ByteBuf) -> KrpcPacket {
+        KrpcPacket {
+            t: transaction_id,
+            y: 'q',
+            q: Some("find_node".to_string()),
+            a: Some(Query::FindNode {
+                id: ByteBuf::from(self.id.as_bytes()),
+                target: ByteBuf::from(self.target.as_bytes()),
+            }),
+            r: None,
+            e: None,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct FindNodesResponse {
     pub id: NodeId,
     pub nodes: Vec<Node>,
+}
+
+impl TryFrom<Answer> for FindNodesResponse {
+    type Error = KrpcError;
+
+    fn try_from(answer: Answer) -> Result<Self, Self::Error> {
+        match answer {
+            Answer::FindNode { id, nodes } => {
+                let nodes = deserialize_compact_nodes(nodes);
+                Ok(FindNodesResponse {
+                    id: id.as_slice().into(),
+                    nodes,
+                })
+            }
+            _ => Err(KrpcError::protocol(
+                "Unexpected answer, expected find nodes response".to_owned(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct GetPeers {
+    id: NodeId,
+    info_hash: [u8; 20],
+}
+
+impl Rpc for GetPeers {
+    type Response = GetPeersResponse;
+
+    fn into_packet(self, transaction_id: ByteBuf) -> KrpcPacket {
+        KrpcPacket {
+            t: transaction_id,
+            y: 'q',
+            q: Some("get_peers".to_string()),
+            a: Some(Query::GetPeers {
+                id: ByteBuf::from(self.id.as_bytes()),
+                info_hash: ByteBuf::from(self.info_hash),
+            }),
+            r: None,
+            e: None,
+        }
+    }
 }
 
 // TODO: move
@@ -212,7 +316,7 @@ pub struct Peer {
 }
 
 #[derive(Debug)]
-pub enum GetPeerResponseBody {
+pub enum GetPeersResponseBody {
     Nodes(Vec<Node>),
     Peers(Vec<Peer>),
 }
@@ -221,12 +325,123 @@ pub enum GetPeerResponseBody {
 pub struct GetPeersResponse {
     pub id: NodeId,
     pub token: ByteBuf,
-    pub body: GetPeerResponseBody,
+    pub body: GetPeersResponseBody,
+}
+
+impl TryFrom<Answer> for GetPeersResponse {
+    type Error = KrpcError;
+
+    fn try_from(answer: Answer) -> Result<Self, Self::Error> {
+        match answer {
+            Answer::GetPeers {
+                id,
+                token,
+                values,
+                nodes,
+            } => {
+                if let Some(peers) = values {
+                    // Might miss if invalid format and its not divisible by chunk size
+                    let peers = peers
+                        .into_iter()
+                        .flat_map(|peer_bytes| {
+                            peer_bytes
+                                .chunks_exact(6)
+                                .map(|bytes| Peer {
+                                    addr: SocketAddr::new(
+                                        IpAddr::V4(Ipv4Addr::new(
+                                            bytes[0], bytes[1], bytes[2], bytes[3],
+                                        )),
+                                        u16::from_be_bytes([bytes[4], bytes[5]]),
+                                    ),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+
+                    return Ok(GetPeersResponse {
+                        id: id.as_slice().into(),
+                        token,
+                        body: GetPeersResponseBody::Peers(peers),
+                    });
+                }
+
+                if let Some(nodes) = nodes {
+                    let nodes = deserialize_compact_nodes(nodes);
+
+                    return Ok(GetPeersResponse {
+                        id: id.as_slice().into(),
+                        token,
+                        body: GetPeersResponseBody::Nodes(nodes),
+                    });
+                }
+                Err(KrpcError::protocol(
+                    "Response contained neither nodes nor peers".to_string(),
+                ))
+            }
+            Answer::FindNode { id, nodes } => {
+                let nodes = deserialize_compact_nodes(nodes);
+
+                Ok(GetPeersResponse {
+                    id: id.as_slice().into(),
+                    token: ByteBuf::new(),
+                    body: GetPeersResponseBody::Nodes(nodes),
+                })
+            }
+            _ => Err(KrpcError::protocol(
+                "Unexpected response from get_peers".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AnnouncePeer {
+    id: NodeId,
+    info_hash: [u8; 20],
+    implied_port: bool,
+    port: u16,
+    token: ByteBuf,
+}
+
+impl Rpc for AnnouncePeer {
+    type Response = AnnounceResponse;
+
+    fn into_packet(self, transaction_id: ByteBuf) -> KrpcPacket {
+        KrpcPacket {
+            t: transaction_id,
+            y: 'q',
+            q: Some("announce_peer".to_string()),
+            a: Some(Query::AnnouncePeer {
+                id: ByteBuf::from(self.id.as_bytes()),
+                implied_port: self.implied_port,
+                info_hash: ByteBuf::from(self.info_hash),
+                port: self.port,
+                token: self.token,
+            }),
+            r: None,
+            e: None,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct AnnounceResponse {
     pub id: NodeId,
+}
+
+impl TryFrom<Answer> for AnnounceResponse {
+    type Error = KrpcError;
+
+    fn try_from(answer: Answer) -> Result<Self, Self::Error> {
+        match answer {
+            Answer::QueriedNodeId { id } => Ok(AnnounceResponse {
+                id: id.as_slice().into(),
+            }),
+            _ => Err(KrpcError::protocol(
+                "Unexpected answer, expected announce peer response".to_owned(),
+            )),
+        }
+    }
 }
 
 fn deserialize_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
@@ -266,11 +481,11 @@ pub fn serialize_compact_nodes(nodes: &[Node]) -> ByteBuf {
 }
 
 #[derive(Clone, Default, Debug)]
-struct InflightRpcs(Rc<RefCell<AHashMap<ByteBuf, oneshot::Sender<Result<Response, Error>>>>>);
+struct InflightRpcs(Rc<RefCell<AHashMap<ByteBuf, oneshot::Sender<Result<Answer, KrpcError>>>>>);
 
 // Ensures Refcell borrow is never held across await point
 impl InflightRpcs {
-    fn insert_rpc(&self, transaction_id: ByteBuf) -> oneshot::Receiver<Result<Response, Error>> {
+    fn insert_rpc(&self, transaction_id: ByteBuf) -> oneshot::Receiver<Result<Answer, KrpcError>> {
         let mut table = (*self.0).borrow_mut();
         let (tx, rx) = oneshot::channel();
         table.insert(transaction_id, tx);
@@ -285,7 +500,7 @@ impl InflightRpcs {
     fn remove_rpc(
         &self,
         transaction_id: &ByteBuf,
-    ) -> Option<oneshot::Sender<Result<Response, Error>>> {
+    ) -> Option<oneshot::Sender<Result<Answer, KrpcError>>> {
         let mut table = (*self.0).borrow_mut();
         table.remove(transaction_id)
     }
@@ -295,6 +510,310 @@ impl InflightRpcs {
 #[derive(Clone)]
 pub struct KrpcSocket {
     // TODO Set cpu affinity for socket
+    socket: Rc<UdpSocket>,
+    connection_table: InflightRpcs,
+}
+
+pub trait Rpc {
+    type Response: TryFrom<Answer>;
+
+    fn into_packet(self, transaction_id: ByteBuf) -> KrpcPacket;
+}
+
+pub struct QueryBuilder<T> {
+    id: ByteBuf,
+    timeout: Option<Duration>,
+    body: T,
+    // retries?
+    client: KrpcClient,
+}
+
+impl<T: Rpc> QueryBuilder<T> {
+    pub fn with_timeout(self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    pub async fn send(self, addr: SocketAddr) -> Result<T::Response, Error> {
+        let packet: KrpcPacket = self.body.into_packet(self.id);
+        let transaction_id = packet.t.clone();
+        let encoded = serde_bencoded::to_vec(&packet)?;
+
+        let rx = self.client.connection_table.insert_rpc(transaction_id);
+
+        let (res, _) = self.client.socket.send_to(encoded, addr).await;
+        res?;
+
+        let response =
+            match tokio::time::timeout(self.timeout.unwrap_or(Duration::from_secs(5)), rx).await? {
+                Ok(response) => response?,
+                // Sender should never be dropped without sending a response
+                Err(_) => unreachable!(),
+            };
+
+        response.try_into().map_err(|_err| {
+            Error::Protocol(KrpcError::protocol(
+                "Unexpected response received".to_string(),
+            ))
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct KrpcClient {
+    socket: Rc<UdpSocket>,
+    connection_table: InflightRpcs,
+}
+
+impl KrpcClient {
+    fn gen_transaction_id(&self) -> ByteBuf {
+        const MAX_IDS: usize = 26 * 2 + 10;
+        // Probably doesn't need to be Alphanumeric?
+        use rand::distributions::Alphanumeric;
+        let mut rng = rand::thread_rng();
+        loop {
+            let id = ByteBuf::from([rng.sample(Alphanumeric), rng.sample(Alphanumeric)]);
+            if !self.connection_table.exists(&id) {
+                return id;
+            }
+        }
+    }
+
+    // TODO optimize and rework error handling
+    pub async fn ping(&self, querying_node: &NodeId, node: &Node) -> Result<Pong, KrpcError> {
+        let transaction_id = self.gen_transaction_id();
+
+        let req = KrpcPacket {
+            t: transaction_id,
+            y: 'q',
+            q: Some("ping".to_string()),
+            a: Some(Query::Ping {
+                id: ByteBuf::from(querying_node.as_bytes()),
+            }),
+            r: None,
+            e: None,
+        };
+
+        if let Answer::QueriedNodeId { id } = self.send_req(node.addr, req).await? {
+            Ok(Pong {
+                id: id.as_slice().into(),
+            })
+        } else {
+            panic!("unexpected response");
+        }
+    }
+
+    pub async fn find_nodes(
+        &self,
+        querying_node: &NodeId,
+        target: &NodeId,
+        node: &Node,
+    ) -> Result<FindNodesResponse, KrpcError> {
+        let transaction_id = self.gen_transaction_id();
+
+        let req = KrpcPacket {
+            t: transaction_id,
+            y: 'q',
+            q: Some("find_node".to_string()),
+            a: Some(Query::FindNode {
+                id: ByteBuf::from(querying_node.as_bytes()),
+                target: ByteBuf::from(target.as_bytes()),
+            }),
+            r: None,
+            e: None,
+        };
+
+        if let Answer::FindNode { id, nodes } = self.send_req(node.addr, req).await? {
+            let nodes = deserialize_compact_nodes(nodes);
+            Ok(FindNodesResponse {
+                id: id.as_slice().into(),
+                nodes,
+            })
+        } else {
+            panic!("unexpected response");
+        }
+    }
+
+    pub async fn get_peers(
+        &self,
+        querying_node: &NodeId,
+        info_hash: [u8; 20],
+        node: &Node,
+    ) -> Result<GetPeersResponse, KrpcError> {
+        let transaction_id = self.gen_transaction_id();
+
+        let req = KrpcPacket {
+            t: transaction_id,
+            y: 'q',
+            q: Some("get_peers".to_string()),
+            a: Some(Query::GetPeers {
+                id: ByteBuf::from(querying_node.as_bytes()),
+                info_hash: ByteBuf::from(info_hash),
+            }),
+            r: None,
+            e: None,
+        };
+
+        // get_peers may return other nodes
+        match self.send_req(node.addr, req).await? {
+            Answer::GetPeers {
+                id,
+                token,
+                values,
+                nodes,
+            } => {
+                if let Some(peers) = values {
+                    // Might miss if invalid format and its not divisible by chunk size
+                    let peers = peers
+                        .into_iter()
+                        .flat_map(|peer_bytes| {
+                            peer_bytes
+                                .chunks_exact(6)
+                                .map(|bytes| Peer {
+                                    addr: SocketAddr::new(
+                                        IpAddr::V4(Ipv4Addr::new(
+                                            bytes[0], bytes[1], bytes[2], bytes[3],
+                                        )),
+                                        u16::from_be_bytes([bytes[4], bytes[5]]),
+                                    ),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+
+                    return Ok(GetPeersResponse {
+                        id: id.as_slice().into(),
+                        token,
+                        body: GetPeerResponse::Peers(peers),
+                    });
+                }
+
+                if let Some(nodes) = nodes {
+                    let nodes = deserialize_compact_nodes(nodes);
+
+                    return Ok(GetPeersResponse {
+                        id: id.as_slice().into(),
+                        token,
+                        body: GetPeerResponse::Nodes(nodes),
+                    });
+                }
+                Err(KrpcError::protocol(
+                    "Response contained neither nodes nor peers".to_string(),
+                ))
+            }
+            Answer::FindNode { id, nodes } => {
+                let nodes = deserialize_compact_nodes(nodes);
+
+                Ok(GetPeersResponse {
+                    id: id.as_slice().into(),
+                    token: ByteBuf::new(),
+                    body: GetPeerResponse::Nodes(nodes),
+                })
+            }
+            _ => Err(KrpcError::protocol(
+                "Unexpected response from get_peers".to_string(),
+            )),
+        }
+    }
+
+    pub async fn announce_peer(
+        &self,
+        querying_node: &NodeId,
+        info_hash: [u8; 20],
+        implied_port: bool,
+        port: u16,
+        token: ByteBuf,
+        node: &Node,
+    ) -> Result<AnnounceResponse, KrpcError> {
+        let transaction_id = self.gen_transaction_id();
+        let req = KrpcPacket {
+            t: transaction_id,
+            y: 'q',
+            q: Some("announce_peer".to_string()),
+            a: Some(Query::AnnouncePeer {
+                id: ByteBuf::from(querying_node.as_bytes()),
+                implied_port,
+                info_hash: ByteBuf::from(info_hash),
+                port,
+                token,
+            }),
+            r: None,
+            e: None,
+        };
+
+        if let Answer::QueriedNodeId { id } = self.send_req(node.addr, req).await? {
+            Ok(AnnounceResponse {
+                id: id.as_slice().into(),
+            })
+        } else {
+            panic!("unexpected response");
+        }
+    }
+
+    pub async fn send_req(&self, addr: SocketAddr, req: KrpcPacket) -> Result<Answer, KrpcError> {
+        let encoded = serde_bencoded::to_vec(&req).unwrap();
+
+        let rx = self.connection_table.insert_rpc(req.t.clone());
+
+        let (res, _) = self.socket.send_to(encoded, addr).await;
+        res.unwrap();
+
+        match tokio::time::timeout(Duration::from_secs(3), rx).await {
+            Ok(Ok(Ok(response))) => Ok(response),
+            Err(_elapsed) => Err(KrpcError {
+                code: 408,
+                description: "Request timed out".to_string(),
+            }),
+            Ok(Ok(Err(err))) => Err(err),
+            Ok(Err(_)) => unreachable!(),
+        }
+    }
+}
+
+// struct Ping {
+//  id
+// }
+// -> into packet
+//
+// trait rpc {
+//  reponse = TryFrom<Answer>
+//  into_packet() -> KrpcPacket
+// }
+//
+// QueryBuilder::new(id).body(impl Rpc).timeout().send(addr)
+//
+// KrpcPacket
+// Query (body)
+// KrpcQuery { id, body, timeout? } -> into KrpcPacket
+// KrpcAnswer { id, body } -> into KrpcPacket
+//
+// <x>Response impl TryFrom<KrpcAnswer>
+//
+// (addr, krcpQuery)
+//  KrpcAnswer::new(query.id).body(Answer::)
+//
+//
+//client::ping(id, struct Ping) -> QueryBuilder .send(addr) -> Result<>
+// QueryBuilder::from(id).body(struct ping).with_timeout() -> krpcpacket
+// client.send(pkt, addr) -> Result<struct Pong, Error>
+//
+// client::ping(struct ping).with_timeout(bla).send::<Pong>(addr);
+
+// ping etc -> KrpcQueryBuilder
+// KrpcQuery::ping(id).with_timeout().send(addr)
+// KrpcQuery::get_peers(get peers body).with_timeout().send(addr)
+// KrpcQueryBuilder -> into packet
+// client.query(krpc_query, addr) -> Result<KrpcAnswer, Error>?
+//
+// KrpcQuery::body() -> Query
+// KrpcQuery::transaction_id() -> id
+// addr can be part of the args
+// server(|query, addr| -> result<KrpcAnswer, Error>)
+// KrpcAnswer::pong(transaction_id, <body>) -> KrpcAnswerBuilder
+// KrpcAnswer::pong(transaction_id, <body>) -> KrpcAnswerBuilder
+
+#[derive(Clone)]
+pub struct KrpcServer {
     socket: Rc<UdpSocket>,
     connection_table: InflightRpcs,
 }
@@ -380,6 +899,7 @@ impl KrpcSocket {
                                 log::warn!("Unknown KRPC response recived, transaction id: {:?} not found in connection_table", packet.t);
                             }
                         } else {
+                            // TODO Return these
                             log::warn!("Invalid KRPC message received, missing error");
                         }
                     }
@@ -390,215 +910,13 @@ impl KrpcSocket {
         incoming_rc
     }
 
-    fn gen_transaction_id(&self) -> ByteBuf {
-        use rand::distributions::Alphanumeric;
-        let mut rng = rand::thread_rng();
-        // handle transaction_ids in a saner way so that
-        // multiple queries can be sent simultaneously per node
-        loop {
-            let id = ByteBuf::from([rng.sample(Alphanumeric), rng.sample(Alphanumeric)]);
-            if !self.connection_table.exists(&id) {
-                return id;
-            }
-        }
-    }
-
-    pub async fn send_req(&self, addr: SocketAddr, req: KrpcPacket) -> Result<Response, Error> {
-        let encoded = serde_bencoded::to_vec(&req).unwrap();
-
-        let rx = self.connection_table.insert_rpc(req.t.clone());
-
-        let (res, _) = self.socket.send_to(encoded, addr).await;
-        res.unwrap();
-
-        match tokio::time::timeout(Duration::from_secs(3), rx).await {
-            Ok(Ok(Ok(response))) => Ok(response),
-            Err(_elapsed) => Err(Error {
-                code: 408,
-                description: "Request timed out".to_string(),
-            }),
-            Ok(Ok(Err(err))) => Err(err),
-            Ok(Err(_)) => unreachable!(),
-        }
-    }
-
-    pub async fn send_response(&self, addr: SocketAddr, req: KrpcPacket) -> Result<(), Error> {
+    pub async fn send_response(&self, addr: SocketAddr, req: KrpcPacket) -> Result<(), KrpcError> {
         let encoded = serde_bencoded::to_vec(&req).unwrap();
 
         let (res, _) = self.socket.send_to(encoded, addr).await;
         res.unwrap();
 
         Ok(())
-    }
-    // TODO optimize and rework error handling
-    pub async fn ping(&self, querying_node: &NodeId, node: &Node) -> Result<Pong, Error> {
-        let transaction_id = self.gen_transaction_id();
-
-        let req = KrpcPacket {
-            t: transaction_id,
-            y: 'q',
-            q: Some("ping".to_string()),
-            a: Some(Query::Ping {
-                id: ByteBuf::from(querying_node.as_bytes()),
-            }),
-            r: None,
-            e: None,
-        };
-
-        if let Response::QueriedNodeId { id } = self.send_req(node.addr, req).await? {
-            Ok(Pong {
-                id: id.as_slice().into(),
-            })
-        } else {
-            panic!("unexpected response");
-        }
-    }
-
-    pub async fn find_nodes(
-        &self,
-        querying_node: &NodeId,
-        target: &NodeId,
-        node: &Node,
-    ) -> Result<FindNodesResponse, Error> {
-        let transaction_id = self.gen_transaction_id();
-
-        let req = KrpcPacket {
-            t: transaction_id,
-            y: 'q',
-            q: Some("find_node".to_string()),
-            a: Some(Query::FindNode {
-                id: ByteBuf::from(querying_node.as_bytes()),
-                target: ByteBuf::from(target.as_bytes()),
-            }),
-            r: None,
-            e: None,
-        };
-
-        if let Response::FindNode { id, nodes } = self.send_req(node.addr, req).await? {
-            let nodes = deserialize_compact_nodes(nodes);
-            Ok(FindNodesResponse {
-                id: id.as_slice().into(),
-                nodes,
-            })
-        } else {
-            panic!("unexpected response");
-        }
-    }
-
-    pub async fn get_peers(
-        &self,
-        querying_node: &NodeId,
-        info_hash: [u8; 20],
-        node: &Node,
-    ) -> Result<GetPeersResponse, Error> {
-        let transaction_id = self.gen_transaction_id();
-
-        let req = KrpcPacket {
-            t: transaction_id,
-            y: 'q',
-            q: Some("get_peers".to_string()),
-            a: Some(Query::GetPeers {
-                id: ByteBuf::from(querying_node.as_bytes()),
-                info_hash: ByteBuf::from(info_hash),
-            }),
-            r: None,
-            e: None,
-        };
-
-        // get_peers may return other nodes
-        match self.send_req(node.addr, req).await? {
-            Response::GetPeers {
-                id,
-                token,
-                values,
-                nodes,
-            } => {
-                if let Some(peers) = values {
-                    // Might miss if invalid format and its not divisible by chunk size
-                    let peers = peers
-                        .into_iter()
-                        .flat_map(|peer_bytes| {
-                            peer_bytes
-                                .chunks_exact(6)
-                                .map(|bytes| Peer {
-                                    addr: SocketAddr::new(
-                                        IpAddr::V4(Ipv4Addr::new(
-                                            bytes[0], bytes[1], bytes[2], bytes[3],
-                                        )),
-                                        u16::from_be_bytes([bytes[4], bytes[5]]),
-                                    ),
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
-
-                    return Ok(GetPeersResponse {
-                        id: id.as_slice().into(),
-                        token,
-                        body: GetPeerResponseBody::Peers(peers),
-                    });
-                }
-
-                if let Some(nodes) = nodes {
-                    let nodes = deserialize_compact_nodes(nodes);
-
-                    return Ok(GetPeersResponse {
-                        id: id.as_slice().into(),
-                        token,
-                        body: GetPeerResponseBody::Nodes(nodes),
-                    });
-                }
-                Err(Error::protocol(
-                    "Response contained neither nodes nor peers".to_string(),
-                ))
-            }
-            Response::FindNode { id, nodes } => {
-                let nodes = deserialize_compact_nodes(nodes);
-
-                Ok(GetPeersResponse {
-                    id: id.as_slice().into(),
-                    token: ByteBuf::new(),
-                    body: GetPeerResponseBody::Nodes(nodes),
-                })
-            }
-            _ => Err(Error::protocol(
-                "Unexpected response from get_peers".to_string(),
-            )),
-        }
-    }
-
-    pub async fn announce_peer(
-        &self,
-        querying_node: &NodeId,
-        info_hash: [u8; 20],
-        implied_port: bool,
-        port: u16,
-        token: ByteBuf,
-        node: &Node,
-    ) -> Result<AnnounceResponse, Error> {
-        let transaction_id = self.gen_transaction_id();
-        let req = KrpcPacket {
-            t: transaction_id,
-            y: 'q',
-            q: Some("announce_peer".to_string()),
-            a: Some(Query::AnnouncePeer {
-                id: ByteBuf::from(querying_node.as_bytes()),
-                implied_port,
-                info_hash: ByteBuf::from(info_hash),
-                port,
-                token,
-            }),
-            r: None,
-            e: None,
-        };
-
-        if let Response::QueriedNodeId { id } = self.send_req(node.addr, req).await? {
-            Ok(AnnounceResponse {
-                id: id.as_slice().into(),
-            })
-        } else {
-            panic!("unexpected response");
-        }
     }
 }
 
@@ -616,7 +934,7 @@ mod tests {
             t: ByteBuf::from(b"aa".to_vec()),
             y: 'e',
             r: None,
-            e: Some(Error::generic("A Generic Error Ocurred".to_owned())),
+            e: Some(KrpcError::generic("A Generic Error Ocurred".to_owned())),
             q: None,
             a: None,
         };
@@ -632,7 +950,7 @@ mod tests {
             t: ByteBuf::from(b"lC".to_vec()),
             y: 'e',
             r: None,
-            e: Some(Error::server("Server Error".to_owned())),
+            e: Some(KrpcError::server("Server Error".to_owned())),
             q: None,
             a: None,
         };
@@ -672,7 +990,7 @@ mod tests {
                 y: 'r',
                 q: None,
                 a: None,
-                r: Some(Response::QueriedNodeId {
+                r: Some(Answer::QueriedNodeId {
                     id: ByteBuf::from([
                         50, 245, 78, 105, 115, 81, 255, 74, 236, 41, 205, 186, 171, 242, 251, 227,
                         70, 124, 194, 103
