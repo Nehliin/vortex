@@ -51,7 +51,7 @@ pub enum Query {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
-pub enum Response {
+pub enum Answer {
     GetPeers {
         id: ByteBuf,
         token: ByteBuf,
@@ -68,17 +68,25 @@ pub enum Response {
     },
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error(transparent)]
+    Protocol(#[from] KrpcError),
+    #[error("Query timed out")]
+    Timeout(#[from] tokio::time::error::Elapsed),
+    #[error("Failed encoding packet")]
+    PacketEncoding(#[from] serde_bencoded::SerError),
+    #[error("Socket error")]
+    IoError(#[from] std::io::Error),
+}
+
 #[derive(Debug, PartialEq)]
-pub struct Error {
+pub struct KrpcError {
     pub code: u64,
     pub description: String,
 }
 
-impl Error {
-    // Perhaps with code constants instead
-    pub fn is_timeout(&self) -> bool {
-        self.code == 408
-    }
+impl KrpcError {
     fn generic(description: String) -> Self {
         Self {
             code: 201,
@@ -108,14 +116,14 @@ impl Error {
     }
 }
 
-fn parse_error<'de, D>(de: D) -> Result<Option<Error>, D::Error>
+fn parse_error<'de, D>(de: D) -> Result<Option<KrpcError>, D::Error>
 where
     D: Deserializer<'de>,
 {
     struct ErrorVisitor;
 
     impl<'de> Visitor<'de> for ErrorVisitor {
-        type Value = Option<Error>;
+        type Value = Option<KrpcError>;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("Expected bencoded list with one error code + description")
@@ -134,7 +142,7 @@ where
             // The next_element must be called here for parsing of the rest of the
             // message to be successful for whatever reason. **shrug**
             if matches!(seq.next_element::<char>(), Ok(None)) {
-                Ok(Some(Error { code, description }))
+                Ok(Some(KrpcError { code, description }))
             } else {
                 Ok(None)
             }
@@ -143,11 +151,11 @@ where
     de.deserialize_any(ErrorVisitor)
 }
 
-fn serialize_error<S>(error: &Option<Error>, se: S) -> Result<S::Ok, S::Error>
+fn serialize_error<S>(error: &Option<KrpcError>, se: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    let Some(Error { code, description }) = error else {
+    let Some(KrpcError { code, description }) = error else {
         return se.serialize_none();
     };
 
@@ -157,7 +165,7 @@ where
     seq.end()
 }
 
-impl std::fmt::Display for Error {
+impl std::fmt::Display for KrpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
             "KrpcError: {},  {}",
@@ -166,7 +174,7 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for KrpcError {}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct KrpcPacket {
@@ -178,12 +186,12 @@ pub struct KrpcPacket {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub a: Option<Query>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub r: Option<Response>,
+    pub r: Option<Answer>,
     #[serde(deserialize_with = "parse_error")]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "serialize_error")]
     #[serde(default)]
-    pub e: Option<Error>,
+    pub e: Option<KrpcError>,
 }
 
 #[derive(Debug)]

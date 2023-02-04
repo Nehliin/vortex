@@ -299,6 +299,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "slotmap",
+ "thiserror",
  "time 0.3.17",
  "tokio",
  "tokio-uring",

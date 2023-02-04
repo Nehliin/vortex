@@ -16,7 +16,7 @@ use token_store::TokenStore;
 use tokio::sync::Notify;
 
 use crate::{
-    krpc::{serialize_compact_nodes, FindNodesResponse, GetPeerResponseBody, KrpcSocket},
+    krpc::{serialize_compact_nodes, FindNodesResponse, GetPeersResponseBody, KrpcSocket},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
     routing_table::{BucketId, RoutingTable, BUCKET_SIZE},
 };
@@ -183,7 +183,7 @@ impl Dht {
                                     y: 'r',
                                     q: None,
                                     a: None,
-                                    r: Some(krpc::Response::FindNode {
+                                    r: Some(krpc::Answer::FindNode {
                                         id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
                                         nodes: serialize_compact_nodes(&closet),
                                     }),
@@ -214,7 +214,7 @@ impl Dht {
                                     y: 'r',
                                     q: None,
                                     a: None,
-                                    r: Some(krpc::Response::FindNode {
+                                    r: Some(krpc::Answer::FindNode {
                                         id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
                                         nodes: serialize_compact_nodes(&closet),
                                     }),
@@ -242,7 +242,7 @@ impl Dht {
                                     y: 'r',
                                     q: None,
                                     a: None,
-                                    r: Some(krpc::Response::QueriedNodeId {
+                                    r: Some(krpc::Answer::QueriedNodeId {
                                         id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
                                     }),
                                     e: None,
