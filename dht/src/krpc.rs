@@ -230,9 +230,11 @@ pub struct AnnounceResponse {
 }
 
 fn deserialize_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
-    // TODO this will panic on invalid input
+    if (bytes.len() % 26) != 0 {
+        log::warn!("Invalid compact node buffer, not divisible by 26");
+    }
     bytes
-        .chunks(26)
+        .chunks_exact(26)
         .map(|chunk| {
             // Seems to be working? Should i reverse this?
             let id = chunk[..20].into();
