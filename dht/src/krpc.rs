@@ -709,7 +709,13 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
         loop {
             let (read, buf) = socket.recv_from(std::mem::take(&mut recv_buffer)).await;
             // TODO cancellation and addr should be sent across with packet
-            let (recv, addr) = read.unwrap();
+            let (recv, addr) = match read {
+                Ok(recv_addr) => recv_addr,
+                Err(err) => {
+                    log::error!("Failed to read from socket: {err}");
+                    continue;
+                }
+            };
             let packet: KrpcPacket = match serde_bencoded::from_bytes(&buf[..recv]) {
                 Ok(packet) => packet,
                 Err(err) => {
