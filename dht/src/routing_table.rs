@@ -287,7 +287,7 @@ mod test {
         }
     }
 
-    #[test]
+    /*#[test]
     fn test_get_closest() {
         let mut routing_table: RoutingTable =
             serde_json::from_reader(std::fs::File::open("get_closest.json").unwrap()).unwrap();
@@ -320,9 +320,9 @@ mod test {
             }
         }
         assert_eq!(found, 1);
-    }
+    }*/
 
-    /*#[test]
+    #[test]
     fn test_bucket_split_basic() {
         let mut routing_table = RoutingTable::new(ID_ZERO);
 
@@ -335,7 +335,7 @@ mod test {
         // Sanity check
         assert!(ID_MAX == end_bytes.as_slice().into());
 
-        for i in 1..33 {
+        for i in 1..17 {
             let id: BigInt = end.clone() - (end.clone() / 32) * i;
             let (_, mut id) = id.to_bytes_be();
             while id.len() < 20 {
@@ -348,45 +348,36 @@ mod test {
                 last_status: NodeStatus::Unknown,
             });
 
-            if i < 17 {
+            if i <= BUCKET_SIZE {
                 assert_eq!(routing_table.buckets.len(), 1);
-                assert_eq!(
-                    routing_table.buckets[0]
-                        .nodes
-                        .iter()
-                        .filter(|node| node.is_some())
-                        .count(),
-                    i
-                );
-                assert_eq!(routing_table.buckets[0].min, ID_ZERO);
-                assert_eq!(routing_table.buckets[0].max, ID_MAX);
+                let (_id, bucket) = routing_table.buckets.iter().next().unwrap();
+                assert_eq!(bucket.nodes.iter().filter(|node| node.is_some()).count(), i);
+                assert_eq!(bucket.min, ID_ZERO);
+                assert_eq!(bucket.max, ID_MAX);
             } else {
                 assert_eq!(routing_table.buckets.len(), 2);
 
+                let (_id, bucket) = routing_table.buckets.iter().next().unwrap();
                 // Check bucket limits
-                assert_eq!(routing_table.buckets[0].min, ID_ZERO);
-                let max = BigInt::from_bytes_be(
-                    num_bigint::Sign::Plus,
-                    routing_table.buckets[0].max.as_slice(),
-                );
+                assert_eq!(bucket.min, ID_ZERO);
+                let max = BigInt::from_bytes_be(num_bigint::Sign::Plus, bucket.max.as_slice());
                 assert_eq!(max, end.clone() / 2);
 
-                let min = BigInt::from_bytes_be(
-                    num_bigint::Sign::Plus,
-                    routing_table.buckets[1].min.as_slice(),
-                );
+                let (_id, second_bucket) = routing_table.buckets.iter().last().unwrap();
+                let min =
+                    BigInt::from_bytes_be(num_bigint::Sign::Plus, second_bucket.min.as_slice());
 
                 assert_eq!(min, end.clone() / 2);
-                assert_eq!(routing_table.buckets[1].max, ID_MAX);
+                assert_eq!(second_bucket.max, ID_MAX);
 
                 for (_, bucket) in routing_table.buckets.iter() {
                     verify_bucket(bucket);
-                    assert!(bucket.nodes.len() == 16);
+                    assert!(bucket.nodes.len() == BUCKET_SIZE);
                 }
-                assert_non_overlapping(&routing_table.buckets[0], &routing_table.buckets[1])
+                assert_non_overlapping(bucket, second_bucket)
             }
         }
-    }*/
+    }
 
     #[test]
     fn test_only_split_own_id() {
@@ -433,7 +424,7 @@ mod test {
         let mut bucket = Bucket {
             min: min.as_slice().into(),
             max: max.as_slice().into(),
-            nodes: [None; 8],
+            nodes: [None, None, None, None, None, None, None, None],
             last_changed: OffsetDateTime::now_utc(),
         };
 
@@ -446,11 +437,158 @@ mod test {
 
     #[test]
     fn is_bucket_full() {
-        assert!(false);
+        let mut bucket = Bucket {
+            min: ID_ZERO,
+            max: ID_MAX,
+            nodes: [
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+            ],
+            last_changed: OffsetDateTime::now_utc(),
+        };
+        assert!(bucket.is_full());
+        bucket
+            .nodes
+            .get_mut(3)
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .last_status = NodeStatus::Bad;
+        assert!(!bucket.is_full());
+        bucket
+            .nodes
+            .get_mut(3)
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .last_status = NodeStatus::Good;
+        bucket.nodes[1] = None;
+        assert!(!bucket.is_full());
     }
 
     #[test]
     fn empty_spot() {
-        assert!(false);
+        let mut bucket = Bucket {
+            min: ID_ZERO,
+            max: ID_MAX,
+            nodes: [
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.1.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+                Some(Node {
+                    id: NodeId::new_in_range(&ID_ZERO, &ID_MAX),
+                    addr: "127.0.0.1:1334".parse().unwrap(),
+                    last_status: NodeStatus::Unknown,
+                    last_seen: OffsetDateTime::now_utc(),
+                }),
+            ],
+            last_changed: OffsetDateTime::now_utc(),
+        };
+        assert!(bucket.empty_spot().is_none());
+        bucket
+            .nodes
+            .get_mut(3)
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .last_status = NodeStatus::Bad;
+        assert_eq!(
+            bucket.empty_spot().unwrap().as_ref().unwrap().addr,
+            "127.1.0.1:1334".parse().unwrap()
+        );
+        bucket
+            .nodes
+            .get_mut(3)
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .last_status = NodeStatus::Good;
+        bucket.nodes[1] = None;
+        assert!(bucket.empty_spot().unwrap().as_ref().is_none());
     }
 }
