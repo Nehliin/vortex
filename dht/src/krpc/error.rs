@@ -22,7 +22,6 @@ pub struct KrpcError {
 }
 
 impl KrpcError {
-    #[allow(dead_code)]
     pub fn generic(description: String) -> Self {
         Self {
             code: 201,

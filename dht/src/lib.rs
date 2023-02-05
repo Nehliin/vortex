@@ -9,7 +9,7 @@ use std::{
 use anyhow::Context;
 use futures::future::join_all;
 use krpc::{
-    protocol::{GetPeers, GetPeersResponseBody, Peer, Ping, FindNodesResponse},
+    protocol::{FindNodesResponse, GetPeers, GetPeersResponseBody, Peer, Ping},
     setup_krpc, KrpcClient, KrpcServer,
 };
 use sha1::{Digest, Sha1};
@@ -19,8 +19,9 @@ use token_store::TokenStore;
 use tokio::sync::Notify;
 
 use crate::{
+    krpc::protocol::{AnnouncePeer, Answer, FindNodes, Query},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
-    routing_table::{BucketId, RoutingTable, BUCKET_SIZE}, krpc::protocol::{FindNodes, Answer, Query, AnnouncePeer},
+    routing_table::{BucketId, RoutingTable, BUCKET_SIZE},
 };
 
 mod krpc;
@@ -168,9 +169,18 @@ impl Dht {
 
     fn handle_incoming(&self) {
         let this = self.clone();
-        self.krpc_server.serve(move |query| {
+        self.krpc_server.serve(move |ip, query| {
             log::debug!("Received query: {query:?}");
             let our_id = this.routing_table.borrow().own_id;
+            let ip = match ip {
+                IpAddr::V4(ip) => ip,
+                IpAddr::V6(_) => {
+                    log::error!("Ip v6 addresses aren't supported for token generation");
+                    return Err(krpc::error::KrpcError::generic(
+                        "Ip v6 addresses aren't supported for token generation".to_owned(),
+                    ));
+                }
+            };
             match query {
                 Query::FindNode { id: _, target } => {
                     let target = NodeId::from(target.as_slice());
@@ -186,7 +196,6 @@ impl Dht {
                     })
                 }
                 Query::GetPeers { id: _, info_hash } => {
-                    // TODO verify tokens
                     // Somehow inspect peer list and provide peers if they
                     // exist or otherwise return closest nodes. Consider having
                     // a trait that specifices the peer list interface that may be used.
@@ -198,22 +207,34 @@ impl Dht {
                         .borrow()
                         .get_k_closest(BUCKET_SIZE, &target);
                     log::debug!("Found: {} nodes closet to {target:?}", closet.len());
-                    Ok(Answer::FindNode {
+
+                    Ok(Answer::GetPeers {
                         id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                        // TODO: this shouldn't be done here
-                        nodes: krpc::protocol::serialize_compact_nodes(&closet),
+                        token: serde_bytes::ByteBuf::from(this.token_store.generate(ip).to_vec()),
+                        values: None,
+                        nodes: Some(krpc::protocol::serialize_compact_nodes(&closet)),
                     })
                 }
-                // TODO!
+                // TODO verify tokens
                 Query::AnnouncePeer {
                     id,
                     implied_port,
                     info_hash,
                     port,
                     token,
-                } => Ok(Answer::QueriedNodeId {
-                    id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                }),
+                } => {
+                    if this
+                        .token_store
+                        .validate(ip, bytes::Bytes::copy_from_slice(&token))
+                    {
+                        log::info!("Recived valid announce peer request");
+                        Ok(Answer::QueriedNodeId {
+                            id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                        })
+                    } else {
+                        Err(krpc::error::KrpcError::protocol("Invalid token".to_owned()))
+                    }
+                }
                 Query::Ping { id: _ } => {
                     // Should we only respond to pings from nodes in the routing table?
                     // probably not, but some ratelimiting might be necessary in the future
@@ -341,7 +362,9 @@ impl Dht {
                 Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Good => {
                     candiate.last_status = NodeStatus::Unknown;
                 }
-                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Unknown => {
+                Err(krpc::error::Error::Timeout(_))
+                    if candiate.last_status == NodeStatus::Unknown =>
+                {
                     candiate.last_status = NodeStatus::Bad;
                 }
                 Err(_err) if candiate.last_status == NodeStatus::Good => {
@@ -386,7 +409,9 @@ impl Dht {
                 Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Good => {
                     candiate.last_status = NodeStatus::Unknown;
                 }
-                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Unknown => {
+                Err(krpc::error::Error::Timeout(_))
+                    if candiate.last_status == NodeStatus::Unknown =>
+                {
                     candiate.last_status = NodeStatus::Bad;
                 }
                 Err(_err) if candiate.last_status == NodeStatus::Good => {

@@ -1,4 +1,9 @@
-use std::{cell::RefCell, net::SocketAddr, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    net::{IpAddr, SocketAddr},
+    rc::Rc,
+    time::Duration,
+};
 
 use ahash::AHashMap;
 use rand::Rng;
@@ -161,16 +166,18 @@ impl KrpcClient {
     }
 }
 
-pub type Handler = dyn Fn(Query) -> Result<Answer, KrpcError>;
+pub type Handler = dyn Fn(IpAddr, Query) -> Result<Answer, KrpcError>;
 
 #[derive(Clone)]
 pub struct KrpcServer {
-    // Maybe take in addr as argument as well
     handler: Rc<RefCell<Option<Box<Handler>>>>,
 }
 
 impl KrpcServer {
-    pub fn serve(&self, new_handler: impl Fn(Query) -> Result<Answer, KrpcError> + 'static) {
+    pub fn serve(
+        &self,
+        new_handler: impl Fn(IpAddr, Query) -> Result<Answer, KrpcError> + 'static,
+    ) {
         self.handler.replace(Some(Box::new(new_handler)));
     }
 }
@@ -254,8 +261,8 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
                         let handler = server_clone.handler.borrow();
                         if let Some(handler) = handler.as_ref() {
                             log::debug!("Handling incoming query");
-                            // TODO Spawn separate task per query
-                            match handler(query) {
+                            // TODO Spawn separate task per query?
+                            match handler(addr.ip(), query) {
                                 Ok(answer) => {
                                     let response_pkt = KrpcPacket {
                                         t: packet.t,
