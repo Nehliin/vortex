@@ -489,8 +489,9 @@ pub fn serialize_compact_nodes(nodes: &[Node]) -> ByteBuf {
     ByteBuf::from(result)
 }
 
+type ConnectionTable = AHashMap<ByteBuf, oneshot::Sender<Result<Answer, KrpcError>>>;
 #[derive(Clone, Default, Debug)]
-struct InflightRpcs(Rc<RefCell<AHashMap<ByteBuf, oneshot::Sender<Result<Answer, KrpcError>>>>>);
+struct InflightRpcs(Rc<RefCell<ConnectionTable>>);
 
 // Ensures Refcell borrow is never held across await point
 impl InflightRpcs {
@@ -542,19 +543,27 @@ impl<T: Rpc> QueryBuilder<'_, T> {
         let transaction_id = packet.t.clone();
         let encoded = serde_bencoded::to_vec(&packet)?;
 
-        let rx = self.client.connection_table.insert_rpc(transaction_id);
+        let rx = self
+            .client
+            .connection_table
+            .insert_rpc(transaction_id.clone());
 
         let (res, _) = self.client.socket.send_to(encoded, addr).await;
         res?;
 
         let response =
-            match tokio::time::timeout(self.timeout.unwrap_or(Duration::from_secs(5)), rx).await? {
-                Ok(response) => response?,
+            match tokio::time::timeout(self.timeout.unwrap_or(Duration::from_secs(5)), rx).await {
+                Ok(Ok(response)) => response?,
+                Err(elapsed) => {
+                    self.client.connection_table.remove_rpc(&transaction_id);
+                    return Err(Error::Timeout(elapsed));
+                }
                 // Sender should never be dropped without sending a response
-                Err(_) => unreachable!(),
+                Ok(Err(_)) => unreachable!(),
             };
 
         response.try_into().map_err(|_err| {
+            self.client.connection_table.remove_rpc(&transaction_id);
             Error::Protocol(KrpcError::protocol(
                 "Unexpected response received".to_string(),
             ))
@@ -570,7 +579,9 @@ pub struct KrpcClient {
 
 impl KrpcClient {
     fn gen_transaction_id(&self) -> ByteBuf {
-        const MAX_IDS: usize = 26 * 2 + 10;
+        // TODO: Ensure we don't block indefinitely by waiting for ids
+        // error out early in that case.
+        // const MAX_IDS: usize = 26 * 2 + 10;
         // Probably doesn't need to be Alphanumeric?
         use rand::distributions::Alphanumeric;
         let mut rng = rand::thread_rng();
