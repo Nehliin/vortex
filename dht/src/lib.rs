@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::Context;
 use futures::future::join_all;
-use krpc::{Peer, Query};
+use krpc::{
+    protocol::{GetPeers, GetPeersResponseBody, Peer, Ping, FindNodesResponse},
+    setup_krpc, KrpcClient, KrpcServer,
+};
 use sha1::{Digest, Sha1};
 use slotmap::Key;
 use time::OffsetDateTime;
@@ -16,9 +19,8 @@ use token_store::TokenStore;
 use tokio::sync::Notify;
 
 use crate::{
-    krpc::{serialize_compact_nodes, FindNodesResponse, GetPeerResponseBody, KrpcSocket},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
-    routing_table::{BucketId, RoutingTable, BUCKET_SIZE},
+    routing_table::{BucketId, RoutingTable, BUCKET_SIZE}, krpc::protocol::{FindNodes, Answer, Query, AnnouncePeer},
 };
 
 mod krpc;
@@ -57,7 +59,8 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 // TODO: refresh our own id occasionally as well
 #[derive(Clone)]
 pub struct Dht {
-    transport: KrpcSocket,
+    krpc_client: KrpcClient,
+    krpc_server: KrpcServer,
     routing_table: Rc<RefCell<RoutingTable>>,
     token_store: TokenStore,
     // (This doesn't need to be multi threaded)
@@ -66,12 +69,13 @@ pub struct Dht {
 
 impl Dht {
     pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
-        let transport = KrpcSocket::new(bind_addr).await?;
+        let (client, server) = setup_krpc(bind_addr).await?;
         if let Some(table) = load_table(Path::new("routing_table.json")) {
             log::info!("Loading existing table");
             let bucket_ids: Vec<_> = table.bucket_ids().collect();
             let dht = Dht {
-                transport,
+                krpc_client: client,
+                krpc_server: server,
                 routing_table: Rc::new(RefCell::new(table)),
                 node_added_notify: Rc::new(Notify::new()),
                 token_store: TokenStore::new(),
@@ -86,7 +90,8 @@ impl Dht {
             let routing_table = RoutingTable::new(node_id);
 
             let dht = Dht {
-                transport,
+                krpc_client: client,
+                krpc_server: server,
                 routing_table: Rc::new(RefCell::new(routing_table)),
                 node_added_notify: Rc::new(Notify::new()),
                 token_store: TokenStore::new(),
@@ -127,15 +132,16 @@ impl Dht {
                     if let IpAddr::V4(addr) = node.addr.ip() {
                         if let Some(token) = this.token_store.get_token(addr) {
                             if this
-                                .transport
-                                .announce_peer(
-                                    &own_id,
-                                    *info_hash,
-                                    true,
-                                    1337,
-                                    serde_bytes::ByteBuf::from(token),
-                                    &node,
-                                )
+                                .krpc_client
+                                .announce_peer(AnnouncePeer {
+                                    id: own_id,
+                                    info_hash: *info_hash,
+                                    implied_port: true,
+                                    port: 1337,
+                                    token: serde_bytes::ByteBuf::from(token),
+                                })
+                                .with_timeout(Duration::from_secs(3))
+                                .send(node.addr)
                                 .await
                                 .is_err()
                             {
@@ -162,95 +168,58 @@ impl Dht {
 
     fn handle_incoming(&self) {
         let this = self.clone();
-        tokio_uring::spawn(async move {
-            let mut incoming_queries = this.transport.listen();
-            while let Some((transaction_id, query, addr)) = incoming_queries.recv().await {
-                log::debug!("Received query: {query:?}");
-                let our_id = this.routing_table.borrow().own_id;
-                match query {
-                    Query::FindNode { id: _, target } => {
-                        let target = NodeId::from(target.as_slice());
-                        let closet = this
-                            .routing_table
-                            .borrow()
-                            .get_k_closest(BUCKET_SIZE, &target);
-                        log::debug!("Found: {} nodes closet to {target:?}", closet.len());
-                        this.transport
-                            .send_response(
-                                addr,
-                                krpc::KrpcPacket {
-                                    t: transaction_id,
-                                    y: 'r',
-                                    q: None,
-                                    a: None,
-                                    r: Some(krpc::Response::FindNode {
-                                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                                        nodes: serialize_compact_nodes(&closet),
-                                    }),
-                                    e: None,
-                                },
-                            )
-                            .await
-                            .unwrap();
-                    }
-                    Query::GetPeers { id: _, info_hash } => {
-                        // TODO verify tokens
-                        // Somehow inspect peer list and provide peers if they
-                        // exist or otherwise return closest nodes. Consider having
-                        // a trait that specifices the peer list interface that may be used.
-                        // otherwise return find nodes response. Until then, just return find node
-                        // response.
-                        let target = NodeId::from(info_hash.as_slice());
-                        let closet = this
-                            .routing_table
-                            .borrow()
-                            .get_k_closest(BUCKET_SIZE, &target);
-                        log::debug!("Found: {} nodes closet to {target:?}", closet.len());
-                        this.transport
-                            .send_response(
-                                addr,
-                                krpc::KrpcPacket {
-                                    t: transaction_id,
-                                    y: 'r',
-                                    q: None,
-                                    a: None,
-                                    r: Some(krpc::Response::FindNode {
-                                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                                        nodes: serialize_compact_nodes(&closet),
-                                    }),
-                                    e: None,
-                                },
-                            )
-                            .await
-                            .unwrap();
-                    }
-                    Query::AnnouncePeer {
-                        id,
-                        implied_port,
-                        info_hash,
-                        port,
-                        token,
-                    } => {}
-                    Query::Ping { id: _ } => {
-                        // Should we only respond to pings from nodes in the routing table?
-                        // probably not, but some ratelimiting might be necessary in the future
-                        this.transport
-                            .send_response(
-                                addr,
-                                krpc::KrpcPacket {
-                                    t: transaction_id,
-                                    y: 'r',
-                                    q: None,
-                                    a: None,
-                                    r: Some(krpc::Response::QueriedNodeId {
-                                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                                    }),
-                                    e: None,
-                                },
-                            )
-                            .await
-                            .unwrap();
-                    }
+        self.krpc_server.serve(move |query| {
+            log::debug!("Received query: {query:?}");
+            let our_id = this.routing_table.borrow().own_id;
+            match query {
+                Query::FindNode { id: _, target } => {
+                    let target = NodeId::from(target.as_slice());
+                    let closet = this
+                        .routing_table
+                        .borrow()
+                        .get_k_closest(BUCKET_SIZE, &target);
+                    log::debug!("Found: {} nodes closet to {target:?}", closet.len());
+                    Ok(Answer::FindNode {
+                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                        // TODO: this shouldn't be done here
+                        nodes: krpc::protocol::serialize_compact_nodes(&closet),
+                    })
+                }
+                Query::GetPeers { id: _, info_hash } => {
+                    // TODO verify tokens
+                    // Somehow inspect peer list and provide peers if they
+                    // exist or otherwise return closest nodes. Consider having
+                    // a trait that specifices the peer list interface that may be used.
+                    // otherwise return find nodes response. Until then, just return find node
+                    // response.
+                    let target = NodeId::from(info_hash.as_slice());
+                    let closet = this
+                        .routing_table
+                        .borrow()
+                        .get_k_closest(BUCKET_SIZE, &target);
+                    log::debug!("Found: {} nodes closet to {target:?}", closet.len());
+                    Ok(Answer::FindNode {
+                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                        // TODO: this shouldn't be done here
+                        nodes: krpc::protocol::serialize_compact_nodes(&closet),
+                    })
+                }
+                // TODO!
+                Query::AnnouncePeer {
+                    id,
+                    implied_port,
+                    info_hash,
+                    port,
+                    token,
+                } => Ok(Answer::QueriedNodeId {
+                    id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                }),
+                Query::Ping { id: _ } => {
+                    // Should we only respond to pings from nodes in the routing table?
+                    // probably not, but some ratelimiting might be necessary in the future
+                    Ok(Answer::QueriedNodeId {
+                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                    })
                 }
             }
         });
@@ -289,7 +258,11 @@ impl Dht {
             })
             .map(|node| async move {
                 log::debug!("Pinging {}", node.addr);
-                let result = self.transport.ping(&our_id, &node).await;
+                let result = self
+                    .krpc_client
+                    .ping(Ping { id: our_id })
+                    .send(node.addr)
+                    .await;
                 (node, result)
             });
 
@@ -354,15 +327,21 @@ impl Dht {
         let mut need_refresh_scheduled = true;
         // 2. if the bucket is full (and not splittable) ping the node and update the timestamp
         if is_full {
-            match self.transport.ping(&our_id, &candiate).await {
+            match self
+                .krpc_client
+                .ping(Ping { id: our_id })
+                .with_timeout(Duration::from_secs(3))
+                .send(candiate.addr)
+                .await
+            {
                 Ok(_) => {
                     candiate.last_seen = OffsetDateTime::now_utc();
                     candiate.last_status = NodeStatus::Good;
                 }
-                Err(err) if err.is_timeout() && candiate.last_status == NodeStatus::Good => {
+                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Good => {
                     candiate.last_status = NodeStatus::Unknown;
                 }
-                Err(err) if err.is_timeout() && candiate.last_status == NodeStatus::Unknown => {
+                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Unknown => {
                     candiate.last_status = NodeStatus::Bad;
                 }
                 Err(_err) if candiate.last_status == NodeStatus::Good => {
@@ -383,7 +362,16 @@ impl Dht {
             // 3. if the bucket is not full run find nodes (or get peers) on the node closest to the target and insert
             // found nodes (TODO: See if get_peers is more widely supported and perhaps use that
             // instead)
-            match self.transport.find_nodes(&our_id, &id, &candiate).await {
+            match self
+                .krpc_client
+                .find_nodes(FindNodes {
+                    id: our_id,
+                    target: id,
+                })
+                .with_timeout(Duration::from_secs(3))
+                .send(candiate.addr)
+                .await
+            {
                 Ok(FindNodesResponse { id: _, nodes }) => {
                     candiate.last_seen = OffsetDateTime::now_utc();
                     candiate.last_status = NodeStatus::Good;
@@ -395,10 +383,10 @@ impl Dht {
                         }
                     }
                 }
-                Err(err) if err.is_timeout() && candiate.last_status == NodeStatus::Good => {
+                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Good => {
                     candiate.last_status = NodeStatus::Unknown;
                 }
-                Err(err) if err.is_timeout() && candiate.last_status == NodeStatus::Unknown => {
+                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Unknown => {
                     candiate.last_status = NodeStatus::Bad;
                 }
                 Err(_err) if candiate.last_status == NodeStatus::Good => {
@@ -451,19 +439,24 @@ impl Dht {
                     .iter_mut()
                     .filter(|node| node.current_status() == NodeStatus::Unknown)
                 {
-                    match self.transport.ping(&our_id, unknown_node).await {
+                    match self
+                        .krpc_client
+                        .ping(Ping { id: our_id })
+                        .with_timeout(Duration::from_secs(3))
+                        .send(unknown_node.addr)
+                        .await
+                    {
                         Ok(_) => {
                             unknown_node.last_seen = OffsetDateTime::now_utc();
                             unknown_node.last_status = NodeStatus::Good;
                         }
-                        Err(err)
-                            if err.is_timeout() && unknown_node.last_status == NodeStatus::Good =>
+                        Err(krpc::error::Error::Timeout(_))
+                            if unknown_node.last_status == NodeStatus::Good =>
                         {
                             unknown_node.last_status = NodeStatus::Unknown;
                         }
-                        Err(err)
-                            if err.is_timeout()
-                                && unknown_node.last_status == NodeStatus::Unknown =>
+                        Err(krpc::error::Error::Timeout(_))
+                            if unknown_node.last_status == NodeStatus::Unknown =>
                         {
                             unknown_node.last_status = NodeStatus::Bad;
                         }
@@ -557,8 +550,9 @@ impl Dht {
             let distance = target.distance(&next_to_query.id);
             if distance < prev_min {
                 let response = match self
-                    .transport
-                    .find_nodes(&own_id, &target, &next_to_query)
+                    .krpc_client
+                    .find_nodes(FindNodes { id: own_id, target })
+                    .send(next_to_query.addr)
                     .await
                 {
                     Ok(reponse) => {
@@ -627,8 +621,13 @@ impl Dht {
 
         for node in nodes {
             let response = match self
-                .transport
-                .get_peers(&own_id, target.as_bytes(), node)
+                .krpc_client
+                .get_peers(GetPeers {
+                    id: own_id,
+                    info_hash: target.as_bytes(),
+                })
+                .with_timeout(Duration::from_secs(3))
+                .send(node.addr)
                 .await
             {
                 Ok(reponse) => {
@@ -671,14 +670,14 @@ impl Dht {
             }
 
             match response.body {
-                GetPeerResponseBody::Nodes(nodes) => {
+                GetPeersResponseBody::Nodes(nodes) => {
                     log::debug!("Got nodes from: {node:?}");
                     for node in nodes.into_iter() {
                         assert!(self.insert_node(node, Some(*target)).await);
                         log::debug!("Inserted node");
                     }
                 }
-                GetPeerResponseBody::Peers(peers) => {
+                GetPeersResponseBody::Peers(peers) => {
                     log::info!("Got peers! ({})", peers.len());
                     if peer_listener.send(peers).await.is_err() {
                         log::debug!("Peer listener disconnected");
