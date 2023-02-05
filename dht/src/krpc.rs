@@ -17,14 +17,6 @@ use tokio_uring::net::UdpSocket;
 
 use crate::node::{Node, NodeId, NodeStatus};
 
-// 1. KrpcSocket: Single UDP socket, contains transaction id map and generates transaction ids
-// does all io
-// 2. KrpcConnection: Node + weak ref to socket + all rpc methods
-//
-// KrpcQuery builder just like request builder, same with response
-// within those you can provide timeout per request (but they have a default value)
-// Both implement IntoKrpcPacket which is what the socket accept
-
 // TODO try to avoid allocations for ids
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -87,6 +79,7 @@ pub struct KrpcError {
 }
 
 impl KrpcError {
+    #[allow(dead_code)]
     fn generic(description: String) -> Self {
         Self {
             code: 201,
@@ -94,6 +87,7 @@ impl KrpcError {
         }
     }
 
+    #[allow(dead_code)]
     fn server(description: String) -> Self {
         Self {
             code: 202,
@@ -112,6 +106,21 @@ impl KrpcError {
         Self {
             code: 204,
             description,
+        }
+    }
+}
+
+impl Rpc for KrpcError {
+    type Response = ();
+
+    fn into_packet(self, transaction_id: ByteBuf) -> KrpcPacket {
+        KrpcPacket {
+            t: transaction_id,
+            y: 'e',
+            q: None,
+            a: None,
+            r: None,
+            e: Some(self),
         }
     }
 }
@@ -507,7 +516,7 @@ impl InflightRpcs {
 }
 
 pub trait Rpc {
-    type Response: TryFrom<Answer>;
+    type Response;
 
     fn into_packet(self, transaction_id: ByteBuf) -> KrpcPacket;
 }
@@ -525,7 +534,10 @@ impl<T: Rpc> QueryBuilder<'_, T> {
         self
     }
 
-    pub async fn send(self, addr: SocketAddr) -> Result<T::Response, Error> {
+    pub async fn send(self, addr: SocketAddr) -> Result<T::Response, Error>
+    where
+        T::Response: TryFrom<Answer>,
+    {
         let packet: KrpcPacket = self.body.into_packet(self.id);
         let transaction_id = packet.t.clone();
         let encoded = serde_bencoded::to_vec(&packet)?;
@@ -700,6 +712,17 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
             };
             recv_buffer = buf;
 
+            async fn respond(pkt: KrpcPacket, addr: SocketAddr, socket: &UdpSocket) {
+                let Ok(encoded) = serde_bencoded::to_vec(&pkt) else {
+                    log::error!("Failed to bencode: {pkt:?}");
+                    return;
+                };
+                let (res, _) = socket.send_to(encoded, addr).await;
+                if let Err(err) = res {
+                    log::error!("Failed to send response: {err}");
+                }
+            }
+
             match packet.y {
                 // response
                 'r' => {
@@ -711,6 +734,13 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
                         }
                     } else {
                         log::warn!("Invalid KRPC message received, missing response");
+                        respond(
+                            KrpcError::protocol("Invalid message".to_string())
+                                .into_packet(packet.t),
+                            addr,
+                            &socket,
+                        )
+                        .await;
                     }
                 }
                 // query
@@ -733,9 +763,7 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
                                         r: Some(answer),
                                         e: None,
                                     };
-                                    let encoded = serde_bencoded::to_vec(&response_pkt).unwrap();
-                                    let (res, _) = socket.send_to(encoded, addr).await;
-                                    res.unwrap();
+                                    respond(response_pkt, addr, &socket).await;
                                 }
                                 Err(err) => {
                                     let response_pkt = KrpcPacket {
@@ -746,19 +774,23 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
                                         r: None,
                                         e: Some(err),
                                     };
-                                    let encoded = serde_bencoded::to_vec(&response_pkt).unwrap();
-                                    let (res, _) = socket.send_to(encoded, addr).await;
-                                    res.unwrap();
+                                    respond(response_pkt, addr, &socket).await;
                                 }
                             }
                         } else {
                             log::warn!("No krpc handler setup, ignoring incoming query");
                         }
                     }
-                    _ => log::warn!(
-                        "Invalid incoming query: {}",
-                        packet.q.as_deref().unwrap_or("<none>")
-                    ),
+                    _ => {
+                        log::warn!("Unknown query: {}", packet.q.as_deref().unwrap_or("<none>"));
+                        respond(
+                            KrpcError::method_unknown("unknown query".to_string())
+                                .into_packet(packet.t),
+                            addr,
+                            &socket,
+                        )
+                        .await;
+                    }
                 },
                 // error
                 'e' => {
@@ -769,11 +801,25 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
                             log::warn!("Unknown KRPC response recived, transaction id: {:?} not found in connection_table", packet.t);
                         }
                     } else {
-                        // TODO Return these
                         log::warn!("Invalid KRPC message received, missing error");
+                        respond(
+                            KrpcError::protocol("Invalid message".to_string())
+                                .into_packet(packet.t),
+                            addr,
+                            &socket,
+                        )
+                        .await;
                     }
                 }
-                _ => log::warn!("Invalid KRPC message received, y: {}", packet.y),
+                _ => {
+                    log::warn!("Invalid KRPC message received, y: {}", packet.y);
+                    respond(
+                        KrpcError::protocol("Invalid message".to_string()).into_packet(packet.t),
+                        addr,
+                        &socket,
+                    )
+                    .await;
+                }
             }
         }
     });
