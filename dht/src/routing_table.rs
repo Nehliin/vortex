@@ -30,7 +30,8 @@ impl Bucket {
     fn empty_spot(&mut self) -> Option<&mut Option<Node>> {
         if !self.is_full() {
             self.nodes.iter_mut().find(|spot| {
-                spot.map(|node| node.last_status == NodeStatus::Bad)
+                spot.as_ref()
+                    .map(|node| node.last_status == NodeStatus::Bad)
                     .unwrap_or(true)
             })
         } else {
@@ -44,7 +45,8 @@ impl Bucket {
             false
         } else {
             !self.nodes.iter().any(|spot| {
-                spot.map(|node| node.last_status == NodeStatus::Bad)
+                spot.as_ref()
+                    .map(|node| node.last_status == NodeStatus::Bad)
                     .unwrap_or(true)
             })
         }
@@ -80,7 +82,7 @@ impl Bucket {
         let mut bucket = Bucket {
             min: new_min,
             max: old_max,
-            nodes: [None; 8],
+            nodes: [None, None, None, None, None, None, None, None],
             last_changed,
         };
 
@@ -132,7 +134,7 @@ impl RoutingTable {
         buckets.insert(Bucket {
             min: ID_ZERO,
             max: ID_MAX,
-            nodes: [None; 8],
+            nodes: [None, None, None, None, None, None, None, None],
             last_changed: OffsetDateTime::now_utc(),
         });
         RoutingTable { buckets, own_id }
@@ -171,9 +173,11 @@ impl RoutingTable {
             .map(|(_, v)| v)
             .flat_map(|bucket| &bucket.nodes)
             .filter(|maybe_node| {
-                maybe_node.map_or(false, |node| node.last_status != NodeStatus::Bad)
+                maybe_node
+                    .as_ref()
+                    .map_or(false, |node| node.last_status != NodeStatus::Bad)
             })
-            .map(|node| node.unwrap())
+            .map(|node| node.clone().unwrap())
             .collect();
 
         nodes.sort_unstable_by_key(|node| info_hash.distance(&node.id));
@@ -187,7 +191,10 @@ impl RoutingTable {
             .iter_mut()
             .map(|(_, v)| v)
             .flat_map(|bucket| &mut bucket.nodes)
-            .filter(|node| node.map_or(false, |node| node.last_status != NodeStatus::Bad))
+            .filter(|node| {
+                node.as_ref()
+                    .map_or(false, |node| node.last_status != NodeStatus::Bad)
+            })
             .min_by_key(|node| {
                 node.as_ref()
                     .map(|node| info_hash.distance(&node.id))
@@ -212,7 +219,7 @@ impl RoutingTable {
             .iter_mut()
             .map(|(_, bucket)| bucket)
             .flat_map(|bucket| &mut bucket.nodes)
-            .find(|node| node.map_or(false, |node| node.id == *id))?
+            .find(|node| node.as_ref().map_or(false, |node| node.id == *id))?
             .as_mut()
     }
 

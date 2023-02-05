@@ -342,7 +342,7 @@ impl Dht {
                 log::error!("No nodes left in bucket, refresh failed");
                 return;
             };
-            (is_full, *candiate, our_id, id)
+            (is_full, candiate.clone(), our_id, id)
         };
 
         let mut need_refresh_scheduled = true;
@@ -398,29 +398,46 @@ impl Dht {
                 Ok(FindNodesResponse { id: _, nodes }) => {
                     candiate.last_seen = OffsetDateTime::now_utc();
                     candiate.last_status = NodeStatus::Good;
+                    // Need to reinsert the node, theoretically the node or bucket
+                    // might have been removed when attepting the ping
+                    if let Some(node) = self.routing_table.borrow_mut().get_mut(&candiate.id) {
+                        *node = candiate;
+                    }
                     for node in nodes {
-                        if self.insert_node(node, None).await {
+                        if self.insert_node(node.clone(), None).await {
                             // Insert will schedule refreshes on it's own
                             need_refresh_scheduled = false;
                             log::debug!("Refreshed bucket found new node: {:?}", node.id);
                         }
                     }
                 }
-                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Good => {
-                    candiate.last_status = NodeStatus::Unknown;
-                }
-                Err(krpc::error::Error::Timeout(_))
-                    if candiate.last_status == NodeStatus::Unknown =>
-                {
-                    candiate.last_status = NodeStatus::Bad;
-                }
-                Err(_err) if candiate.last_status == NodeStatus::Good => {
-                    candiate.last_status = NodeStatus::Unknown;
-                    candiate.last_seen = OffsetDateTime::now_utc();
-                }
-                Err(_err) => {
-                    candiate.last_status = NodeStatus::Bad;
-                    candiate.last_seen = OffsetDateTime::now_utc();
+                Err(err) => {
+                    match (err, candiate.last_status) {
+                        (krpc::error::Error::Timeout(_), NodeStatus::Good) => {
+                            candiate.last_status = NodeStatus::Unknown;
+                        }
+                        (krpc::error::Error::Timeout(_), NodeStatus::Unknown) => {
+                            candiate.last_status = NodeStatus::Bad;
+                        }
+                        (krpc::error::Error::IoError(err), _) => {
+                            log::warn!("Socket failure: {err}");
+                        }
+                        // TODO: Perhaps not something that should be done for all errors?
+                        (_, NodeStatus::Good) => {
+                            candiate.last_status = NodeStatus::Unknown;
+                            candiate.last_seen = OffsetDateTime::now_utc();
+                        }
+                        (_, _) => {
+                            candiate.last_status = NodeStatus::Bad;
+                            // Not accurate for timeouts
+                            candiate.last_seen = OffsetDateTime::now_utc();
+                        }
+                    }
+                    // Need to reinsert the node, theoretically the node or bucket
+                    // might have been removed when attepting the ping
+                    if let Some(node) = self.routing_table.borrow_mut().get_mut(&candiate.id) {
+                        *node = candiate;
+                    }
                 }
             }
         }
@@ -445,7 +462,10 @@ impl Dht {
         let mut inserted = false;
         let (our_id, updated_buckets @ [bucket_id_one, bucket_id_two]) = {
             let mut routing_table = self.routing_table.borrow_mut();
-            (routing_table.own_id, routing_table.insert_node(node))
+            (
+                routing_table.own_id,
+                routing_table.insert_node(node.clone()),
+            )
         };
 
         let failed_insert = bucket_id_one.is_null() && bucket_id_two.is_null();
@@ -483,6 +503,7 @@ impl Dht {
                         Err(krpc::error::Error::Timeout(_))
                             if unknown_node.last_status == NodeStatus::Unknown =>
                         {
+                            // TODO: Early return?
                             unknown_node.last_status = NodeStatus::Bad;
                         }
                         Err(_err) if unknown_node.last_status == NodeStatus::Good => {
@@ -502,13 +523,13 @@ impl Dht {
             for updated_node in unknown_nodes {
                 for current_node in bucket.nodes_mut() {
                     if updated_node.id == current_node.id {
-                        *current_node = updated_node;
+                        *current_node = updated_node.clone();
                     }
-                    if current_node.last_status == NodeStatus::Bad {
-                        // We only inserted if we found a bad node
+                    if current_node.last_status == NodeStatus::Bad && !inserted {
+                        // We only insert once if we found a bad node
                         inserted = true;
                         // Overwrite the bad one
-                        *current_node = node;
+                        *current_node = node.clone();
                     }
                 }
             }
@@ -566,11 +587,12 @@ impl Dht {
         let own_id = self.routing_table.borrow().own_id;
         loop {
             log::info!("Searching for: {target:?}");
-            let next_to_query = *self
+            let next_to_query = self
                 .routing_table
                 .borrow_mut()
                 .get_closest_mut(&target)
-                .context("No nodes in routing table")?;
+                .context("No nodes in routing table")?
+                .clone();
 
             let distance = target.distance(&next_to_query.id);
             if distance < prev_min {

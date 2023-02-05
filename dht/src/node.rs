@@ -160,7 +160,7 @@ pub enum NodeStatus {
     Unknown,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Node {
     pub id: NodeId,
     pub addr: SocketAddr,
