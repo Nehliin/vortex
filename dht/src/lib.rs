@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::Context;
 use futures::future::join_all;
-use krpc::{setup_krpc, GetPeersResponseBody, KrpcClient, KrpcServer, Peer, Query};
+use krpc::{
+    protocol::{GetPeers, GetPeersResponseBody, Peer, Ping, FindNodesResponse},
+    setup_krpc, KrpcClient, KrpcServer,
+};
 use sha1::{Digest, Sha1};
 use slotmap::Key;
 use time::OffsetDateTime;
@@ -16,9 +19,8 @@ use token_store::TokenStore;
 use tokio::sync::Notify;
 
 use crate::{
-    krpc::{serialize_compact_nodes, FindNodesResponse},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
-    routing_table::{BucketId, RoutingTable, BUCKET_SIZE},
+    routing_table::{BucketId, RoutingTable, BUCKET_SIZE}, krpc::protocol::{FindNodes, Answer, Query, AnnouncePeer},
 };
 
 mod krpc;
@@ -131,7 +133,7 @@ impl Dht {
                         if let Some(token) = this.token_store.get_token(addr) {
                             if this
                                 .krpc_client
-                                .announce_peer(krpc::AnnouncePeer {
+                                .announce_peer(AnnouncePeer {
                                     id: own_id,
                                     info_hash: *info_hash,
                                     implied_port: true,
@@ -177,9 +179,10 @@ impl Dht {
                         .borrow()
                         .get_k_closest(BUCKET_SIZE, &target);
                     log::debug!("Found: {} nodes closet to {target:?}", closet.len());
-                    Ok(krpc::Answer::FindNode {
+                    Ok(Answer::FindNode {
                         id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                        nodes: serialize_compact_nodes(&closet),
+                        // TODO: this shouldn't be done here
+                        nodes: krpc::protocol::serialize_compact_nodes(&closet),
                     })
                 }
                 Query::GetPeers { id: _, info_hash } => {
@@ -195,9 +198,10 @@ impl Dht {
                         .borrow()
                         .get_k_closest(BUCKET_SIZE, &target);
                     log::debug!("Found: {} nodes closet to {target:?}", closet.len());
-                    Ok(krpc::Answer::FindNode {
+                    Ok(Answer::FindNode {
                         id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                        nodes: serialize_compact_nodes(&closet),
+                        // TODO: this shouldn't be done here
+                        nodes: krpc::protocol::serialize_compact_nodes(&closet),
                     })
                 }
                 // TODO!
@@ -207,13 +211,13 @@ impl Dht {
                     info_hash,
                     port,
                     token,
-                } => Ok(krpc::Answer::QueriedNodeId {
+                } => Ok(Answer::QueriedNodeId {
                     id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
                 }),
                 Query::Ping { id: _ } => {
                     // Should we only respond to pings from nodes in the routing table?
                     // probably not, but some ratelimiting might be necessary in the future
-                    Ok(krpc::Answer::QueriedNodeId {
+                    Ok(Answer::QueriedNodeId {
                         id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
                     })
                 }
@@ -256,7 +260,7 @@ impl Dht {
                 log::debug!("Pinging {}", node.addr);
                 let result = self
                     .krpc_client
-                    .ping(krpc::Ping { id: our_id })
+                    .ping(Ping { id: our_id })
                     .send(node.addr)
                     .await;
                 (node, result)
@@ -325,7 +329,7 @@ impl Dht {
         if is_full {
             match self
                 .krpc_client
-                .ping(krpc::Ping { id: our_id })
+                .ping(Ping { id: our_id })
                 .with_timeout(Duration::from_secs(3))
                 .send(candiate.addr)
                 .await
@@ -334,10 +338,10 @@ impl Dht {
                     candiate.last_seen = OffsetDateTime::now_utc();
                     candiate.last_status = NodeStatus::Good;
                 }
-                Err(krpc::Error::Timeout(_)) if candiate.last_status == NodeStatus::Good => {
+                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Good => {
                     candiate.last_status = NodeStatus::Unknown;
                 }
-                Err(krpc::Error::Timeout(_)) if candiate.last_status == NodeStatus::Unknown => {
+                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Unknown => {
                     candiate.last_status = NodeStatus::Bad;
                 }
                 Err(_err) if candiate.last_status == NodeStatus::Good => {
@@ -360,7 +364,7 @@ impl Dht {
             // instead)
             match self
                 .krpc_client
-                .find_nodes(krpc::FindNodes {
+                .find_nodes(FindNodes {
                     id: our_id,
                     target: id,
                 })
@@ -379,10 +383,10 @@ impl Dht {
                         }
                     }
                 }
-                Err(krpc::Error::Timeout(_)) if candiate.last_status == NodeStatus::Good => {
+                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Good => {
                     candiate.last_status = NodeStatus::Unknown;
                 }
-                Err(krpc::Error::Timeout(_)) if candiate.last_status == NodeStatus::Unknown => {
+                Err(krpc::error::Error::Timeout(_)) if candiate.last_status == NodeStatus::Unknown => {
                     candiate.last_status = NodeStatus::Bad;
                 }
                 Err(_err) if candiate.last_status == NodeStatus::Good => {
@@ -437,7 +441,7 @@ impl Dht {
                 {
                     match self
                         .krpc_client
-                        .ping(krpc::Ping { id: our_id })
+                        .ping(Ping { id: our_id })
                         .with_timeout(Duration::from_secs(3))
                         .send(unknown_node.addr)
                         .await
@@ -446,12 +450,12 @@ impl Dht {
                             unknown_node.last_seen = OffsetDateTime::now_utc();
                             unknown_node.last_status = NodeStatus::Good;
                         }
-                        Err(krpc::Error::Timeout(_))
+                        Err(krpc::error::Error::Timeout(_))
                             if unknown_node.last_status == NodeStatus::Good =>
                         {
                             unknown_node.last_status = NodeStatus::Unknown;
                         }
-                        Err(krpc::Error::Timeout(_))
+                        Err(krpc::error::Error::Timeout(_))
                             if unknown_node.last_status == NodeStatus::Unknown =>
                         {
                             unknown_node.last_status = NodeStatus::Bad;
@@ -547,7 +551,7 @@ impl Dht {
             if distance < prev_min {
                 let response = match self
                     .krpc_client
-                    .find_nodes(krpc::FindNodes { id: own_id, target })
+                    .find_nodes(FindNodes { id: own_id, target })
                     .send(next_to_query.addr)
                     .await
                 {
@@ -618,7 +622,7 @@ impl Dht {
         for node in nodes {
             let response = match self
                 .krpc_client
-                .get_peers(krpc::GetPeers {
+                .get_peers(GetPeers {
                     id: own_id,
                     info_hash: target.as_bytes(),
                 })
