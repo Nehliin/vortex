@@ -51,6 +51,11 @@ fn load_table(path: &Path) -> Option<RoutingTable> {
     serde_json::from_reader(std::fs::File::open(path).ok()?).ok()?
 }
 
+pub trait PeerProvider {
+    fn get_peers(&self, info_hash: [u8; 20]) -> Vec<SocketAddr>;
+    fn insert_peer(&self, id: [u8; 20], peer: SocketAddr);
+}
+
 // Notes on integrating with the client:
 // Dht handle that contains channel with operations (aka actor model). The handle can contain the
 // receiver of the dht statistics as well
@@ -64,12 +69,17 @@ pub struct Dht {
     krpc_server: KrpcServer,
     routing_table: Rc<RefCell<RoutingTable>>,
     token_store: TokenStore,
+    port: u16,
     // (This doesn't need to be multi threaded)
     node_added_notify: Rc<Notify>,
 }
 
 impl Dht {
-    pub async fn new(bind_addr: SocketAddr) -> anyhow::Result<Self> {
+    pub async fn new(
+        bind_addr: SocketAddr,
+        peer_provider: impl PeerProvider + 'static,
+    ) -> anyhow::Result<Self> {
+        let port = bind_addr.port();
         let (client, server) = setup_krpc(bind_addr).await?;
         if let Some(table) = load_table(Path::new("routing_table.json")) {
             log::info!("Loading existing table");
@@ -80,11 +90,12 @@ impl Dht {
                 routing_table: Rc::new(RefCell::new(table)),
                 node_added_notify: Rc::new(Notify::new()),
                 token_store: TokenStore::new(),
+                port,
             };
             for bucket_id in bucket_ids {
                 dht.schedule_refresh(bucket_id);
             }
-            dht.handle_incoming();
+            dht.handle_incoming(peer_provider);
             Ok(dht)
         } else {
             let node_id = generate_node_id();
@@ -96,10 +107,11 @@ impl Dht {
                 routing_table: Rc::new(RefCell::new(routing_table)),
                 node_added_notify: Rc::new(Notify::new()),
                 token_store: TokenStore::new(),
+                port,
             };
 
             log::info!("Bootstrapping");
-            dht.handle_incoming();
+            dht.handle_incoming(peer_provider);
             dht.bootstrap().await?;
             log::info!("Bootstrap successful");
 
@@ -138,7 +150,7 @@ impl Dht {
                                     id: own_id,
                                     info_hash: *info_hash,
                                     implied_port: true,
-                                    port: 1337,
+                                    port: this.port,
                                     token: serde_bytes::ByteBuf::from(token),
                                 })
                                 .with_timeout(Duration::from_secs(3))
@@ -167,12 +179,12 @@ impl Dht {
         rc
     }
 
-    fn handle_incoming(&self) {
+    fn handle_incoming(&self, peer_provider: impl PeerProvider + 'static) {
         let this = self.clone();
-        self.krpc_server.serve(move |ip, query| {
+        self.krpc_server.serve(move |mut addr, query| {
             log::debug!("Received query: {query:?}");
             let our_id = this.routing_table.borrow().own_id;
-            let ip = match ip {
+            let ip = match addr.ip() {
                 IpAddr::V4(ip) => ip,
                 IpAddr::V6(_) => {
                     log::error!("Ip v6 addresses aren't supported for token generation");
@@ -217,7 +229,7 @@ impl Dht {
                 }
                 // TODO verify tokens
                 Query::AnnouncePeer {
-                    id,
+                    id: _,
                     implied_port,
                     info_hash,
                     port,
@@ -228,9 +240,19 @@ impl Dht {
                         .validate(ip, bytes::Bytes::copy_from_slice(&token))
                     {
                         log::info!("Recived valid announce peer request");
-                        Ok(Answer::QueriedNodeId {
-                            id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                        })
+                        if !implied_port {
+                            addr.set_port(port);
+                        }
+                        if let Ok(info_hash) = info_hash.as_slice().try_into() {
+                            peer_provider.insert_peer(info_hash, addr);
+                            Ok(Answer::QueriedNodeId {
+                                id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                            })
+                        } else {
+                            Err(krpc::error::KrpcError::protocol(
+                                "Invalid infohash".to_owned(),
+                            ))
+                        }
                     } else {
                         Err(krpc::error::KrpcError::protocol("Invalid token".to_owned()))
                     }
@@ -740,4 +762,3 @@ impl Dht {
         self.search(own_id, false).await
     }
 }
-
