@@ -156,6 +156,7 @@ dependencies = [
  "parking_lot",
  "rand 0.8.5",
  "sha1",
+ "slotmap",
  "tokio",
  "tokio-uring",
  "tokio-util",

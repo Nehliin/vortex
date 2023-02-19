@@ -7,7 +7,8 @@ use std::{
     cell::RefCell,
     io::{Cursor, Write},
     net::SocketAddr,
-    rc::Rc,
+    ops::Deref,
+    rc::{Rc, Weak},
     sync::Arc,
     time::Duration,
 };
@@ -16,8 +17,11 @@ use anyhow::Context;
 use bitvec::prelude::*;
 use bytes::Buf;
 use disk_io::FileHandle;
+use parking_lot::Mutex;
 use peer_connection::PeerConnection;
+use piece_selector::PieceSelector;
 use sha1::{Digest, Sha1};
+use slotmap::{new_key_type, DenseSlotMap, SecondaryMap};
 use tokio::sync::oneshot;
 use tokio_uring::net::{TcpListener, TcpStream};
 
@@ -26,6 +30,85 @@ const SUBPIECE_SIZE: i32 = 16_384;
 pub mod disk_io;
 pub mod peer_connection;
 pub mod peer_message;
+pub mod piece_selector;
+
+new_key_type! {
+    pub struct PeerKey;
+}
+
+#[derive(Clone)]
+struct PeerList {
+    peer_connection_states: Rc<RefCell<DenseSlotMap<PeerKey, PeerConnection>>>,
+    addrs: Arc<Mutex<SecondaryMap<PeerKey, SocketAddr>>>,
+    our_peer_id: [u8; 20],
+}
+
+impl PeerList {
+    pub fn new(our_peer_id: [u8; 20]) -> Self {
+        Self {
+            peer_connection_states: Default::default(),
+            addrs: Default::default(),
+            our_peer_id,
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.peer_connection_states.borrow().is_empty()
+    }
+
+    pub fn insert_peer(&self, addr: SocketAddr, connection: PeerConnection) {
+        let peer_key = self.peer_connection_states.borrow_mut().insert(connection);
+        self.addrs.lock().insert(peer_key, addr);
+    }
+
+    pub fn handle(&self, torrent_state: Weak<RefCell<TorrentState>>) -> PeerListHandle {
+        let (tx, mut rc) = tokio::sync::mpsc::unbounded_channel();
+        let this = self.clone();
+        tokio_uring::spawn(async move {
+            while let Some(addr) = rc.recv().await {
+                if let Ok(stream) = TcpStream::connect(addr).await {
+                    if let Some(state) = torrent_state.upgrade() {
+                        let our_id = this.our_peer_id;
+                        let num_pieces = state.borrow().piece_selector.pieces();
+                        let info_hash = state.borrow().torrent_info.info_hash();
+                        let peer_connection = PeerConnection::new(
+                            stream,
+                            our_id,
+                            info_hash.into(),
+                            num_pieces,
+                            torrent_state.clone(),
+                        )
+                        .await
+                        .unwrap();
+                        this.insert_peer(addr, peer_connection);
+                    }
+                } else {
+                    log::warn!("Failed to connect to peer that was announced")
+                }
+            }
+        });
+        PeerListHandle {
+            peer_sender: tx,
+            addrs: self.addrs.clone(),
+        }
+    }
+}
+
+pub struct PeerListHandle {
+    peer_sender: tokio::sync::mpsc::UnboundedSender<SocketAddr>,
+    addrs: Arc<Mutex<SecondaryMap<PeerKey, SocketAddr>>>,
+}
+
+impl PeerListHandle {
+    pub fn insert(&self, peer: SocketAddr) {
+        self.peer_sender.send(peer).unwrap()
+    }
+
+    pub fn peers(&self) -> Vec<SocketAddr> {
+        self.addrs.lock().values().copied().collect()
+    }
+}
 
 //#[cfg(test)]
 //mod test;
