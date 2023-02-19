@@ -502,31 +502,3 @@ mod test {
     }
 }*/
 
-// Peer info needed:
-// up/download rate
-// haves is choked/interestead or not
-
-// Torrentmanager
-// tracks peers "haves"
-// includes piece stategy
-// chokes and unchokes
-// owns peer connections and connections have weak ref back?
-// includes mmapped file(s)?
-//
-// TorrentManager owns peer connections and peers have weak ref back
-// pro: peer connection state and torrent state is accessible to both synchronously
-// con: locking needed
-
-// Start with this!
-// TorrentManager owns peer connection state, connection on separate thread keeps channel to
-// communicate. Separate thread sends back parsed messages and recieved messages to be sent out
-// pro: clean separation, less locking most likely
-// con: More cloning? async might not always be desired
-
-// TorrentDownloadManager
-// 1. Get meta data about pieces and info hashes
-// 2. Fetch peers from DHT for the pieces
-// 3. Connect to all peers
-// 4. Do piece selection and distribute pieces across peers that have them
-// 5. PeerConnection requests subpieces automatically
-// 6. Manager is informed about pieces that have completed (and peer choking us)
