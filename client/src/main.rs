@@ -1,8 +1,24 @@
-use std::{cell::RefCell, collections::BTreeMap, net::IpAddr, path::Path, rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use bittorrent::TorrentManager;
+use bittorrent::{PeerListHandle, TorrentManager};
+use dht::PeerProvider;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use sha1::{Digest, Sha1};
+
+// TODO: This will become the layer of indirection
+// so that incoming peers will be sent to the right torrent manager
+struct PeerListProvider(PeerListHandle);
+
+impl PeerProvider for PeerListProvider {
+    fn get_peers(&self, _info_hash: [u8; 20]) -> Vec<std::net::SocketAddr> {
+        // TODO: read info hash to see if it matches the one we expect
+        self.0.peers()
+    }
+
+    fn insert_peer(&self, _info_hash: [u8; 20], peer: std::net::SocketAddr) {
+        // TODO: read info hash to see if it matches the one we expect
+        self.0.insert(peer);
+    }
+}
 
 fn main() {
     // Might not exist
@@ -15,7 +31,14 @@ fn main() {
 
     tokio_uring::start(async move {
         let progress = MultiProgress::new();
-        let dht = dht::Dht::new("0.0.0.0:1337".parse().unwrap())
+
+        // TODO Should start dht first
+        let torrent_info = std::fs::read("linux_mint.torrent").unwrap();
+        let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
+        let torrent_manager = TorrentManager::new(metainfo.info().clone());
+        let peer_list_provider = PeerListProvider(torrent_manager.peer_list_handle());
+
+        let dht = dht::Dht::new("0.0.0.0:1337".parse().unwrap(), peer_list_provider)
             .await
             .unwrap();
 
@@ -29,10 +52,7 @@ fn main() {
 
         // Linux mint magnet link + torrent file
         //let magnet_link = "magnet:?xt=urn:btih:CS5SSRQ4EJB2UKD43JUBJCHFPSPOWJNP".to_string();
-        let torrent_info = std::fs::read("linux_mint.torrent").unwrap();
-        let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
 
-        println!("sum: {:x?}", metainfo.info().files().next().unwrap());
         /*let find_peer_progress = progress.add(ProgressBar::new_spinner());
         find_peer_progress.enable_steady_tick(Duration::from_millis(100));
         find_peer_progress
@@ -44,9 +64,7 @@ fn main() {
 
         let peers = peers_reciver.recv().await.unwrap();
 
-//        find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
-
-        let torrent_manager = TorrentManager::new(metainfo.info().clone());
+        //        find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
 
         let connection_progress = progress.add(ProgressBar::new_spinner());
         connection_progress
