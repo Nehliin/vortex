@@ -141,6 +141,12 @@ impl Dht {
                     .await
                     .unwrap();
                 let own_id = this.routing_table.borrow().own_id;
+                // Need to update the closest nodes here again since the search
+                // might have repalced some of the nodes initially closest
+                let nodes = this
+                    .routing_table
+                    .borrow()
+                    .get_k_closest(BUCKET_SIZE, &info_hash);
                 for node in nodes {
                     if let IpAddr::V4(addr) = node.addr.ip() {
                         if let Some(token) = this.token_store.get_token(addr) {
@@ -688,6 +694,9 @@ impl Dht {
     ) -> anyhow::Result<()> {
         let own_id = self.routing_table.borrow().own_id;
 
+        // TODO: These nodes might be replaced during the peer search
+        // Either update this dynamically each iteration or filter out
+        // stale nodes
         for node in nodes {
             let response = match self
                 .krpc_client
@@ -701,10 +710,9 @@ impl Dht {
             {
                 Ok(reponse) => {
                     let mut routing_table = self.routing_table.borrow_mut();
-                    // Unwrap is fine here since it should always exists a node with the given
-                    // id in the table at this point
-                    let queried_node = routing_table.get_mut(&node.id).unwrap();
-                    queried_node.last_status = NodeStatus::Good;
+                    if let Some(queried_node) = routing_table.get_mut(&node.id) {
+                        queried_node.last_status = NodeStatus::Good;
+                    }
                     reponse
                 }
                 Err(err) => {
@@ -712,20 +720,20 @@ impl Dht {
                     match node.last_status {
                         NodeStatus::Good => {
                             let mut routing_table = self.routing_table.borrow_mut();
-                            // Unwrap is fine here since it should always exists a node with the given
-                            // id in the table at this point
-                            let queried_node = routing_table.get_mut(&node.id).unwrap();
-                            queried_node.last_status = NodeStatus::Unknown;
+                            if let Some(queried_node) = routing_table.get_mut(&node.id) {
+                                queried_node.last_status = NodeStatus::Unknown;
+                            }
                         }
                         NodeStatus::Unknown => {
                             let mut routing_table = self.routing_table.borrow_mut();
                             // Unwrap is fine here since it should always exists a node with the given
                             // id in the table at this point
-                            let queried_node = routing_table.get_mut(&node.id).unwrap();
-                            queried_node.last_status = NodeStatus::Bad;
+                            if let Some(queried_node) = routing_table.get_mut(&node.id) {
+                                queried_node.last_status = NodeStatus::Bad;
+                            }
                         }
                         NodeStatus::Bad => {
-                            self.routing_table.borrow_mut().remove(node)?;
+                            let _ = self.routing_table.borrow_mut().remove(node);
                         }
                     }
                     continue;
