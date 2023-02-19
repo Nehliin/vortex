@@ -12,7 +12,7 @@ fn download_from_seeding() {
         .is_test(true)
         .try_init();
     let torrent = std::fs::read("final_test.torrent").unwrap();
-    let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
+    let metainfo = bip_metainfo::Metainfo::from_bytes(torrent).unwrap();
     let torrent_manager = TorrentManager::new(metainfo.info().clone());
     tokio_uring::start(async move {
         let _peer_con = torrent_manager
@@ -46,11 +46,12 @@ fn accepts_incoming() {
     // simulate seeding
     let torrent_manager = TorrentManager::new(metainfo.info().clone());
     let file = std::fs::read("final_file_og.txt").unwrap();
-    torrent_manager
+    // TODO
+    /*torrent_manager
         .torrent_state
         .borrow_mut()
         .completed_pieces
-        .fill(true);
+        .fill(true);*/
 
     let listener = TcpListener::bind("127.0.0.1:1337".parse().unwrap()).unwrap();
 
