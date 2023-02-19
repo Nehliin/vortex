@@ -5,3 +5,7 @@ members = [
     "bittorrent",
     "dht"
 ]
+
+[profile.release]
+overflow-checks = true
+debug-assertions = true
