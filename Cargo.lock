@@ -1471,6 +1471,7 @@ dependencies = [
  "log",
  "magnet-url",
  "num-bigint 0.4.3",
+ "parking_lot",
  "rand 0.8.5",
  "serde",
  "serde_bencoded",

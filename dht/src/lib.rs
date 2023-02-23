@@ -52,7 +52,7 @@ fn load_table(path: &Path) -> Option<RoutingTable> {
 }
 
 pub trait PeerProvider {
-    fn get_peers(&self, info_hash: [u8; 20]) -> Vec<SocketAddr>;
+    fn get_peers(&self, info_hash: [u8; 20]) -> Option<Vec<SocketAddr>>;
     fn insert_peer(&self, info_hash: [u8; 20], peer: SocketAddr);
 }
 

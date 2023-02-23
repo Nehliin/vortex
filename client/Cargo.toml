@@ -10,6 +10,7 @@ tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "maste
 anyhow = "1.0"
 # Focus is not on this encoding
 serde_bencoded = "0.3.1"
+parking_lot = "0.12"
 serde = "1.0"
 serde_derive = "1.0"
 serde_bytes = "0.11"
