@@ -181,7 +181,7 @@ impl PeerConnection {
         torrent_state: Weak<RefCell<TorrentState>>,
     ) -> anyhow::Result<PeerConnection> {
         let handshake_msg = handshake(info_hash, our_id).to_vec();
-        let (res, buf) = stream.write(handshake_msg).await;
+        let (res, buf) = stream.write(handshake_msg).submit().await;
         let _res = res?;
 
         // TODO Add timeout here
