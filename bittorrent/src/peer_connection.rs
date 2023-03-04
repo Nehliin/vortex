@@ -131,7 +131,9 @@ fn start_network_thread(
                             Ok(bytes_read) => {
                                 let remainder = read_buf.split_off(bytes_read);
                                 while let Some(message) = message_decoder.decode(&mut read_buf) {
-                                    incoming_tx.send(message).unwrap();
+                                    if incoming_tx.send(message).is_err() {
+                                        log::error!("No one is listening for incoming traffic, channel dropped");
+                                    }
                                 }
                                 /*if maybe_msg_len.is_none() && bytes_read < std::mem::size_of::<i32>() {
                                     panic!("Not enough data received");
