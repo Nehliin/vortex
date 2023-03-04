@@ -256,7 +256,8 @@ impl TorrentState {
 
                 if self.piece_selector.completed() {
                     log::info!("Torrent completed!");
-                    self.file_store.close().await;
+                    let file_store = std::mem::take(&mut self.file_store);
+                    file_store.close().await.unwrap();
                     self.download_tx.take().unwrap().send(()).unwrap();
                     return;
                 }

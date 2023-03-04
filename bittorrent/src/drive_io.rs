@@ -24,6 +24,8 @@ struct TorrentFile {
     file: File,
 }
 
+// TODO: Consider getting rid of default impl
+#[derive(Debug, Default)]
 pub struct FileStore {
     piece_length: u64,
     files: Vec<TorrentFile>,
@@ -117,11 +119,11 @@ impl FileStore {
         Ok(())
     }
 
-    pub async fn close(&mut self) {
-        let files = std::mem::take(&mut self.files);
-        for torrent_file in files {
-            torrent_file.file.close().await.unwrap();
+    pub async fn close(self) -> anyhow::Result<()> {
+        for torrent_file in self.files {
+            torrent_file.file.close().await?;
         }
+        Ok(())
     }
 }
 
