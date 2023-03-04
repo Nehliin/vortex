@@ -7,16 +7,13 @@ use std::{
     cell::RefCell,
     io::{Cursor, Write},
     net::SocketAddr,
-    ops::Deref,
     rc::{Rc, Weak},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use bitvec::prelude::*;
-use bytes::Buf;
-use disk_io::FileHandle;
 use parking_lot::Mutex;
 use peer_connection::PeerConnection;
 use piece_selector::PieceSelector;
@@ -25,9 +22,11 @@ use slotmap::{new_key_type, DenseSlotMap, SecondaryMap};
 use tokio::sync::oneshot;
 use tokio_uring::net::{TcpListener, TcpStream};
 
+use crate::drive_io::FileStore;
+
 const SUBPIECE_SIZE: i32 = 16_384;
 
-pub mod disk_io;
+pub mod drive_io;
 pub mod peer_connection;
 pub mod peer_message;
 pub mod piece_selector;
@@ -182,7 +181,7 @@ impl Piece {
 pub struct TorrentState {
     pub torrent_info: bip_metainfo::Info,
     pub on_subpiece_callback: Option<Box<dyn FnMut(&[u8])>>,
-    file_handle: FileHandle,
+    file_store: FileStore,
     download_rc: Option<oneshot::Receiver<()>>,
     download_tx: Option<oneshot::Sender<()>>,
     max_unchoked: u32,
@@ -196,7 +195,6 @@ impl TorrentState {
     pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
     }
-
 
     pub(crate) fn on_piece_request(
         &mut self,
@@ -234,10 +232,13 @@ impl TorrentState {
         todo!()
     }
 
-    pub(crate) fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) {
+    pub(crate) async fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) {
+        let hash_time = Instant::now();
         let mut hasher = Sha1::new();
         hasher.update(&data);
         let data_hash = hasher.finalize();
+        let hash_time = hash_time.elapsed();
+        log::info!("Piece hashed in: {}ms", hash_time.as_millis());
         // The hash can be provided to the data storage or the peer connection
         // when the piece is requested so it can be used for validation later on
         let position = self
@@ -248,14 +249,15 @@ impl TorrentState {
             Some(piece_index) if piece_index == index as usize => {
                 log::info!("Piece hash matched downloaded data");
                 self.piece_selector.mark_complete(piece_index);
-                self.file_handle.write(self.torrent_info.piece_length() * index as u64, data).unwrap();
+                self.file_store.write_piece(index, data).await.unwrap();
 
                 // Purge disconnected peers 
                 let mut disconnected_peers:Vec<PeerKey> = self.peer_list.peer_connection_states.borrow().iter().filter_map(|(peer_key,peer)| peer.have(index).map(|_| peer_key).ok()).collect();
 
                 if self.piece_selector.completed() {
                     log::info!("Torrent completed!");
-                    self.file_handle.close().unwrap();
+                    let file_store = std::mem::take(&mut self.file_store);
+                    file_store.close().await.unwrap();
                     self.download_tx.take().unwrap().send(()).unwrap();
                     return;
                 }
@@ -329,10 +331,10 @@ fn generate_peer_id() -> [u8; 20] {
 const UNCHOKED_PEERS: usize = 4;
 
 impl TorrentManager {
-    pub fn new(torrent_info: bip_metainfo::Info) -> Self {
-        assert!(torrent_info.files().count() == 1);
-        let file = torrent_info.files().next().unwrap();
-        let file_handle = FileHandle::new(file.path().to_path_buf());
+    pub async fn new(torrent_info: bip_metainfo::Info) -> Self {
+        let file_store = FileStore::new(std::path::Path::new("downloaded"), &torrent_info)
+            .await
+            .unwrap();
         let piece_selector = PieceSelector::new(&torrent_info);
         let our_peer_id = generate_peer_id();
         let peer_list = PeerList::new(our_peer_id);
@@ -341,7 +343,7 @@ impl TorrentManager {
             num_unchoked: 0,
             max_unchoked: UNCHOKED_PEERS as u32,
             on_subpiece_callback: None,
-            file_handle,
+            file_store,
             download_rc: Some(rc),
             download_tx: Some(tx),
             torrent_info: torrent_info.clone(),
@@ -472,7 +474,6 @@ impl TorrentManager {
             .insert_peer(addr, peer_connection.clone());
         Ok(peer_connection)
     }
-    
 }
 
 /*#[cfg(test)]
@@ -501,4 +502,3 @@ mod test {
 
     }
 }*/
-

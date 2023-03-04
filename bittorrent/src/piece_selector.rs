@@ -27,9 +27,8 @@ impl PieceSelector {
         let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
         let inflight_pieces = completed_pieces.clone();
         let piece_length = torrent_info.piece_length();
-        let file_length = torrent_info.files().next().unwrap().length();
-        // TODO: Should probably be a sum of all the files?
-        let last_piece_length = file_length % piece_length;
+        let total_length: u64 = torrent_info.files().map(|file| file.length()).sum();
+        let last_piece_length = total_length % piece_length;
 
         Self {
             completed_pieces,
@@ -129,7 +128,7 @@ impl PieceSelector {
         }
     }
 
-    // TODO unused, maybe shouldn't be part of this 
+    // TODO unused, maybe shouldn't be part of this
     /*pub fn download_next_piece(
         &mut self,
         peer_list: &PeerList,
