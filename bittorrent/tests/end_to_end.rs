@@ -6,6 +6,7 @@ use tokio_uring::net::TcpListener;
 // Make these tests automatic
 // ./build/examples/client_test -G -f log.txt final_test.torrent
 #[test]
+#[ignore = "only for ci"]
 fn download_from_seeding() {
     let _ = env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -13,8 +14,8 @@ fn download_from_seeding() {
         .try_init();
     let torrent = std::fs::read("final_test.torrent").unwrap();
     let metainfo = bip_metainfo::Metainfo::from_bytes(torrent).unwrap();
-    let torrent_manager = TorrentManager::new(metainfo.info().clone());
     tokio_uring::start(async move {
+        let torrent_manager = TorrentManager::new(metainfo.info().clone()).await;
         let _peer_con = torrent_manager
             .add_peer("127.0.0.1:6881".parse().unwrap())
             .await
@@ -36,6 +37,7 @@ fn download_from_seeding() {
 }
 
 #[test]
+#[ignore = "only for ci"]
 fn accepts_incoming() {
     let _ = env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -44,18 +46,18 @@ fn accepts_incoming() {
     let torrent = std::fs::read("final_test.torrent").unwrap();
     let metainfo = bip_metainfo::Metainfo::from_bytes(torrent).unwrap();
     // simulate seeding
-    let torrent_manager = TorrentManager::new(metainfo.info().clone());
     let file = std::fs::read("final_file_og.txt").unwrap();
     // TODO
     /*torrent_manager
-        .torrent_state
-        .borrow_mut()
-        .completed_pieces
-        .fill(true);*/
+    .torrent_state
+    .borrow_mut()
+    .completed_pieces
+    .fill(true);*/
 
     let listener = TcpListener::bind("127.0.0.1:1337".parse().unwrap()).unwrap();
 
     tokio_uring::start(async move {
+        let torrent_manager = TorrentManager::new(metainfo.info().clone()).await;
         let mut attempt = 1;
         loop {
             if attempt > 2 {

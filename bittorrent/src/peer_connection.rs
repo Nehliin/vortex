@@ -237,8 +237,9 @@ impl PeerConnection {
             while let Some(incoming) = incoming_rc.recv().await {
                 if let Some(torrent_state) = torrent_state.upgrade() {
                     let mut torrent_state = torrent_state.borrow_mut();
-                    if let Err(err) =
-                        connection_clone.process_incoming(incoming, &mut torrent_state)
+                    if let Err(err) = connection_clone
+                        .process_incoming(incoming, &mut torrent_state)
+                        .await
                     {
                         log::error!("[Peer: {peer_id:?}] Error processing incoming message: {err}");
                     }
@@ -336,7 +337,7 @@ impl PeerConnection {
     }
 
     // Consider adding handlers for each msg as a trait which extensions can implement
-    pub(crate) fn process_incoming(
+    pub(crate) async fn process_incoming(
         &self,
         msg: PeerMessage,
         torrent_state: &mut TorrentState,
@@ -456,7 +457,9 @@ impl PeerConnection {
                         log::debug!("Piece completed!");
                         // Required since the state is borrowed within the on_piece function
                         drop(state);
-                        torrent_state.on_piece_completed(piece.index, piece.memory);
+                        torrent_state
+                            .on_piece_completed(piece.index, piece.memory)
+                            .await;
                     }
                 } else {
                     log::error!("Recieved unexpected piece message");
