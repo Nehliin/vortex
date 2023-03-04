@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc, time::Duration, path::Path};
 
 use bittorrent::{PeerListHandle, TorrentManager};
 use dht::PeerProvider;
@@ -39,9 +39,9 @@ fn main() {
         let progress = MultiProgress::new();
 
         // TODO Should start dht first
-        let torrent_info = std::fs::read("linux_mint.torrent").unwrap();
+        let torrent_info = std::fs::read("slackware.torrent").unwrap();
         let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
-        let torrent_manager = TorrentManager::new(metainfo.info().clone());
+        let torrent_manager = TorrentManager::new(metainfo.info().clone()).await;
         let peer_list_map = Mutex::new(
             [(
                 metainfo.info().info_hash().try_into().unwrap(),
@@ -76,6 +76,7 @@ fn main() {
         let info_hash = metainfo.info().info_hash();
         let mut peers_reciver = dht.find_peers(info_hash.as_ref());
 
+        dht.save(Path::new("routing_table.json")).await.unwrap();
         let peers = peers_reciver.recv().await.unwrap();
 
         //        find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
