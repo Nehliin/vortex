@@ -1,25 +1,25 @@
 [package]
 name = "bittorrent"
 version = "0.1.0"
+authors = ["Oskar Nehlin"]
 edition = "2021"
-licence = "BSD-3-Clause"
-
+license = "BSD-3-Clause"
 
 [dependencies]
-bytes = "1.2"
-tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
+bytes = { workspace = true }
+tokio-uring = { workspace = true }
 tokio-util = "0.7.4"
-anyhow = "1.0"
-log = "0.4"
+anyhow = { workspace = true }
+log = { workspace = true }
 bip_metainfo = "0.12"
 slotmap = "1"
-parking_lot = "0.12"
+parking_lot = { workspace = true }
 bitvec = { version = "1.0", default-features = false, features = ["alloc"]}
 sha1 = "0.10.5"
-tokio = { version = "1.20.1", features = ["time", "sync", "macros"] }
-rand = "0.8.5"
+tokio = { workspace = true, features = ["time", "sync", "macros"] }
+rand = { workspace = true }
 arbitrary = { version = "1.1.3", features = ["derive"]}
 
 [dev-dependencies]
-env_logger = "0.9"
-rand = "0.8"
+env_logger = { workspace = true }
+rand = { workspace = true }

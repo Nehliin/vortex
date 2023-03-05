@@ -1,20 +1,19 @@
 [package]
 name = "utp_socket"
 version = "0.1.0"
+authors = ["Oskar Nehlin"]
 edition = "2021"
-licence = "BSD-3-Clause"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "BSD-3-Clause"
 
 [dependencies]
-anyhow = "1.0"
-rand = "0.8.5"
-bytes = { version = "1.2", features = ["serde"]}
-tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
-tokio = { version = "1.20.1", features = ["time", "sync", "macros"] }
-log = "0.4"
+anyhow = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
+tokio-uring = { workspace = true, branch = "master", features = ["bytes"]}
+tokio = { workspace = true, features = ["time", "sync", "macros"] }
+log = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
 tokio-stream = "0.1.10"
-env_logger = "0.9"
+env_logger = { workspace = true }
