@@ -45,7 +45,7 @@ fn generate_node_id() -> NodeId {
     NodeId::from(hasher.finalize().as_slice())
 }
 
-// make these async
+// TODO: make these async
 #[inline]
 fn load_table(path: &Path) -> Option<RoutingTable> {
     serde_json::from_reader(std::fs::File::open(path).ok()?).ok()?
@@ -125,7 +125,7 @@ impl Dht {
         // 2. get k_closest
         // 3. get_peers
         // 4. announce to those (ensure token exists)
-        // 3. periodically start from 1 again
+        // 5. periodically start from 1 again
         let this = self.clone();
         let (tx, rc) = tokio::sync::mpsc::channel(64);
         let info_hash = NodeId::from(info_hash);
@@ -206,7 +206,6 @@ impl Dht {
                     log::debug!("Found: {} nodes closet to {target:?}", closet.len());
                     Ok(Answer::FindNode {
                         id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                        // TODO: this shouldn't be done here
                         nodes: krpc::protocol::serialize_compact_nodes(&closet),
                     })
                 }
@@ -286,9 +285,13 @@ impl Dht {
 
     pub async fn save(&self, path: &Path) -> anyhow::Result<()> {
         log::info!("Saving table");
-        let routing_table = self.routing_table.borrow();
-        let table_json = serde_json::to_string(&*routing_table)?;
-        std::fs::write(path, table_json)?;
+        let table_json = {
+            let routing_table = self.routing_table.borrow();
+            serde_json::to_vec(&*routing_table)?
+        };
+        let file = tokio_uring::fs::File::create(&path).await?;
+        let (res, _) = file.write_all_at(table_json, 0).await;
+        res?;
         Ok(())
     }
 
@@ -659,6 +662,7 @@ impl Dht {
                                 // id in the table at this point
                                 let queried_node =
                                     routing_table.get_mut(&next_to_query.id).unwrap();
+                                queried_node.last_seen = OffsetDateTime::now_utc();
                                 queried_node.last_status = NodeStatus::Unknown;
                             }
                             NodeStatus::Unknown => {

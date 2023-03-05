@@ -9,9 +9,8 @@ use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-// TODO: migrate to u128 + u32
-// BE endian large nums that
-// can use lexographical order
+// TODO: migrate to u128 + u32 BE endian large nums. 
+// (Can use lexographical order)
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Deserialize, Serialize)]
 pub struct NodeId([u8; 20]);
 

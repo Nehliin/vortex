@@ -108,7 +108,7 @@ impl KrpcClient {
     fn gen_transaction_id(&self) -> ByteBuf {
         // TODO: Ensure we don't block indefinitely by waiting for ids
         // error out early in that case.
-        // const MAX_IDS: usize = 26 * 2 + 10;
+        // const MAX_IDS: usize = 36 ^ 2;
         // Probably doesn't need to be Alphanumeric?
         use rand::distributions::Alphanumeric;
         let mut rng = rand::thread_rng();
@@ -195,7 +195,7 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
         let mut recv_buffer = vec![0; 2048];
         loop {
             let (read, buf) = socket.recv_from(std::mem::take(&mut recv_buffer)).await;
-            // TODO cancellation and addr should be sent across with packet
+            // TODO cancellation should be sent across with packet
             let (recv, addr) = match read {
                 Ok(recv_addr) => recv_addr,
                 Err(err) => {

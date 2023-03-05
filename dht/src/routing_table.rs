@@ -202,15 +202,6 @@ impl RoutingTable {
             })? // never empty
             .as_mut()?;
 
-        // Santify check TODO FIX AND REMOVE
-        /*let mut found = 0;
-        for bucket in self.buckets.iter() {
-            if bucket.covers(&closest.id) {
-                found += 1;
-                assert!(bucket.nodes.contains(&Some(closest.clone())));
-            }
-        }
-        assert_eq!(found, 1);*/
         Some(closest)
     }
 
@@ -225,12 +216,6 @@ impl RoutingTable {
 
     pub fn find_bucket(&self, id: &NodeId) -> Option<(BucketId, &Bucket)> {
         self.buckets.iter().find(|(_, bucket)| bucket.covers(id))
-        /* .filter(|(_, bucket)| {
-            bucket
-                .nodes
-                .iter()
-                .any(|node| node.map_or(false, |node| node.id == *id))
-        })*/
     }
 
     pub fn bucket_ids(&self) -> impl Iterator<Item = BucketId> + '_ {
@@ -286,41 +271,6 @@ mod test {
             assert!(bucket_a.min < bucket_a.max);
         }
     }
-
-    /*#[test]
-    fn test_get_closest() {
-        let mut routing_table: RoutingTable =
-            serde_json::from_reader(std::fs::File::open("get_closest.json").unwrap()).unwrap();
-        for (_, bucket_a) in routing_table.buckets.iter() {
-            verify_bucket(bucket_a);
-            for (_, bucket_b) in routing_table.buckets.iter() {
-                if bucket_b == bucket_a {
-                    continue;
-                }
-                verify_bucket(bucket_b);
-                assert_non_overlapping(bucket_a, bucket_b);
-            }
-        }
-
-        let info_bytes: &[u8] = &[
-            0xaa, 0x12, 0x73, 0xc9, 0xb8, 0xf0, 0x90, 0x29, 0xfc, 0xa8, 0x0d, 0xd8, 0x14, 0x22,
-            0xad, 11, 0xeb, 0xca, 0x20, 0x60,
-        ];
-        let info_hash = NodeId::from(info_bytes);
-
-        let buckets_clone = routing_table.buckets.clone();
-        let closest = routing_table.get_closest_mut(&info_hash).unwrap();
-
-        // Santify check
-        let mut found = 0;
-        for (_, bucket) in buckets_clone.iter() {
-            if bucket.covers(&info_hash) {
-                found += 1;
-                assert!(bucket.nodes.contains(&Some(*closest)));
-            }
-        }
-        assert_eq!(found, 1);
-    }*/
 
     #[test]
     fn test_bucket_split_basic() {
