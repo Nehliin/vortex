@@ -1,9 +1,9 @@
 use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
 
-use vortex_bittorrent::{PeerListHandle, TorrentManager};
-use vortex_dht::PeerProvider;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parking_lot::Mutex;
+use vortex_bittorrent::{PeerListHandle, TorrentManager};
+use vortex_dht::PeerProvider;
 
 // TODO: This will become the layer of indirection
 // so that incoming peers will be sent to the right torrent manager
