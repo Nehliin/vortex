@@ -9,7 +9,7 @@ use std::{
 use anyhow::Context;
 use futures::future::join_all;
 use krpc::{
-    protocol::{FindNodesResponse, GetPeers, GetPeersResponseBody, Peer, Ping},
+    protocol::{FindNodesResponse, GetPeers, GetPeersResponseBody, Ping},
     setup_krpc, KrpcClient, KrpcServer,
 };
 use sha1::{Digest, Sha1};
@@ -19,7 +19,7 @@ use token_store::TokenStore;
 use tokio::sync::Notify;
 
 use crate::{
-    krpc::protocol::{AnnouncePeer, Answer, FindNodes, Query},
+    krpc::protocol::{serialize_compact_peers, AnnouncePeer, Answer, FindNodes, Query},
     node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
     routing_table::{BucketId, RoutingTable, BUCKET_SIZE},
 };
@@ -119,7 +119,7 @@ impl Dht {
         }
     }
 
-    pub fn find_peers(&self, info_hash: &[u8]) -> tokio::sync::mpsc::Receiver<Vec<Peer>> {
+    pub fn find_peers(&self, info_hash: &[u8]) -> tokio::sync::mpsc::Receiver<Vec<SocketAddr>> {
         // Search may take the sender as optional argument
         // 1  search for nodes close to target
         // 2. get k_closest
@@ -214,26 +214,39 @@ impl Dht {
                     })
                 }
                 Query::GetPeers { id: _, info_hash } => {
-                    // Somehow inspect peer list and provide peers if they
-                    // exist or otherwise return closest nodes. Consider having
-                    // a trait that specifices the peer list interface that may be used.
-                    // otherwise return find nodes response. Until then, just return find node
-                    // response.
-                    let target = NodeId::from(info_hash.as_slice());
-                    let closet = this
-                        .routing_table
-                        .borrow()
-                        .get_k_closest(BUCKET_SIZE, &target);
-                    log::debug!("Found: {} nodes closet to {target:?}", closet.len());
+                    if let Ok(info_hash) = info_hash.as_slice().try_into() {
+                        if let Some(peers) = peer_provider.get_peers(info_hash) {
+                            Ok(Answer::GetPeers {
+                                id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                                token: serde_bytes::ByteBuf::from(
+                                    this.token_store.generate(ip).to_vec(),
+                                ),
+                                values: Some(serialize_compact_peers(&peers)),
+                                nodes: None,
+                            })
+                        } else {
+                            let target = NodeId::from(info_hash.as_slice());
+                            let closet = this
+                                .routing_table
+                                .borrow()
+                                .get_k_closest(BUCKET_SIZE, &target);
+                            log::debug!("Found: {} nodes closet to {target:?}", closet.len());
 
-                    Ok(Answer::GetPeers {
-                        id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
-                        token: serde_bytes::ByteBuf::from(this.token_store.generate(ip).to_vec()),
-                        values: None,
-                        nodes: Some(krpc::protocol::serialize_compact_nodes(&closet)),
-                    })
+                            Ok(Answer::GetPeers {
+                                id: serde_bytes::ByteBuf::from(our_id.as_bytes()),
+                                token: serde_bytes::ByteBuf::from(
+                                    this.token_store.generate(ip).to_vec(),
+                                ),
+                                values: None,
+                                nodes: Some(krpc::protocol::serialize_compact_nodes(&closet)),
+                            })
+                        }
+                    } else {
+                        Err(krpc::error::KrpcError::protocol(
+                            "Invalid infohash".to_owned(),
+                        ))
+                    }
                 }
-                // TODO verify tokens
                 Query::AnnouncePeer {
                     id: _,
                     implied_port,
@@ -690,7 +703,7 @@ impl Dht {
         &self,
         target: &NodeId,
         nodes: &[Node],
-        peer_listener: tokio::sync::mpsc::Sender<Vec<Peer>>,
+        peer_listener: tokio::sync::mpsc::Sender<Vec<SocketAddr>>,
     ) -> anyhow::Result<()> {
         let own_id = self.routing_table.borrow().own_id;
 

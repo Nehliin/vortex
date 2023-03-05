@@ -38,7 +38,9 @@ pub enum Answer {
     GetPeers {
         id: ByteBuf,
         token: ByteBuf,
+        #[serde(skip_serializing_if = "Option::is_none")]
         values: Option<Vec<ByteBuf>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<ByteBuf>,
     },
     FindNode {
@@ -184,16 +186,46 @@ impl Rpc for GetPeers {
     }
 }
 
-// TODO: move
-#[derive(Debug)]
-pub struct Peer {
-    pub addr: SocketAddr,
+pub(crate) fn serialize_compact_peers(peers: &[SocketAddr]) -> Vec<ByteBuf> {
+    let mut result = Vec::with_capacity(peers.len());
+    for peer in peers {
+        let mut compact_peer = ByteBuf::with_capacity(6);
+        match peer.ip() {
+            IpAddr::V4(ip) => {
+                compact_peer.put(ip.octets().as_slice());
+                compact_peer.put_u16(peer.port());
+                result.push(compact_peer);
+            }
+            IpAddr::V6(_) => {
+                log::warn!("Only Ipv4 addresses can be serialized as compact peers");
+            }
+        }
+    }
+    result
+}
+
+// Will skip compact peer info that isn't 6 bytes long
+pub(crate) fn deserialize_compact_peers(peers: Vec<ByteBuf>) -> Vec<SocketAddr> {
+    peers
+        .into_iter()
+        .filter_map(|bytes| {
+            if bytes.len() != 6 {
+                log::warn!("Compact peer info wasn't 6 bytes long");
+                None
+            } else {
+                Some(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])),
+                    u16::from_be_bytes([bytes[4], bytes[5]]),
+                ))
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug)]
 pub enum GetPeersResponseBody {
     Nodes(Vec<Node>),
-    Peers(Vec<Peer>),
+    Peers(Vec<SocketAddr>),
 }
 
 #[derive(Debug)]
@@ -215,28 +247,10 @@ impl TryFrom<Answer> for GetPeersResponse {
                 nodes,
             } => {
                 if let Some(peers) = values {
-                    // Might miss if invalid format and its not divisible by chunk size
-                    let peers = peers
-                        .into_iter()
-                        .flat_map(|peer_bytes| {
-                            peer_bytes
-                                .chunks_exact(6)
-                                .map(|bytes| Peer {
-                                    addr: SocketAddr::new(
-                                        IpAddr::V4(Ipv4Addr::new(
-                                            bytes[0], bytes[1], bytes[2], bytes[3],
-                                        )),
-                                        u16::from_be_bytes([bytes[4], bytes[5]]),
-                                    ),
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
-
                     return Ok(GetPeersResponse {
                         id: id.as_slice().into(),
                         token,
-                        body: GetPeersResponseBody::Peers(peers),
+                        body: GetPeersResponseBody::Peers(deserialize_compact_peers(peers)),
                     });
                 }
 
@@ -340,8 +354,7 @@ fn deserialize_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
         .collect()
 }
 
-// TODO: Don't make this public
-pub fn serialize_compact_nodes(nodes: &[Node]) -> ByteBuf {
+pub(crate) fn serialize_compact_nodes(nodes: &[Node]) -> ByteBuf {
     let mut result = BytesMut::with_capacity(nodes.len() * (20 + 4 + 2));
 
     for node in nodes {
@@ -360,7 +373,11 @@ pub fn serialize_compact_nodes(nodes: &[Node]) -> ByteBuf {
 mod test {
 
     use super::*;
-    use crate::node::{ID_MAX, ID_ZERO};
+    use crate::{
+        generate_node_id,
+        node::{ID_MAX, ID_ZERO},
+        token_store::TokenStore,
+    };
 
     #[test]
     fn roundtrip_ping() {
@@ -376,6 +393,34 @@ mod test {
         };
         let encoded = serde_bencoded::to_vec(&packet).unwrap();
         assert_eq!(packet, serde_bencoded::from_bytes(&encoded).unwrap());
+    }
+
+    #[test]
+    fn serialize_get_peers() {
+        // Token store spawns refresh task
+        tokio_uring::start(async {
+            let token_store = TokenStore::new();
+            let ip = Ipv4Addr::new(123, 20, 13, 3);
+            let peers = vec![
+                "127.0.2.1:6666".parse().unwrap(),
+                "127.1.2.1:1337".parse().unwrap(),
+            ];
+            let packet = KrpcPacket {
+                t: ByteBuf::from(*b"ta"),
+                y: 'r',
+                q: None,
+                a: None,
+                r: Some(Answer::GetPeers {
+                    id: serde_bytes::ByteBuf::from(generate_node_id().as_bytes()),
+                    token: serde_bytes::ByteBuf::from(token_store.generate(ip).to_vec()),
+                    values: Some(serialize_compact_peers(&peers)),
+                    nodes: None,
+                }),
+                e: None,
+            };
+            let encoded = serde_bencoded::to_vec(&packet).unwrap();
+            assert_eq!(packet, serde_bencoded::from_bytes(&encoded).unwrap());
+        });
     }
 
     #[test]
@@ -428,6 +473,21 @@ mod test {
         for (a, b) in deserialized.iter().zip(nodes.iter()) {
             assert_eq!(a.id, b.id);
             assert_eq!(a.addr, b.addr);
+        }
+    }
+
+    #[test]
+    fn roundtrip_compact_peers() {
+        let peers = vec![
+            "127.0.2.1:6666".parse().unwrap(),
+            "127.1.2.1:1337".parse().unwrap(),
+        ];
+
+        let compact = serialize_compact_peers(&peers);
+        let deserialized = deserialize_compact_peers(compact);
+
+        for (a, b) in deserialized.iter().zip(peers.iter()) {
+            assert_eq!(a, b);
         }
     }
 }
