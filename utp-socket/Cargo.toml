@@ -1,5 +1,5 @@
 [package]
-name = "utp_socket"
+name = "utp-socket"
 version = "0.1.0"
 authors = ["Oskar Nehlin"]
 edition = "2021"

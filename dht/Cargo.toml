@@ -1,5 +1,5 @@
 [package]
-name = "dht"
+name = "vortex-dht"
 version = "0.1.0"
 authors = ["Oskar Nehlin"]
 edition = "2021"
