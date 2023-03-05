@@ -5,7 +5,6 @@
 
 use std::{
     cell::RefCell,
-    io::{Cursor, Write},
     net::SocketAddr,
     rc::{Rc, Weak},
     sync::Arc,
@@ -109,10 +108,6 @@ impl PeerListHandle {
     }
 }
 
-//#[cfg(test)]
-//mod test;
-
-// Perhaps also create a subpiece type that can be converted into a peer request
 #[derive(Debug)]
 pub struct Piece {
     index: i32,
@@ -178,9 +173,11 @@ impl Piece {
     }
 }
 
+type OnSubpieceCallback = Box<dyn FnMut(&[u8])>;
+
 pub struct TorrentState {
-    pub torrent_info: bip_metainfo::Info,
-    pub on_subpiece_callback: Option<Box<dyn FnMut(&[u8])>>,
+    torrent_info: bip_metainfo::Info,
+    on_subpiece_callback: Option<OnSubpieceCallback>,
     file_store: FileStore,
     download_rc: Option<oneshot::Receiver<()>>,
     download_tx: Option<oneshot::Sender<()>>,
@@ -198,9 +195,9 @@ impl TorrentState {
 
     pub(crate) fn on_piece_request(
         &mut self,
-        index: i32,
-        begin: i32,
-        length: i32,
+        _index: i32,
+        _begin: i32,
+        _length: i32,
     ) -> anyhow::Result<Vec<u8>> {
         // TODO: Take choking into account
         //let piece_size = self.piece_selector.piece_len(index) as i32;
@@ -229,7 +226,7 @@ impl TorrentState {
         } else {
             anyhow::bail!("Piece requested isn't available");
         }*/
-        todo!()
+        unimplemented!()
     }
 
     pub(crate) async fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) {
@@ -238,7 +235,7 @@ impl TorrentState {
         hasher.update(&data);
         let data_hash = hasher.finalize();
         let hash_time = hash_time.elapsed();
-        log::info!("Piece hashed in: {}ms", hash_time.as_millis());
+        log::info!("Piece hashed in: {} microsec", hash_time.as_micros());
         // The hash can be provided to the data storage or the peer connection
         // when the piece is requested so it can be used for validation later on
         let position = self
@@ -332,9 +329,7 @@ const UNCHOKED_PEERS: usize = 4;
 
 impl TorrentManager {
     pub async fn new(torrent_info: bip_metainfo::Info) -> Self {
-        let file_store = FileStore::new(std::path::Path::new("downloaded"), &torrent_info)
-            .await
-            .unwrap();
+        let file_store = FileStore::new("downloaded", &torrent_info).await.unwrap();
         let piece_selector = PieceSelector::new(&torrent_info);
         let our_peer_id = generate_peer_id();
         let peer_list = PeerList::new(our_peer_id);
@@ -475,30 +470,3 @@ impl TorrentManager {
         Ok(peer_connection)
     }
 }
-
-/*#[cfg(test)]
-mod test {
-
-    use super::*;
-
-    #[test]
-    fn next_piece() {
-        let torrent = std::fs::read("final_test.torrent").unwrap();
-        let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent).unwrap();
-        let pieces: BitBox<u8, Msb0> = (0..10).map(|_| false).collect();
-        let state = TorrentState {
-            completed_pieces: pieces.clone(),
-            inflight_pieces: pieces.clone(),
-            peer_connections: ,
-            pretended_file:Default::default(),
-            torrent_info: metainfo.info().clone(),
-            last_piece_len: 0,
-            downloaded: Default::default(),
-            download_rc:Default::default(),
-            download_tx:  Default::default(),
-            max_unchoked: Default::default(),
-            num_unchoked: Default::default(),
-        };
-
-    }
-}*/

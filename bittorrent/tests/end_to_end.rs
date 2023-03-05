@@ -46,8 +46,8 @@ fn accepts_incoming() {
     let torrent = std::fs::read("final_test.torrent").unwrap();
     let metainfo = bip_metainfo::Metainfo::from_bytes(torrent).unwrap();
     // simulate seeding
-    let file = std::fs::read("final_file_og.txt").unwrap();
     // TODO
+    //let file = std::fs::read("final_file_og.txt").unwrap();
     /*torrent_manager
     .torrent_state
     .borrow_mut()
@@ -63,7 +63,7 @@ fn accepts_incoming() {
             if attempt > 2 {
                 panic!("Should succeed after first failure");
             }
-            if let Ok(handle) = torrent_manager.accept_incoming(&listener).await {
+            if let Ok(_handle) = torrent_manager.accept_incoming(&listener).await {
                 log::info!("We are connected!!");
                 tokio::time::sleep(Duration::from_secs(10)).await;
             } else {

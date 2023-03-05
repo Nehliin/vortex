@@ -2,6 +2,7 @@ use bitvec::prelude::{BitBox, Msb0};
 
 use crate::PeerList;
 
+// TODO
 /*pub trait PieceSelectionStrategy {
     // peer list
     fn next_piece(
@@ -128,62 +129,6 @@ impl PieceSelector {
         }
     }
 
-    // TODO unused, maybe shouldn't be part of this
-    /*pub fn download_next_piece(
-        &mut self,
-        peer_list: &PeerList,
-        num_unchoked: &mut u32,
-    ) -> anyhow::Result<bool> {
-        let mut disconnected_peers = Vec::new();
-        if let Some(next_piece) = self.next_piece(peer_list) {
-            let peer_connections = peer_list.peer_connection_states.borrow_mut();
-            for (_, peer) in peer_connections.iter().filter(|(_, peer)| {
-                !peer.state().peer_choking && peer.state().currently_downloading.is_none()
-            }) {
-                if peer.state().peer_pieces[next_piece as usize] {
-                    if peer.state().is_choking {
-                        if let Err(err) = peer.unchoke() {
-                            log::error!("{err}");
-                            disconnected_peers.push(peer.peer_id);
-                            continue;
-                        } else {
-                            *num_unchoked += 1;
-                        }
-                    }
-                    // Group to a single operation
-                    if let Err(err) = peer.request_piece(next_piece, self.piece_len(next_piece)) {
-                        log::error!("{err}");
-                        disconnected_peers.push(peer.peer_id);
-                        continue;
-                    } else {
-                        self.inflight_pieces.set(next_piece as usize, true);
-                        break;
-                    }
-                }
-            }
-            Ok(false)
-        } else if self.completed_pieces.all() {
-            log::info!("Torrent completed!");
-            return Ok(true);
-        } else {
-            anyhow::bail!("No piece can be downloaded from any peer");
-        }
-    }*/
+    // TODO consider actually triggering the piece download from this struct? 
 }
-// borde ha en tråd per torrent. mkt lättare o ej värt med fler pga så får är unchoked samtidigt
 
-// Data flows
-// Peer connection needs to know if it should unchoke or not
-// Needs access to file storage and know which pieces are completed
-// Needs access to storage to write data and piece selector update completed/inflight pieces
-//
-// PieceSelector needs to know and update completed/inflight pieces
-// needs to have access to peer list
-//
-// Dht needs access to peer list ips and write in new peers (but an indirection is needed probably
-// long term since it might receive announces for torrents we aren't downloading)
-//
-// Peer selector is needed as well kind of to decide from who we should download?
-// keep track of num unchoked and chocked and what the different download speeds are
-// as well as if we are snubbed.
-//

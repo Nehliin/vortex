@@ -135,18 +135,6 @@ fn start_network_thread(
                                         log::error!("No one is listening for incoming traffic, channel dropped");
                                     }
                                 }
-                                /*if maybe_msg_len.is_none() && bytes_read < std::mem::size_of::<i32>() {
-                                    panic!("Not enough data received");
-                                }
-                                let mut buf = read_buf.clone();
-                                if maybe_msg_len.is_none() {
-                                    let pending = PendingMsg {
-                                        remaining_bytes: buf.get_i32(),
-                                        partial: BytesMut::new(),
-                                    };
-                                    maybe_msg_len = Some(pending);
-                                }
-                                parse_msgs(&incoming_tx, buf, &mut maybe_msg_len);*/
                                 read_buf.unsplit(remainder);
                             }
                             Err(err) => {
@@ -197,11 +185,6 @@ impl PeerConnection {
         anyhow::ensure!(str_len == 19);
         anyhow::ensure!(buf.get(..str_len as usize) == Some(b"BitTorrent protocol" as &[u8]));
         buf.advance(str_len as usize);
-        // Extensions!
-        /*assert_eq!(
-            buf.get((str_len as usize)..(str_len as usize + 8)),
-            Some(&[0_u8; 8] as &[u8])
-        );*/
         // Skip extensions for now
         buf.advance(8);
         anyhow::ensure!(Some(&info_hash as &[u8]) == buf.get(..20));
@@ -311,11 +294,11 @@ impl PeerConnection {
                 self.outgoing
                     .send(PeerMessage::Request {
                         index: piece.index,
-                        begin: subindex as i32 * SUBPIECE_SIZE as i32,
+                        begin: subindex as i32 * SUBPIECE_SIZE,
                         length: if last_subpiece_index == subindex {
                             piece.last_subpiece_length
                         } else {
-                            SUBPIECE_SIZE as i32
+                            SUBPIECE_SIZE
                         },
                     })
                     .context("Failed to queue outgoing msg")?;
@@ -344,14 +327,15 @@ impl PeerConnection {
         msg: PeerMessage,
         torrent_state: &mut TorrentState,
     ) -> anyhow::Result<()> {
-        let mut state = self.state_mut();
         match msg {
             PeerMessage::Choke => {
+                let mut state = self.state_mut();
                 log::info!("Peer is choking us!");
                 state.peer_choking = true;
                 // TODO clear outgoing requests
             }
             PeerMessage::Unchoke => {
+                let mut state = self.state_mut();
                 log::info!("Peer is no longer choking us!");
                 state.peer_choking = false;
                 if state.is_interested {
@@ -361,6 +345,7 @@ impl PeerConnection {
                 }
             }
             PeerMessage::Interested => {
+                let mut state = self.state_mut();
                 log::info!("Peer is interested in us!");
                 state.peer_interested = true;
                 if !state.is_choking {
@@ -374,16 +359,19 @@ impl PeerConnection {
                 }
             }
             PeerMessage::NotInterested => {
+                let mut state = self.state_mut();
                 log::info!("Peer is no longer interested in us!");
                 state.peer_interested = false;
                 state.is_choking = true;
                 self.choke()?;
             }
             PeerMessage::Have { index } => {
+                let mut state = self.state_mut();
                 log::info!("Peer have piece with index: {index}");
                 state.peer_pieces.set(index as usize, true);
             }
             PeerMessage::Bitfield(field) => {
+                let mut state = self.state_mut();
                 log::info!("Bifield received: {field}");
                 state.peer_pieces |= field;
             }
@@ -427,7 +415,7 @@ impl PeerConnection {
                     "Recived a piece index: {index}, begin: {begin}, length: {}",
                     data.len()
                 );
-                let currently_downloading = state.currently_downloading.take();
+                let currently_downloading = { self.state_mut().currently_downloading.take() };
                 if let Some(mut piece) = currently_downloading {
                     if piece.index != index {
                         log::warn!("Stale piece received, ignoring");
@@ -454,11 +442,9 @@ impl PeerConnection {
                             })?;
                         }
                         // Still downloading the same piece
-                        state.currently_downloading = Some(piece);
+                        self.state_mut().currently_downloading = Some(piece);
                     } else {
                         log::debug!("Piece completed!");
-                        // Required since the state is borrowed within the on_piece function
-                        drop(state);
                         torrent_state
                             .on_piece_completed(piece.index, piece.memory)
                             .await;

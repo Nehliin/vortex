@@ -62,7 +62,7 @@ fn setup_test() -> (
         });
     });
 
-    let torrent_manager = TorrentManager::new(metainfo.info().clone(), 1);
+    let torrent_manager = TorrentManager::new(metainfo.info().clone());
     let (sender, receiver) = tokio::sync::mpsc::channel(256);
     let peer_handle = PeerConnection {
         peer_id: [1; 20],
