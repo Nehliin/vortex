@@ -141,12 +141,9 @@ impl Dht {
                     .await
                     .unwrap();
                 let own_id = this.routing_table.borrow().own_id;
-                // Need to update the closest nodes here again since the search
-                // might have repalced some of the nodes initially closest
-                let nodes = this
-                    .routing_table
-                    .borrow()
-                    .get_k_closest(BUCKET_SIZE, &info_hash);
+                // One could potentially update k-closest here again since get_peers_from_nodes
+                // might have overwritten the original nodes. But then there might not exist a
+                // token for the nodes so this announces to the original nodes instead.
                 for node in nodes {
                     if let IpAddr::V4(addr) = node.addr.ip() {
                         if let Some(token) = this.token_store.get_token(addr) {
@@ -739,8 +736,6 @@ impl Dht {
                         }
                         NodeStatus::Unknown => {
                             let mut routing_table = self.routing_table.borrow_mut();
-                            // Unwrap is fine here since it should always exists a node with the given
-                            // id in the table at this point
                             if let Some(queried_node) = routing_table.get_mut(&node.id) {
                                 queried_node.last_status = NodeStatus::Bad;
                             }
