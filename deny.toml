@@ -1,3 +1,4 @@
+exclude = ["bip_metainfo"]
 [bans]
 multiple-versions = "deny"
 deny = [
@@ -19,4 +20,7 @@ allow-osi-fsf-free = "neither"
 # We want really high confidence when inferring licenses from text
 confidence-threshold = 0.93
 allow = ["Apache-2.0", "BSD-3-Clause", "MIT"]
-exceptions = [{ allow = ["Unicode-DFS-2016"], name = "unicode-ident" }]
+exceptions = [
+ { allow = ["Unicode-DFS-2016"], name = "unicode-ident" },
+ { allow = ["Zlib"], name = "slotmap" },
+]
