@@ -38,7 +38,9 @@ pub enum Answer {
     GetPeers {
         id: ByteBuf,
         token: ByteBuf,
+        #[serde(skip_serializing_if = "Option::is_none")]
         values: Option<Vec<ByteBuf>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<ByteBuf>,
     },
     FindNode {
@@ -371,7 +373,11 @@ pub(crate) fn serialize_compact_nodes(nodes: &[Node]) -> ByteBuf {
 mod test {
 
     use super::*;
-    use crate::node::{ID_MAX, ID_ZERO};
+    use crate::{
+        generate_node_id,
+        node::{ID_MAX, ID_ZERO},
+        token_store::TokenStore,
+    };
 
     #[test]
     fn roundtrip_ping() {
@@ -387,6 +393,34 @@ mod test {
         };
         let encoded = serde_bencoded::to_vec(&packet).unwrap();
         assert_eq!(packet, serde_bencoded::from_bytes(&encoded).unwrap());
+    }
+
+    #[test]
+    fn serialize_get_peers() {
+        // Token store spawns refresh task
+        tokio_uring::start(async {
+            let token_store = TokenStore::new();
+            let ip = Ipv4Addr::new(123, 20, 13, 3);
+            let peers = vec![
+                "127.0.2.1:6666".parse().unwrap(),
+                "127.1.2.1:1337".parse().unwrap(),
+            ];
+            let packet = KrpcPacket {
+                t: ByteBuf::from(*b"ta"),
+                y: 'r',
+                q: None,
+                a: None,
+                r: Some(Answer::GetPeers {
+                    id: serde_bytes::ByteBuf::from(generate_node_id().as_bytes()),
+                    token: serde_bytes::ByteBuf::from(token_store.generate(ip).to_vec()),
+                    values: Some(serialize_compact_peers(&peers)),
+                    nodes: None,
+                }),
+                e: None,
+            };
+            let encoded = serde_bencoded::to_vec(&packet).unwrap();
+            assert_eq!(packet, serde_bencoded::from_bytes(&encoded).unwrap());
+        });
     }
 
     #[test]
