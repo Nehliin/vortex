@@ -124,7 +124,7 @@ impl ReorderBuffer {
         let index = self.index_of(position as i32)?;
         self.buffer[index]
             .as_ref()
-            .filter(|packet| packet.header.seq_nr == position as u16)
+            .filter(|packet| packet.header.seq_nr == position)
     }
 
     // TODO make sequential removal more efficient
@@ -133,7 +133,7 @@ impl ReorderBuffer {
 
         let maybe_packet = self.buffer[index].take();
         if let Some(packet) = maybe_packet.as_ref() {
-            if packet.header.seq_nr == position as u16 {
+            if packet.header.seq_nr == position {
                 if self.first == index {
                     // Only one element in the buffer
                     if self.buffer[self.last].is_none() {
@@ -497,7 +497,7 @@ mod test {
         for seq_nr in input.iter() {
             buffer.insert(Packet {
                 header: PacketHeader {
-                    seq_nr: *seq_nr as u16,
+                    seq_nr: *seq_nr,
                     ack_nr: 0,
                     conn_id: 0,
                     packet_type: crate::utp_packet::PacketType::Data,
@@ -512,7 +512,7 @@ mod test {
 
         for seq_nr in input.iter() {
             let packet = buffer.get(*seq_nr).unwrap();
-            assert_eq!(packet.header.seq_nr, *seq_nr as u16);
+            assert_eq!(packet.header.seq_nr, *seq_nr);
         }
         assert_eq!(buffer.len(), 4);
     }
@@ -525,7 +525,7 @@ mod test {
         for seq_nr in input.iter() {
             buffer.insert(Packet {
                 header: PacketHeader {
-                    seq_nr: *seq_nr as u16,
+                    seq_nr: *seq_nr,
                     ack_nr: 0,
                     conn_id: 0,
                     packet_type: crate::utp_packet::PacketType::Data,
@@ -544,7 +544,7 @@ mod test {
 
         for seq_nr in input.iter() {
             let packet = buffer.remove(*seq_nr).unwrap();
-            assert_eq!(packet.header.seq_nr, *seq_nr as u16);
+            assert_eq!(packet.header.seq_nr, *seq_nr);
         }
 
         assert_eq!(buffer.len(), 0);
@@ -564,7 +564,7 @@ mod test {
         for seq_nr in input.iter() {
             buffer.insert(Packet {
                 header: PacketHeader {
-                    seq_nr: *seq_nr as u16,
+                    seq_nr: *seq_nr,
                     ack_nr: 0,
                     conn_id: 0,
                     packet_type: crate::utp_packet::PacketType::Data,
@@ -579,7 +579,7 @@ mod test {
         assert_eq!(buffer.len(), 2);
         for seq_nr in input.iter() {
             let packet = buffer.remove(*seq_nr).unwrap();
-            assert_eq!(packet.header.seq_nr, *seq_nr as u16);
+            assert_eq!(packet.header.seq_nr, *seq_nr);
         }
 
         assert_eq!(buffer.len(), 0);
@@ -599,7 +599,7 @@ mod test {
         for seq_nr in input.iter() {
             buffer.insert(Packet {
                 header: PacketHeader {
-                    seq_nr: *seq_nr as u16,
+                    seq_nr: *seq_nr,
                     ack_nr: 0,
                     conn_id: 0,
                     packet_type: crate::utp_packet::PacketType::Data,
@@ -615,7 +615,7 @@ mod test {
         assert_eq!(buffer.len(), 3);
         for seq_nr in input.iter() {
             let packet = buffer.remove(*seq_nr).unwrap();
-            assert_eq!(packet.header.seq_nr, *seq_nr as u16);
+            assert_eq!(packet.header.seq_nr, *seq_nr);
         }
 
         assert_eq!(buffer.len(), 0);
