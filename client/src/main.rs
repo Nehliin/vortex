@@ -89,7 +89,7 @@ fn main() {
         let num_success = Rc::new(RefCell::new(0));
         let num_failures = Rc::new(RefCell::new(0));
 
-        let connect_futures = peers.into_iter().enumerate().map(|(i, peer)| {
+        let connect_futures = peers.into_iter().enumerate().map(|(i, addr)| {
             let num_success_clone = num_success.clone();
             let num_failures_clone = num_failures.clone();
             let manager_clone = torrent_manager.clone();
@@ -105,21 +105,21 @@ fn main() {
                 }
 
                 let connect_res =
-                    tokio::time::timeout(Duration::from_secs(5), manager_clone.add_peer(peer.addr))
+                    tokio::time::timeout(Duration::from_secs(5), manager_clone.add_peer(addr))
                         .await;
 
                 match connect_res {
                     Ok(Ok(_peer_con)) => {
                         *num_success_clone.borrow_mut() += 1;
-                        log::info!("Connected to {}!", peer.addr);
+                        log::info!("Connected to {}!", addr);
                     }
                     Ok(Err(err)) => {
                         *num_failures_clone.borrow_mut() += 1;
-                        log::error!("Failed to connect to peer {}, error: {err}", peer.addr);
+                        log::error!("Failed to connect to peer {}, error: {err}", addr);
                     }
                     Err(_) => {
                         *num_failures_clone.borrow_mut() += 1;
-                        log::error!("Failed to connect to peer: {:?}, timedout", peer.addr);
+                        log::error!("Failed to connect to peer: {:?}, timedout", addr);
                     }
                 }
                 {
