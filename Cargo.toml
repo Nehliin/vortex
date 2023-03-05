@@ -1,10 +1,21 @@
 [workspace]
+resolver = "2"
 members = [
     "client",
     "utp_socket",
     "bittorrent",
     "dht"
 ]
+
+[workspace.dependencies]
+tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
+tokio = { version = "1.26" }
+bytes = { version = "1.4"}
+anyhow = "1.0"
+log = "0.4"
+parking_lot = "0.12"
+rand = "0.8.5"
+env_logger = "0.10"
 
 [profile.release]
 overflow-checks = true

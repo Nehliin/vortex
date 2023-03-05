@@ -1,0 +1,58 @@
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "*"
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+name: CI
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: "clippy, rustfmt"
+      - uses: Swatinem/rust-cache@v2
+      # make sure all code has been formatted with rustfmt
+      - run: cargo fmt -- --check --color always
+      # run clippy to verify we have no warnings
+      - run: cargo clippy --all-features --all-targets -- -D warnings
+
+  cargo-deny:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v3
+      - uses: EmbarkStudios/cargo-deny-action@v1
+
+  test_debug:
+    name: Test (Debug)
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            container: ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo fetch --target ${{ matrix.target }}
+      - name: test - no features
+        run: cargo nextest run --workspace
+      - name: test - all features
+        run: cargo nextest run --all-features --workspace

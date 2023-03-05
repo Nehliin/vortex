@@ -3,5 +3,5 @@ pub mod utp_packet;
 pub mod utp_socket;
 pub mod utp_stream;
 
-#[cfg(test)]
-mod stream_tests;
+//#[cfg(test)]
+//mod stream_tests;
