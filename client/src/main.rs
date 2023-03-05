@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc, time::Duration, path::Path};
+use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
 
 use bittorrent::{PeerListHandle, TorrentManager};
 use dht::PeerProvider;
@@ -27,11 +27,10 @@ impl PeerProvider for PeerListProvider {
 }
 
 fn main() {
-    // Might not exist
-    let log_file = std::fs::File::create("log.txt").unwrap();
+    //    let log_file = std::fs::File::create("log.txt").unwrap();
     let mut log_builder = env_logger::builder();
     log_builder
-        //        .target(env_logger::Target::Pipe(Box::new(log_file)))
+        // .target(env_logger::Target::Pipe(Box::new(log_file)))
         .filter_level(log::LevelFilter::Debug)
         .init();
 
@@ -56,30 +55,12 @@ fn main() {
             .await
             .unwrap();
 
-        // TODO Refactor out to ui module
-        /*let refresh_progress = progress.add(ProgressBar::new_spinner());
-        refresh_progress.enable_steady_tick(Duration::from_millis(100));
-        refresh_progress.set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
-        refresh_progress.set_message("Starting up DHT...");*/
         dht.start().await.unwrap();
-        //refresh_progress.finish_with_message("DHT started");
-
-        // Linux mint magnet link + torrent file
-        //let magnet_link = "magnet:?xt=urn:btih:CS5SSRQ4EJB2UKD43JUBJCHFPSPOWJNP".to_string();
-
-        /*let find_peer_progress = progress.add(ProgressBar::new_spinner());
-        find_peer_progress.enable_steady_tick(Duration::from_millis(100));
-        find_peer_progress
-            .set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
-        find_peer_progress.set_message("Finding peers...");*/
-
         let info_hash = metainfo.info().info_hash();
         let mut peers_reciver = dht.find_peers(info_hash.as_ref());
 
         dht.save(Path::new("routing_table.json")).await.unwrap();
         let peers = peers_reciver.recv().await.unwrap();
-
-        //        find_peer_progress.finish_with_message(format!("Found {} peers", peers.len()));
 
         let connection_progress = progress.add(ProgressBar::new_spinner());
         connection_progress
@@ -139,73 +120,6 @@ fn main() {
             num_success.borrow(),
             total_peers
         ));
-        let torrent_manager_clone = torrent_manager.clone();
-        // Try to find more peers (all logic after peers have been found and added can be moved to
-        // the torrrent manager)
-        /*tokio_uring::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                interval.tick().await;
-                refresh(&mut routing_table, &service).await;
-                let peers = find_peers(&service, &routing_table, info_hash.as_ref()).await;
-                for peer in peers {
-                    let result = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        torrent_manager_clone.add_peer(peer.addr),
-                    )
-                    .await;
-
-                    if let Ok(Ok(peer_connection)) = result {
-                        log::info!("Peer added!");
-                        let _ = peer_connection.interested();
-
-                        let mut state = torrent_manager_clone.torrent_state.borrow_mut();
-                        if state.should_unchoke() && peer_connection.unchoke().is_ok() {
-                            state.num_unchoked += 1;
-                            for _ in 0..10 {
-                                if let Some(index) = state.next_piece() {
-                                    if peer_connection.state().peer_pieces[index as usize] {
-                                        // TODO handle error
-                                        let _ = peer_connection
-                                            .request_piece(index, state.piece_length(index));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                let mut state = torrent_manager_clone.torrent_state.borrow_mut();
-                // Attempt to unchoke a random peer
-                if !state.should_unchoke() {
-                    if let Some(unchoked) = state
-                        .peer_connections
-                        .iter()
-                        .find(|peer| !peer.state().is_choking)
-                    {
-                        let _ = unchoked.choke();
-                        state.num_unchoked -= 1;
-                    }
-                    if let Some(choked) = state
-                        .peer_connections
-                        .iter()
-                        .find(|peer| peer.state().is_choking)
-                    {
-                        let _ = choked.unchoke();
-                        for _ in 0..10 {
-                            if let Some(index) = state.next_piece() {
-                                if choked.state().peer_pieces[index as usize] {
-                                    // TODO handle error
-                                    let _ = choked.request_piece(index, state.piece_length(index));
-                                    break;
-                                }
-                            }
-                        }
-                        state.num_unchoked += 1;
-                    }
-                }
-            }
-        });*/
         let download_progress = progress.add(ProgressBar::new(
             metainfo.info().files().next().unwrap().length(),
         ));
@@ -214,7 +128,6 @@ fn main() {
         torrent_manager.set_subpiece_callback(move |data| {
             download_progress_clone.inc(data.len() as u64);
         });
-        // TODO announce peer (add support for incoming connections)
         download_progress.tick();
         torrent_manager.start().await.unwrap();
         download_progress.finish_with_message("File dowloaded!");
