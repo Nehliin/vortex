@@ -31,7 +31,10 @@ impl FileStore {
         root: impl AsRef<Path>,
         torrent_info: &bip_metainfo::Info,
     ) -> anyhow::Result<Self> {
-        async fn new_impl(root: &Path, torrent_info: &bip_metainfo::Info) -> anyhow::Result<FileStore> {
+        async fn new_impl(
+            root: &Path,
+            torrent_info: &bip_metainfo::Info,
+        ) -> anyhow::Result<FileStore> {
             let mut result = Vec::new();
             let mut start_piece = 0;
             let mut start_offset = 0;
@@ -297,9 +300,7 @@ mod tests {
 
         let mut data_clone = data.clone();
         tokio_uring::start(async move {
-            let file_store = FileStore::new(root_dir, torrent_info.info())
-                .await
-                .unwrap();
+            let file_store = FileStore::new(root_dir, torrent_info.info()).await.unwrap();
 
             for (index, _) in torrent_info.info().pieces().enumerate() {
                 let (piece, remainder) = data_clone.split_at(piece_len.min(data_clone.len()));
@@ -340,9 +341,7 @@ mod tests {
 
         let mut data_clone = data.clone();
         tokio_uring::start(async move {
-            let file_store = FileStore::new(root_dir, torrent_info.info())
-                .await
-                .unwrap();
+            let file_store = FileStore::new(root_dir, torrent_info.info()).await.unwrap();
 
             for (index, _) in torrent_info.info().pieces().enumerate() {
                 let (piece, remainder) = data_clone.split_at(piece_len.min(data_clone.len()));

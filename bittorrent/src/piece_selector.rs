@@ -129,6 +129,5 @@ impl PieceSelector {
         }
     }
 
-    // TODO consider actually triggering the piece download from this struct? 
+    // TODO consider actually triggering the piece download from this struct?
 }
-
