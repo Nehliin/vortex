@@ -1,9 +1,9 @@
 use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
 
-use bittorrent::{PeerListHandle, TorrentManager};
-use dht::PeerProvider;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parking_lot::Mutex;
+use vortex_bittorrent::{PeerListHandle, TorrentManager};
+use vortex_dht::PeerProvider;
 
 // TODO: This will become the layer of indirection
 // so that incoming peers will be sent to the right torrent manager
@@ -51,7 +51,7 @@ fn main() {
         );
         let peer_list_provider = PeerListProvider(peer_list_map);
 
-        let dht = dht::Dht::new("0.0.0.0:1337".parse().unwrap(), peer_list_provider)
+        let dht = vortex_dht::Dht::new("0.0.0.0:1337".parse().unwrap(), peer_list_provider)
             .await
             .unwrap();
 

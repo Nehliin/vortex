@@ -115,26 +115,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
-name = "bittorrent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arbitrary",
- "bip_metainfo",
- "bitvec",
- "bytes",
- "env_logger",
- "log",
- "parking_lot",
- "rand 0.8.5",
- "sha1",
- "slotmap",
- "tokio",
- "tokio-uring",
- "tokio-util",
-]
-
-[[package]]
 name = "bitvec"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -242,31 +222,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "dht"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "anyhow",
- "bytes",
- "env_logger",
- "futures",
- "log",
- "num-bigint 0.4.3",
- "rand 0.8.5",
- "serde",
- "serde_bencoded",
- "serde_bytes",
- "serde_derive",
- "serde_json",
- "sha1",
- "slotmap",
- "thiserror",
- "time 0.3.20",
- "tokio",
- "tokio-uring",
 ]
 
 [[package]]
@@ -1212,7 +1167,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0edd1e5b14653f783770bce4a4dabb4a5108a5370a5f5d8cfe8710c361f6c8b"
 
 [[package]]
-name = "utp_socket"
+name = "utp-socket"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1233,20 +1188,65 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
-name = "vortex"
+name = "vortex-bittorrent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arbitrary",
+ "bip_metainfo",
+ "bitvec",
+ "bytes",
+ "env_logger",
+ "log",
+ "parking_lot",
+ "rand 0.8.5",
+ "sha1",
+ "slotmap",
+ "tokio",
+ "tokio-uring",
+ "tokio-util",
+]
+
+[[package]]
+name = "vortex-cli"
 version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
  "bip_metainfo",
- "bittorrent",
- "dht",
  "env_logger",
  "futures",
  "indicatif",
  "log",
  "num-bigint 0.4.3",
  "parking_lot",
+ "tokio",
+ "tokio-uring",
+ "vortex-bittorrent",
+ "vortex-dht",
+]
+
+[[package]]
+name = "vortex-dht"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bytes",
+ "env_logger",
+ "futures",
+ "log",
+ "num-bigint 0.4.3",
+ "rand 0.8.5",
+ "serde",
+ "serde_bencoded",
+ "serde_bytes",
+ "serde_derive",
+ "serde_json",
+ "sha1",
+ "slotmap",
+ "thiserror",
+ "time 0.3.20",
  "tokio",
  "tokio-uring",
 ]

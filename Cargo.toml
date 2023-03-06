@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "client",
-    "utp_socket",
+    "cli",
+    "utp-socket",
     "bittorrent",
     "dht"
 ]
