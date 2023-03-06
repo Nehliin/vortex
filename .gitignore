@@ -1,2 +1,4 @@
 /target
+/bittorrent/assets
+/bittorrent/downloaded
 routing_table.json
