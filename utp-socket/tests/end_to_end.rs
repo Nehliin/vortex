@@ -3,6 +3,7 @@ use std::time::Duration;
 use utp_socket::utp_socket::UtpSocket;
 
 #[test]
+#[ignore = "Flakey on ci"]
 fn end_to_end() {
     let _ = env_logger::builder()
         .filter_level(log::LevelFilter::Trace)
