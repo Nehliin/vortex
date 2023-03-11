@@ -183,6 +183,7 @@ mod tests {
 
     use bip_metainfo::{DirectAccessor, FileAccessor, Metainfo, MetainfoBuilder, PieceLength};
     use rand::Rng;
+    use sha1::{Digest, Sha1};
 
     use super::*;
 
@@ -209,6 +210,17 @@ mod tests {
         fn drop(&mut self) {
             assert!(!self.path.has_root());
             std::fs::remove_dir_all(&self.path).unwrap();
+        }
+    }
+
+    async fn read_file_by_piece(root: impl AsRef<Path>, torrent_info: &bip_metainfo::Info) {
+        let store = FileStore::new(root, torrent_info).await.unwrap();
+        for (index, piece_hash) in torrent_info.pieces().enumerate() {
+            let piece_data = store.read_piece(index as i32).await.unwrap();
+            let mut hasher = Sha1::new();
+            hasher.update(piece_data);
+            let actual_hash = hasher.finalize();
+            assert_eq!(actual_hash.as_slice(), piece_hash);
         }
     }
 
@@ -253,6 +265,7 @@ mod tests {
             for file in file_store.files {
                 file.file.close().await.unwrap();
             }
+            read_file_by_piece(&download_tmp_dir_path, torrent_info.info()).await;
         });
 
         for file in info_clone.info().files() {
@@ -363,6 +376,7 @@ mod tests {
             for file in file_store.files {
                 file.file.close().await.unwrap();
             }
+            read_file_by_piece(&root_dir, torrent_info.info()).await;
         });
 
         let written_data = std::fs::read(format!("{root_dir}/{file_name}")).unwrap();
@@ -404,10 +418,33 @@ mod tests {
             for file in file_store.files {
                 file.file.close().await.unwrap();
             }
+            read_file_by_piece(&root_dir, torrent_info.info()).await;
         });
 
         let written_data = std::fs::read(format!("{root_dir}/{file_name}")).unwrap();
         assert_eq!(written_data, data);
         std::fs::remove_dir_all("single_file_misaligned").unwrap();
+    }
+
+    #[test]
+    fn errors_on_invalid_piece_index() {
+        // custom root to avoid conflict with concurrently running tests
+        let root_dir = "errors_on_invalid_piece_index/test/root";
+        let file_name = "test_single.txt";
+        let piece_len = 256;
+        let builder = MetainfoBuilder::new().set_piece_length(PieceLength::Custom(piece_len));
+        let data: Vec<u8> = (0..)
+            .map(|_| rand::thread_rng().gen::<u8>())
+            .take(1354)
+            .collect();
+        let accessor = DirectAccessor::new(file_name, &data);
+        let bytes = builder.build(1, accessor, |_progress| {}).unwrap();
+        let torrent_info = Metainfo::from_bytes(bytes).unwrap();
+        tokio_uring::start(async move {
+            let file_store = FileStore::new(root_dir, torrent_info.info()).await.unwrap();
+            // 500 is out of bounds
+            assert!(file_store.read_piece(500).await.is_err());
+        });
+        std::fs::remove_dir_all("errors_on_invalid_piece_index").unwrap();
     }
 }
