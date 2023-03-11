@@ -111,8 +111,13 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn completed(&self) -> bool {
+    pub fn completed_all(&self) -> bool {
         self.completed_pieces.all()
+    }
+
+    #[inline]
+    pub fn has_completed(&self, index: usize) -> bool {
+        self.completed_pieces[index]
     }
 
     #[inline]
