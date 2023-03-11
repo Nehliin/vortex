@@ -19,6 +19,23 @@ struct TorrentFile {
     file: File,
 }
 
+impl TorrentFile {
+    /// Caluclates the byte offset within the file for a given piece index and
+    /// piece length
+    #[inline]
+    fn offset(&self, index: i32, piece_length: u64) -> u64 {
+        // Convert the piece index to index relative to file start
+        let file_index = (index - self.start_piece) as u64;
+        let mut file_offset = file_index * piece_length;
+        if file_index > 0 {
+            // if this isn't the first file index the offset needs
+            // to be removed
+            file_offset -= self.start_offset as u64;
+        }
+        file_offset
+    }
+}
+
 // TODO: Consider getting rid of default impl
 #[derive(Debug, Default)]
 pub struct FileStore {
@@ -98,17 +115,7 @@ impl FileStore {
             .iter()
             .filter(|file| file.start_piece <= index && index <= file.end_piece);
         for file in files {
-            // Convert the piece index to index relative to file start
-            let file_index = (index - file.start_piece) as u64;
-            let file_offset = file_index * self.piece_length
-                // if this isn't the first file index the offset needs 
-                // to be removed
-                - if file_index > 0 {
-                    file.start_offset as u64
-                } else {
-                    0
-                };
-
+            let file_offset = file.offset(index, self.piece_length);
             let data_start_offset = if index == file.start_piece {
                 file.start_offset as usize
             } else {
@@ -124,6 +131,42 @@ impl FileStore {
             res?;
         }
         Ok(())
+    }
+
+    // invariant here is that the piece has been completed before, it's not up
+    // to the store to control that.
+    pub async fn read_piece(&self, index: i32) -> anyhow::Result<Vec<u8>> {
+        let files = self
+            .files
+            .iter()
+            .filter(|file| file.start_piece <= index && index <= file.end_piece);
+        // Total read is used instead of explicitly keeping track of piece lenght per
+        // index. One could use the same calulation as is done in piece_selector but
+        // didn't want to duplicate that logic here.
+        let mut total_read = 0;
+        let mut piece_data: Vec<u8> = vec![0; self.piece_length as usize];
+        for file in files {
+            let file_offset = file.offset(index, self.piece_length);
+            let data_start_offset = if index == file.start_piece {
+                file.start_offset as usize
+            } else {
+                0
+            };
+            let piece_data_slice = if index == file.end_piece {
+                piece_data.slice(data_start_offset..file.end_offset as usize)
+            } else {
+                piece_data.slice(data_start_offset..)
+            };
+            let (bytes_read, buf) = file.file.read_at(piece_data_slice, file_offset).await;
+            total_read += bytes_read?;
+            piece_data = buf.into_inner();
+        }
+        piece_data.truncate(total_read);
+        if piece_data.is_empty() {
+            anyhow::bail!("Invalid piece index");
+        } else {
+            Ok(piece_data)
+        }
     }
 
     pub async fn close(self) -> anyhow::Result<()> {
