@@ -58,16 +58,20 @@ impl FileStore {
                     .open(&path_buf)
                     .await?;
 
-                // Default mode is described in the man pages as:
-                // allocates the disk space within the range specified by offset and
-                // len. The file size (as reported by stat(2)) will be changed if
-                // offset+len is greater than the file size.  Any subregion within
-                // the range specified by offset and len that did not contain data
-                // before the call will be initialized to zero.
-                const DEFAULT_FALLOCATE_MODE: i32 = 0;
+                let metadata = file.statx().await?;
+                // Only fallocate if necessary so existing data isn't overwritten
+                if metadata.stx_size != torrent_file.length() {
+                    // Default mode is described in the man pages as:
+                    // allocates the disk space within the range specified by offset and
+                    // len. The file size (as reported by stat(2)) will be changed if
+                    // offset+len is greater than the file size.  Any subregion within
+                    // the range specified by offset and len that did not contain data
+                    // before the call will be initialized to zero.
+                    const DEFAULT_FALLOCATE_MODE: i32 = 0;
 
-                file.fallocate(0, torrent_file.length(), DEFAULT_FALLOCATE_MODE)
-                    .await?;
+                    file.fallocate(0, torrent_file.length(), DEFAULT_FALLOCATE_MODE)
+                        .await?;
+                }
 
                 let torrent_file = TorrentFile {
                     start_piece,
