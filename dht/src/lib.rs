@@ -290,8 +290,8 @@ impl Dht {
             serde_json::to_vec(&*routing_table)?
         };
         let file = tokio_uring::fs::File::create(&path).await?;
-        let (res, _) = file.write_all_at(table_json, 0).await;
-        res?;
+        //let (res, _) = file.write_all_at(table_json, 0).await;
+        //res?;
         Ok(())
     }
 

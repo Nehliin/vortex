@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use tokio_uring::{
-    buf::BoundedBuf,
-    fs::{File, OpenOptions},
+    //buf::BoundedBuf,
+    fs::{File, OpenOptions}, buf::IoBuf,
 };
 
 #[derive(Debug)]
@@ -64,9 +64,10 @@ impl FileStore {
 
                 let mut path_buf = PathBuf::from(root);
                 path_buf.push(torrent_file.path());
+                
                 if let Some(parent_dir) = path_buf.parent() {
                     // TODO: consider caching already created directories
-                    tokio_uring::fs::create_dir_all(parent_dir).await?;
+//                    tokio_uring::fs::create_dir_all(parent_dir).await?;
                 }
                 let file = OpenOptions::new()
                     .read(true)
@@ -75,7 +76,7 @@ impl FileStore {
                     .open(&path_buf)
                     .await?;
 
-                let metadata = file.statx().await?;
+                /*let metadata = file.statx().await?;
                 // Only fallocate if necessary so existing data isn't overwritten
                 if metadata.stx_size != torrent_file.length() {
                     // Default mode is described in the man pages as:
@@ -88,7 +89,7 @@ impl FileStore {
 
                     file.fallocate(0, torrent_file.length(), DEFAULT_FALLOCATE_MODE)
                         .await?;
-                }
+                }*/
 
                 let torrent_file = TorrentFile {
                     start_piece,
@@ -121,14 +122,14 @@ impl FileStore {
             } else {
                 0
             };
-            let file_data = if index == file.end_piece {
+            /*let file_data = if index == file.end_piece {
                 piece_data.slice(data_start_offset..file.end_offset as usize)
             } else {
                 piece_data.slice(data_start_offset..)
-            };
-            let (res, buf) = file.file.write_all_at(file_data, file_offset).await;
-            piece_data = buf.into_inner();
-            res?;
+            };*/
+            //let (res, buf) = file.file.write_all_at(file_data, file_offset).await;
+            //piece_data = piece_data.into_inner();
+            //res?;
         }
         Ok(())
     }
