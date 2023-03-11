@@ -16,8 +16,8 @@ parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "macros"] }
 log = { workspace = true }
 env_logger = { workspace = true }
-vortex-bittorrent = { path = "../bittorrent" }
-vortex-dht = { path = "../dht" }
+vortex-bittorrent = { version = "0.1.0", path = "../bittorrent" }
+vortex-dht = { version = "0.1.0", path = "../dht" }
 bip_metainfo = "0.12"
 indicatif = "0.17.3"
 futures = "0.3"
