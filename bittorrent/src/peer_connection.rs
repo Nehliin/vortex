@@ -389,11 +389,11 @@ impl PeerConnection {
                 }
                 if self.state().is_choking && torrent_state.should_unchoke() {
                     self.unchoke()?;
-                    match torrent_state.on_piece_request(index, begin, length) {
+                    match torrent_state.on_piece_request(index, begin, length).await {
                         Ok(piece_data) => {
                             self.piece(index, begin, piece_data)?;
                         }
-                        Err(err) => log::error!("Inavlid piece request: {err}"),
+                        Err(err) => log::error!("Invalid piece request: {err}"),
                     }
                 } else {
                     log::info!("Piece request ignored, peer can't be unchoked");

@@ -193,40 +193,34 @@ impl TorrentState {
         self.num_unchoked < self.max_unchoked
     }
 
-    pub(crate) fn on_piece_request(
+    pub(crate) async fn on_piece_request(
         &mut self,
-        _index: i32,
-        _begin: i32,
-        _length: i32,
+        index: i32,
+        begin: i32,
+        length: i32,
     ) -> anyhow::Result<Vec<u8>> {
-        // TODO: Take choking into account
-        //let piece_size = self.piece_selector.piece_len(index) as i32;
-        //anyhow::ensure!(piece_size >= length);
-        /*if *self
-            .completed_pieces
-            .get(index as usize)
-            .as_deref()
-            .unwrap_or(&false)
+        let piece_len = self.piece_selector.piece_len(index) as i32;
+        if begin < 0
+            || begin > piece_len
+            || length < 0
+            || length > piece_len
+            || index >= self.piece_selector.pieces() as i32
         {
-            log::info!("Piece is available!");
-            unimplemented!()
-            //self.file_handle.write(offset, bytes)
-            /*if self.pretended_file.len()
-                < ((index as u64 * piece_size) + begin as u64 + length as u64) as usize
-            {
-                anyhow::bail!("Invalid piece request, out of bounds of file");
-            }
-            let mut data = vec![0; length as usize];
-            let mut cursor = Cursor::new(std::mem::take(&mut self.pretended_file));
-            cursor.set_position(piece_size * index as u64);
-            cursor.copy_to_slice(&mut data);
-            self.pretended_file = cursor.into_inner();
-
-            Ok(data)*/
+            anyhow::bail!("Invalid piece request");
+        }
+        if length > SUBPIECE_SIZE {
+            log::warn!("Incoming piece request for more than SUBPIECE_SIZE: {length}");
+        }
+        if self.piece_selector.has_completed(index as usize) {
+            // TODO: No real need to read the entire piece here actually
+            let mut piece_data = self.file_store.read_piece(index).await?;
+            // TODO: inefficient, extra alloc here
+            let mut piece_data = piece_data.split_off(begin as usize);
+            piece_data.truncate(length as usize);
+            Ok(piece_data)
         } else {
             anyhow::bail!("Piece requested isn't available");
-        }*/
-        unimplemented!()
+        }
     }
 
     pub(crate) async fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) {
@@ -251,7 +245,7 @@ impl TorrentState {
                 // Purge disconnected peers 
                 let mut disconnected_peers:Vec<PeerKey> = self.peer_list.peer_connection_states.borrow().iter().filter_map(|(peer_key,peer)| peer.have(index).map(|_| peer_key).ok()).collect();
 
-                if self.piece_selector.completed() {
+                if self.piece_selector.completed_all() {
                     log::info!("Torrent completed!");
                     let file_store = std::mem::take(&mut self.file_store);
                     file_store.close().await.unwrap();
