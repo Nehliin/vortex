@@ -1,4 +1,3 @@
-exclude = ["bip_metainfo"]
 [bans]
 multiple-versions = "deny"
 deny = [
