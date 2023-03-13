@@ -12,21 +12,17 @@ fn download_from_seeding() {
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
         .try_init();
-    let torrent = std::fs::read("final_test.torrent").unwrap();
-    let metainfo = bip_metainfo::Metainfo::from_bytes(torrent).unwrap();
+    let torrent = lava_torrent::torrent::v1::Torrent::read_from_file("final_test.torrent").unwrap();
     tokio_uring::start(async move {
-        let torrent_manager = TorrentManager::new(metainfo.info().clone()).await;
+        let torrent_manager = TorrentManager::new("final_test.torrent").await;
         let _peer_con = torrent_manager
             .add_peer("127.0.0.1:6881".parse().unwrap())
             .await
             .unwrap();
         log::info!("We are connected!!");
 
-        println!(
-            "file len: {}",
-            metainfo.info().files().next().unwrap().length()
-        );
-        println!("pieces: {}", metainfo.info().pieces().count());
+        println!("Total length: {}", torrent.length);
+        println!("pieces: {}", torrent.pieces.len());
 
         torrent_manager.start().await.unwrap();
 
@@ -43,8 +39,8 @@ fn accepts_incoming() {
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
         .try_init();
-    let torrent = std::fs::read("final_test.torrent").unwrap();
-    let metainfo = bip_metainfo::Metainfo::from_bytes(torrent).unwrap();
+    let _torrent =
+        lava_torrent::torrent::v1::Torrent::read_from_file("final_test.torrent").unwrap();
     // simulate seeding
     // TODO
     //let file = std::fs::read("final_file_og.txt").unwrap();
@@ -57,7 +53,7 @@ fn accepts_incoming() {
     let listener = TcpListener::bind("127.0.0.1:1337".parse().unwrap()).unwrap();
 
     tokio_uring::start(async move {
-        let torrent_manager = TorrentManager::new(metainfo.info().clone()).await;
+        let torrent_manager = TorrentManager::new("final_test.torrent").await;
         let mut attempt = 1;
         loop {
             if attempt > 2 {
