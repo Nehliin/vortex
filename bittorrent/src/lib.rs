@@ -17,6 +17,7 @@ use bitvec::prelude::*;
 use lava_torrent::torrent::v1::Torrent;
 use parking_lot::Mutex;
 use peer_connection::PeerConnection;
+use peer_events::PeerEvent;
 use piece_selector::PieceSelector;
 use sha1::{Digest, Sha1};
 use slotmap::{new_key_type, DenseSlotMap, SecondaryMap};
@@ -29,6 +30,7 @@ const SUBPIECE_SIZE: i32 = 16_384;
 
 pub mod drive_io;
 pub mod peer_connection;
+pub mod peer_events;
 pub mod peer_message;
 pub mod piece_selector;
 
@@ -95,6 +97,7 @@ impl PeerList {
     }
 }
 
+#[derive(Clone)]
 pub struct PeerListHandle {
     peer_sender: tokio::sync::mpsc::UnboundedSender<SocketAddr>,
     addrs: Arc<Mutex<SecondaryMap<PeerKey, SocketAddr>>>,
@@ -301,6 +304,10 @@ impl TorrentState {
             }
         }
     }
+
+    async fn handle_event(&mut self, peer_event: PeerEvent) {
+        // Do stuff
+    }
 }
 
 #[derive(Clone)]
@@ -308,7 +315,8 @@ pub struct TorrentManager {
     pub torrent_info: Arc<Torrent>,
     // TODO create newtype
     our_peer_id: [u8; 20],
-    pub torrent_state: Rc<RefCell<TorrentState>>,
+    peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
+    peer_list_handle: PeerListHandle,
 }
 
 fn generate_peer_id() -> [u8; 20] {
@@ -344,31 +352,44 @@ impl TorrentManager {
         let our_peer_id = generate_peer_id();
         let peer_list = PeerList::new(our_peer_id);
         let (tx, rc) = tokio::sync::oneshot::channel();
-        let torrent_state = TorrentState {
-            num_unchoked: 0,
-            max_unchoked: UNCHOKED_PEERS as u32,
-            on_subpiece_callback: None,
-            file_store,
-            download_rc: Some(rc),
-            download_tx: Some(tx),
-            torrent_info: torrent_info.clone(),
-            piece_selector,
-            peer_list,
-        };
+        let (peer_event_tx, mut peer_event_rc) = tokio::sync::mpsc::channel(512);
+        let torrent_info_clone = torrent_info.clone();
+        tokio_uring::spawn(async move {
+            let mut torrent_state = TorrentState {
+                num_unchoked: 0,
+                max_unchoked: UNCHOKED_PEERS as u32,
+                on_subpiece_callback: None,
+                file_store,
+                download_rc: Some(rc),
+                download_tx: Some(tx),
+                torrent_info: torrent_info_clone,
+                piece_selector,
+                peer_list,
+            };
+
+            while let Some(event) = peer_event_rc.recv().await {
+                // Spawn as separate tasks potentially
+                torrent_state.handle_event(event).await;
+            }
+        });
+
         Self {
             our_peer_id,
             torrent_info: Arc::new(torrent_info),
-            torrent_state: Rc::new(RefCell::new(torrent_state)),
+            peer_event_sender: peer_event_tx,
+            // Fix when peer connection no longer expects torrent state
+            peer_list_handle: todo!(),
         }
     }
 
     pub fn peer_list_handle(&self) -> PeerListHandle {
-        let weak = Rc::downgrade(&self.torrent_state);
-        self.torrent_state.borrow().peer_list.handle(weak)
+        //let weak = Rc::downgrade(&self.torrent_state);
+        //self.torrent_state.borrow().peer_list.handle(weak)
+        self.peer_list_handle.clone()
     }
 
     pub fn set_subpiece_callback(&self, callback: impl FnMut(&[u8]) + 'static) {
-        self.torrent_state.borrow_mut().on_subpiece_callback = Some(Box::new(callback));
+        //self.torrent_state.borrow_mut().on_subpiece_callback = Some(Box::new(callback));
     }
 
     pub async fn start(&self) -> anyhow::Result<()> {

@@ -46,7 +46,6 @@ impl PeerConnectionState {
         Self {
             is_choking: true,
             is_interested: false,
-            // TODO: is this correct?
             peer_choking: true,
             peer_interested: false,
             peer_pieces,
@@ -95,6 +94,9 @@ fn start_network_thread(
             let sendable_stream = sendable_stream;
             let stream = Rc::new(sendable_stream.0);
             let stream_clone = stream.clone();
+
+            // Om man använder tokio_select! här istället så kan man ha hela statet i den här
+            // tråden typ
 
             // Send loop, should be cancelled automatically in the next iteration when outgoing_rc is dropped.
             tokio_uring::spawn(async move {
