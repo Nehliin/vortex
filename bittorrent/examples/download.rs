@@ -11,21 +11,18 @@ fn main() {
         .filter_level(log::LevelFilter::Debug)
         .init();
 
-    let torrent = std::fs::read("assets/test-file-1.torrent").unwrap();
-    let metainfo = bip_metainfo::Metainfo::from_bytes(torrent).unwrap();
+    let torrent =
+        lava_torrent::torrent::v1::Torrent::read_from_file("assets/test-file-1.torrent").unwrap();
     tokio_uring::start(async move {
-        let torrent_manager = TorrentManager::new(metainfo.info().clone()).await;
+        let torrent_manager = TorrentManager::new("assets/test-file-1.torrent").await;
         let _peer_con = torrent_manager
             .add_peer("172.17.0.2:51413".parse().unwrap())
             .await
             .unwrap();
         log::info!("We are connected!!");
 
-        println!(
-            "file len: {}",
-            metainfo.info().files().next().unwrap().length()
-        );
-        println!("pieces: {}", metainfo.info().pieces().count());
+        println!("Total length: {}", torrent.length);
+        println!("pieces: {}", torrent.pieces.len());
 
         // 1. 766s (with spawning write in separate task)
         // 2. 766s (without spawning write in separate task)
