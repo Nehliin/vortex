@@ -1,4 +1,5 @@
 use bitvec::prelude::{BitBox, Msb0};
+use lava_torrent::torrent::v1::Torrent;
 
 use crate::PeerList;
 
@@ -24,12 +25,12 @@ pub(crate) struct PieceSelector {
 }
 
 impl PieceSelector {
-    pub fn new(torrent_info: &bip_metainfo::Info) -> Self {
-        let completed_pieces: BitBox<u8, Msb0> = torrent_info.pieces().map(|_| false).collect();
+    pub fn new(torrent_info: &Torrent) -> Self {
+        let completed_pieces: BitBox<u8, Msb0> =
+            torrent_info.pieces.iter().map(|_| false).collect();
         let inflight_pieces = completed_pieces.clone();
-        let piece_length = torrent_info.piece_length();
-        let total_length: u64 = torrent_info.files().map(|file| file.length()).sum();
-        let last_piece_length = total_length % piece_length;
+        let piece_length = torrent_info.piece_length;
+        let last_piece_length = torrent_info.length % piece_length;
 
         Self {
             completed_pieces,

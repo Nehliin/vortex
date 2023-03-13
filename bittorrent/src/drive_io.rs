@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use lava_torrent::torrent::v1::Torrent;
 use tokio_uring::{
     buf::BoundedBuf,
     fs::{File, OpenOptions},
@@ -44,26 +45,29 @@ pub struct FileStore {
 }
 
 impl FileStore {
-    pub async fn new(
-        root: impl AsRef<Path>,
-        torrent_info: &bip_metainfo::Info,
-    ) -> anyhow::Result<Self> {
-        async fn new_impl(
-            root: &Path,
-            torrent_info: &bip_metainfo::Info,
-        ) -> anyhow::Result<FileStore> {
+    pub async fn new(root: impl AsRef<Path>, torrent_info: &Torrent) -> anyhow::Result<Self> {
+        async fn new_impl(root: &Path, torrent_info: &Torrent) -> anyhow::Result<FileStore> {
             let mut result = Vec::new();
             let mut start_piece = 0;
             let mut start_offset = 0;
 
-            let piece_length = torrent_info.piece_length();
+            let piece_length = torrent_info.piece_length as u64;
 
-            for torrent_file in torrent_info.files() {
-                let num_pieces = (torrent_file.length() + start_offset as u64) / piece_length;
-                let offset = (torrent_file.length() + start_offset as u64) % piece_length;
+            // why would you make me do this lava torrent?
+            let files = torrent_info.files.clone().unwrap_or_else(|| {
+                vec![lava_torrent::torrent::v1::File {
+                    length: torrent_info.length,
+                    path: PathBuf::from(torrent_info.name.clone()),
+                    extra_fields: None,
+                }]
+            });
+
+            for torrent_file in files {
+                let num_pieces = (torrent_file.length as u64 + start_offset as u64) / piece_length;
+                let offset = (torrent_file.length as u64 + start_offset as u64) % piece_length;
 
                 let mut path_buf = PathBuf::from(root);
-                path_buf.push(torrent_file.path());
+                path_buf.push(&torrent_file.path);
                 if let Some(parent_dir) = path_buf.parent() {
                     // TODO: consider caching already created directories
                     tokio_uring::fs::create_dir_all(parent_dir).await?;
@@ -77,7 +81,7 @@ impl FileStore {
 
                 let metadata = file.statx().await?;
                 // Only fallocate if necessary so existing data isn't overwritten
-                if metadata.stx_size != torrent_file.length() {
+                if metadata.stx_size != torrent_file.length as u64 {
                     // Default mode is described in the man pages as:
                     // allocates the disk space within the range specified by offset and
                     // len. The file size (as reported by stat(2)) will be changed if
@@ -86,7 +90,7 @@ impl FileStore {
                     // before the call will be initialized to zero.
                     const DEFAULT_FALLOCATE_MODE: i32 = 0;
 
-                    file.fallocate(0, torrent_file.length(), DEFAULT_FALLOCATE_MODE)
+                    file.fallocate(0, torrent_file.length as u64, DEFAULT_FALLOCATE_MODE)
                         .await?;
                 }
 
