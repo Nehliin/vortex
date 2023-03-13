@@ -38,16 +38,14 @@ fn main() {
         let progress = MultiProgress::new();
 
         // TODO Should start dht first
-        let torrent_info = std::fs::read("slackware.torrent").unwrap();
-        let metainfo = bip_metainfo::Metainfo::from_bytes(&torrent_info).unwrap();
-        let torrent_manager = TorrentManager::new(metainfo.info().clone()).await;
+        let torrent_info =
+            lava_torrent::torrent::v1::Torrent::read_from_file("slackware.torrent").unwrap();
+        let torrent_manager = TorrentManager::new("slackware.torrent").await;
+        let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
         let peer_list_map = Mutex::new(
-            [(
-                metainfo.info().info_hash().try_into().unwrap(),
-                torrent_manager.peer_list_handle(),
-            )]
-            .into_iter()
-            .collect(),
+            [(info_hash, torrent_manager.peer_list_handle())]
+                .into_iter()
+                .collect(),
         );
         let peer_list_provider = PeerListProvider(peer_list_map);
 
@@ -56,7 +54,6 @@ fn main() {
             .unwrap();
 
         dht.start().await.unwrap();
-        let info_hash = metainfo.info().info_hash();
         let mut peers_reciver = dht.find_peers(info_hash.as_ref());
 
         dht.save(Path::new("routing_table.json")).await.unwrap();
@@ -120,9 +117,7 @@ fn main() {
             num_success.borrow(),
             total_peers
         ));
-        let download_progress = progress.add(ProgressBar::new(
-            metainfo.info().files().next().unwrap().length(),
-        ));
+        let download_progress = progress.add(ProgressBar::new(torrent_info.length as u64));
         download_progress.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})").unwrap().progress_chars("#>-"));
         let download_progress_clone = download_progress.clone();
         torrent_manager.set_subpiece_callback(move |data| {

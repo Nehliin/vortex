@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use lava_torrent::torrent::v1::Torrent;
 use tokio_uring::{
     buf::BoundedBuf,
     fs::{File, OpenOptions},
@@ -44,26 +45,29 @@ pub struct FileStore {
 }
 
 impl FileStore {
-    pub async fn new(
-        root: impl AsRef<Path>,
-        torrent_info: &bip_metainfo::Info,
-    ) -> anyhow::Result<Self> {
-        async fn new_impl(
-            root: &Path,
-            torrent_info: &bip_metainfo::Info,
-        ) -> anyhow::Result<FileStore> {
+    pub async fn new(root: impl AsRef<Path>, torrent_info: &Torrent) -> anyhow::Result<Self> {
+        async fn new_impl(root: &Path, torrent_info: &Torrent) -> anyhow::Result<FileStore> {
             let mut result = Vec::new();
             let mut start_piece = 0;
             let mut start_offset = 0;
 
-            let piece_length = torrent_info.piece_length();
+            let piece_length = torrent_info.piece_length as u64;
 
-            for torrent_file in torrent_info.files() {
-                let num_pieces = (torrent_file.length() + start_offset as u64) / piece_length;
-                let offset = (torrent_file.length() + start_offset as u64) % piece_length;
+            // why would you make me do this lava torrent?
+            let files = torrent_info.files.clone().unwrap_or_else(|| {
+                vec![lava_torrent::torrent::v1::File {
+                    length: torrent_info.length,
+                    path: PathBuf::from(torrent_info.name.clone()),
+                    extra_fields: None,
+                }]
+            });
+
+            for torrent_file in files {
+                let num_pieces = (torrent_file.length as u64 + start_offset as u64) / piece_length;
+                let offset = (torrent_file.length as u64 + start_offset as u64) % piece_length;
 
                 let mut path_buf = PathBuf::from(root);
-                path_buf.push(torrent_file.path());
+                path_buf.push(&torrent_file.path);
                 if let Some(parent_dir) = path_buf.parent() {
                     // TODO: consider caching already created directories
                     tokio_uring::fs::create_dir_all(parent_dir).await?;
@@ -77,7 +81,7 @@ impl FileStore {
 
                 let metadata = file.statx().await?;
                 // Only fallocate if necessary so existing data isn't overwritten
-                if metadata.stx_size != torrent_file.length() {
+                if metadata.stx_size != torrent_file.length as u64 {
                     // Default mode is described in the man pages as:
                     // allocates the disk space within the range specified by offset and
                     // len. The file size (as reported by stat(2)) will be changed if
@@ -86,7 +90,7 @@ impl FileStore {
                     // before the call will be initialized to zero.
                     const DEFAULT_FALLOCATE_MODE: i32 = 0;
 
-                    file.fallocate(0, torrent_file.length(), DEFAULT_FALLOCATE_MODE)
+                    file.fallocate(0, torrent_file.length as u64, DEFAULT_FALLOCATE_MODE)
                         .await?;
                 }
 
@@ -181,7 +185,7 @@ impl FileStore {
 mod tests {
     use std::collections::HashMap;
 
-    use bip_metainfo::{DirectAccessor, FileAccessor, Metainfo, MetainfoBuilder, PieceLength};
+    use lava_torrent::torrent::v1::TorrentBuilder;
     use rand::Rng;
     use sha1::{Digest, Sha1};
 
@@ -194,7 +198,11 @@ mod tests {
     impl TempDir {
         fn new(path: &str) -> Self {
             std::fs::create_dir_all(path).unwrap();
-            Self { path: path.into() }
+            let path: PathBuf = path.into();
+            assert!(!path.has_root());
+            Self {
+                path: std::fs::canonicalize(path).unwrap(),
+            }
         }
 
         fn add_file(&self, file_path: &str, data: &[u8]) {
@@ -208,14 +216,13 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            assert!(!self.path.has_root());
             std::fs::remove_dir_all(&self.path).unwrap();
         }
     }
 
-    async fn read_file_by_piece(root: impl AsRef<Path>, torrent_info: &bip_metainfo::Info) {
+    async fn read_file_by_piece(root: impl AsRef<Path>, torrent_info: &Torrent) {
         let store = FileStore::new(root, torrent_info).await.unwrap();
-        for (index, piece_hash) in torrent_info.pieces().enumerate() {
+        for (index, piece_hash) in torrent_info.pieces.iter().enumerate() {
             let piece_data = store.read_piece(index as i32).await.unwrap();
             let mut hasher = Sha1::new();
             hasher.update(piece_data);
@@ -231,27 +238,31 @@ mod tests {
             torrent_tmp_dir.add_file(path, data);
         });
 
-        let builder = MetainfoBuilder::new().set_piece_length(PieceLength::Custom(piece_len));
+        let torrent_info = TorrentBuilder::new(&torrent_tmp_dir.path, piece_len as i64)
+            .build()
+            .unwrap();
 
-        let accessor = FileAccessor::new(&torrent_tmp_dir.path).unwrap();
+        // why would you make me do this lava torrent?
+        let files = torrent_info.files.clone().unwrap_or_else(|| {
+            vec![lava_torrent::torrent::v1::File {
+                length: torrent_info.length,
+                path: PathBuf::from(torrent_info.name.clone()),
+                extra_fields: None,
+            }]
+        });
 
-        let bytes = builder.build(4, accessor, |_progress| {}).unwrap();
-        let torrent_info = Metainfo::from_bytes(bytes).unwrap();
-        let info_clone = torrent_info.clone();
-
-        let mut all_data: Vec<_> = torrent_info
-            .info()
-            .files()
-            .flat_map(|file| file_data.get(file.path().to_str().unwrap()).unwrap())
+        let mut all_data: Vec<_> = files
+            .iter()
+            .flat_map(|file| file_data.get(file.path.to_str().unwrap()).unwrap())
             .copied()
             .collect();
         let download_tmp_dir_path = download_tmp_dir.path.clone();
         tokio_uring::start(async move {
-            let file_store = FileStore::new(&download_tmp_dir_path, torrent_info.info())
+            let file_store = FileStore::new(&download_tmp_dir_path, &torrent_info)
                 .await
                 .unwrap();
 
-            for (index, _) in torrent_info.info().pieces().enumerate() {
+            for (index, _) in torrent_info.pieces.iter().enumerate() {
                 let (piece, remainder) = all_data.split_at(piece_len.min(all_data.len()));
                 file_store
                     .write_piece(index as i32, piece.to_vec())
@@ -265,11 +276,11 @@ mod tests {
             for file in file_store.files {
                 file.file.close().await.unwrap();
             }
-            read_file_by_piece(&download_tmp_dir_path, torrent_info.info()).await;
+            read_file_by_piece(&download_tmp_dir_path, &torrent_info).await;
         });
 
-        for file in info_clone.info().files() {
-            let path = file.path().to_str().unwrap();
+        for file in files.iter() {
+            let path = file.path.to_str().unwrap();
             let written_data = std::fs::read(download_tmp_dir.path.join(path)).unwrap();
             let data = file_data.get(path).unwrap();
             assert_eq!(written_data.len(), data.len());
@@ -321,14 +332,14 @@ mod tests {
     #[test]
     fn multifile_misalinged_v2() {
         let files: HashMap<String, Vec<u8>> = [
-            ("f1.txt".to_owned(), vec![1_u8; 120]),
-            ("f2.txt".to_owned(), vec![2_u8; 150]),
-            ("f3.txt".to_owned(), vec![3_u8; 170]),
-            ("f4.txt".to_owned(), vec![4_u8; 60]),
+            ("f1.txt".to_owned(), vec![1_u8; 84]),
+            ("f2.txt".to_owned(), vec![2_u8; 114]),
+            ("f3.txt".to_owned(), vec![3_u8; 134]),
+            ("f4.txt".to_owned(), vec![4_u8; 24]),
         ]
         .into_iter()
         .collect();
-        test_multifile("multifile_misalinged_v2", 100, files)
+        test_multifile("multifile_misalinged_v2", 64, files)
     }
 
     #[test]
@@ -344,107 +355,45 @@ mod tests {
 
     #[test]
     fn basic_single_file_aligned() {
-        // custom root to avoid conflict with concurrently running tests
-        let root_dir = "basic_single_file_aligned/test/root";
-        let file_name = "test_single.txt";
-        let piece_len = 256;
-        let builder = MetainfoBuilder::new().set_piece_length(PieceLength::Custom(piece_len));
         let data: Vec<u8> = (0..)
             .map(|_| rand::thread_rng().gen::<u8>())
             .take(1024)
             .collect();
-        let accessor = DirectAccessor::new(file_name, &data);
-
-        let bytes = builder.build(1, accessor, |_progress| {}).unwrap();
-        let torrent_info = Metainfo::from_bytes(bytes).unwrap();
-
-        let mut data_clone = data.clone();
-        tokio_uring::start(async move {
-            let file_store = FileStore::new(root_dir, torrent_info.info()).await.unwrap();
-
-            for (index, _) in torrent_info.info().pieces().enumerate() {
-                let (piece, remainder) = data_clone.split_at(piece_len.min(data_clone.len()));
-                file_store
-                    .write_piece(index as i32, piece.to_vec())
-                    .await
-                    .unwrap();
-                data_clone = remainder.to_vec();
-            }
-            assert!(data_clone.is_empty());
-            // Close so they can be opened up later on
-            // and should ensure everything is synced properly
-            for file in file_store.files {
-                file.file.close().await.unwrap();
-            }
-            read_file_by_piece(&root_dir, torrent_info.info()).await;
-        });
-
-        let written_data = std::fs::read(format!("{root_dir}/{file_name}")).unwrap();
-        assert_eq!(written_data, data);
-        std::fs::remove_dir_all("basic_single_file_aligned").unwrap();
+        let files: HashMap<String, Vec<u8>> =
+            [("test_single.txt".to_owned(), data)].into_iter().collect();
+        test_multifile("basic_single_file_aligned", 256, files);
     }
 
     #[test]
     fn single_file_misaligned() {
-        // custom root to avoid conflict with concurrently running tests
-        let root_dir = "single_file_misaligned/test/root";
-        let file_name = "test_single.txt";
-        let piece_len = 256;
-        let builder = MetainfoBuilder::new().set_piece_length(PieceLength::Custom(piece_len));
         let data: Vec<u8> = (0..)
             .map(|_| rand::thread_rng().gen::<u8>())
             .take(1354)
             .collect();
-        let accessor = DirectAccessor::new(file_name, &data);
-
-        let bytes = builder.build(1, accessor, |_progress| {}).unwrap();
-        let torrent_info = Metainfo::from_bytes(bytes).unwrap();
-
-        let mut data_clone = data.clone();
-        tokio_uring::start(async move {
-            let file_store = FileStore::new(root_dir, torrent_info.info()).await.unwrap();
-
-            for (index, _) in torrent_info.info().pieces().enumerate() {
-                let (piece, remainder) = data_clone.split_at(piece_len.min(data_clone.len()));
-                file_store
-                    .write_piece(index as i32, piece.to_vec())
-                    .await
-                    .unwrap();
-                data_clone = remainder.to_vec();
-            }
-            assert!(data_clone.is_empty());
-            // Close so they can be opened up later on
-            // and should ensure everything is synced properly
-            for file in file_store.files {
-                file.file.close().await.unwrap();
-            }
-            read_file_by_piece(&root_dir, torrent_info.info()).await;
-        });
-
-        let written_data = std::fs::read(format!("{root_dir}/{file_name}")).unwrap();
-        assert_eq!(written_data, data);
-        std::fs::remove_dir_all("single_file_misaligned").unwrap();
+        let files: HashMap<String, Vec<u8>> =
+            [("test_single.txt".to_owned(), data)].into_iter().collect();
+        test_multifile("single_file_misaligned", 256, files);
     }
 
     #[test]
     fn errors_on_invalid_piece_index() {
         // custom root to avoid conflict with concurrently running tests
-        let root_dir = "errors_on_invalid_piece_index/test/root";
-        let file_name = "test_single.txt";
+        let root_dir = TempDir::new("errors_on_invalid_piece_index");
+        let download_tmp_dir = TempDir::new("errors_on_invalid_piece_index_download_dir");
+        let file_name = "test/root/test_single.txt";
+        root_dir.add_file(file_name, &vec![1; 10000]);
         let piece_len = 256;
-        let builder = MetainfoBuilder::new().set_piece_length(PieceLength::Custom(piece_len));
-        let data: Vec<u8> = (0..)
-            .map(|_| rand::thread_rng().gen::<u8>())
-            .take(1354)
-            .collect();
-        let accessor = DirectAccessor::new(file_name, &data);
-        let bytes = builder.build(1, accessor, |_progress| {}).unwrap();
-        let torrent_info = Metainfo::from_bytes(bytes).unwrap();
+
+        let torrent_info = TorrentBuilder::new(&root_dir.path, piece_len as i64)
+            .build()
+            .unwrap();
+
         tokio_uring::start(async move {
-            let file_store = FileStore::new(root_dir, torrent_info.info()).await.unwrap();
+            let file_store = FileStore::new(&download_tmp_dir.path, &torrent_info)
+                .await
+                .unwrap();
             // 500 is out of bounds
             assert!(file_store.read_piece(500).await.is_err());
         });
-        std::fs::remove_dir_all("errors_on_invalid_piece_index").unwrap();
     }
 }

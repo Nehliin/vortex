@@ -6,6 +6,7 @@
 use std::{
     cell::RefCell,
     net::SocketAddr,
+    path::Path,
     rc::{Rc, Weak},
     sync::Arc,
     time::{Duration, Instant},
@@ -13,6 +14,7 @@ use std::{
 
 use anyhow::Context;
 use bitvec::prelude::*;
+use lava_torrent::torrent::v1::Torrent;
 use parking_lot::Mutex;
 use peer_connection::PeerConnection;
 use piece_selector::PieceSelector;
@@ -69,11 +71,11 @@ impl PeerList {
                     if let Some(state) = torrent_state.upgrade() {
                         let our_id = this.our_peer_id;
                         let num_pieces = state.borrow().piece_selector.pieces();
-                        let info_hash = state.borrow().torrent_info.info_hash();
+                        let info_hash = state.borrow().torrent_info.info_hash_bytes();
                         let peer_connection = PeerConnection::new(
                             stream,
                             our_id,
-                            info_hash.into(),
+                            info_hash.try_into().unwrap(),
                             num_pieces,
                             torrent_state.clone(),
                         )
@@ -176,7 +178,7 @@ impl Piece {
 type OnSubpieceCallback = Box<dyn FnMut(&[u8])>;
 
 pub struct TorrentState {
-    torrent_info: bip_metainfo::Info,
+    torrent_info: Torrent,
     on_subpiece_callback: Option<OnSubpieceCallback>,
     file_store: FileStore,
     download_rc: Option<oneshot::Receiver<()>>,
@@ -234,7 +236,8 @@ impl TorrentState {
         // when the piece is requested so it can be used for validation later on
         let position = self
             .torrent_info
-            .pieces()
+            .pieces
+            .iter()
             .position(|piece_hash| data_hash.as_slice() == piece_hash);
         match position {
             Some(piece_index) if piece_index == index as usize => {
@@ -302,7 +305,7 @@ impl TorrentState {
 
 #[derive(Clone)]
 pub struct TorrentManager {
-    pub torrent_info: Arc<bip_metainfo::Info>,
+    pub torrent_info: Arc<Torrent>,
     // TODO create newtype
     our_peer_id: [u8; 20],
     pub torrent_state: Rc<RefCell<TorrentState>>,
@@ -318,11 +321,24 @@ fn generate_peer_id() -> [u8; 20] {
     result
 }
 
+async fn read_all(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let file = tokio_uring::fs::File::open(path).await?;
+    let metadata = file.statx().await?;
+    let file_size = metadata.stx_size as usize;
+    let buf = vec![0; file_size];
+    let (result, buf) = file.read_exact_at(buf, 0).await;
+    result?;
+    Ok(buf)
+}
+
 // How many peers do we aim to have unchoked overtime
 const UNCHOKED_PEERS: usize = 4;
 
 impl TorrentManager {
-    pub async fn new(torrent_info: bip_metainfo::Info) -> Self {
+    pub async fn new(torrent_file: impl AsRef<Path>) -> Self {
+        let torrent_bytes = read_all(torrent_file.as_ref()).await.unwrap();
+        let torrent_info = Torrent::read_from_bytes(&torrent_bytes).unwrap();
+
         let file_store = FileStore::new("downloaded", &torrent_info).await.unwrap();
         let piece_selector = PieceSelector::new(&torrent_info);
         let our_peer_id = generate_peer_id();
@@ -428,8 +444,8 @@ impl TorrentManager {
         PeerConnection::new(
             stream,
             self.our_peer_id,
-            self.torrent_info.info_hash().into(),
-            self.torrent_info.pieces().count(),
+            self.torrent_info.info_hash_bytes().try_into().unwrap(),
+            self.torrent_info.pieces.len(),
             Rc::downgrade(&self.torrent_state),
         )
         .await
@@ -451,8 +467,8 @@ impl TorrentManager {
         let peer_connection = PeerConnection::new(
             stream,
             self.our_peer_id,
-            self.torrent_info.info_hash().into(),
-            self.torrent_info.pieces().count(),
+            self.torrent_info.info_hash_bytes().try_into().unwrap(),
+            self.torrent_info.pieces.len(),
             Rc::downgrade(&self.torrent_state),
         )
         .await?;
