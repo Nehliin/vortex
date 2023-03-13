@@ -156,10 +156,10 @@ fn start_network_thread(
     (outgoing_tx, incoming_rc)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PeerConnection {
     pub peer_id: [u8; 20],
-    state: Rc<RefCell<PeerConnectionState>>,
+    state: PeerConnectionState,
     outgoing: UnboundedSender<PeerMessage>,
 }
 
@@ -211,13 +211,14 @@ impl PeerConnection {
         let peer_pieces = (0..num_pieces).map(|_| false).collect();
         let connection = PeerConnection {
             peer_id,
-            state: Rc::new(RefCell::new(PeerConnectionState::new(
+            state: PeerConnectionState::new(
                 peer_pieces,
                 cancellation_token,
-            ))),
+            ),
             outgoing: outgoing_tx,
         };
 
+        // WRONG WRONG
         let connection_clone = connection.clone();
         // process incoming, should cancel automatically when incoming_tx is dropped
         tokio_uring::spawn(async move {
@@ -313,7 +314,7 @@ impl PeerConnection {
         Ok(())
     }
 
-    fn piece(&self, index: i32, begin: i32, data: Vec<u8>) -> anyhow::Result<()> {
+    pub fn piece(&self, index: i32, begin: i32, data: Vec<u8>) -> anyhow::Result<()> {
         self.outgoing
             .send(PeerMessage::Piece {
                 index,
@@ -463,7 +464,7 @@ impl PeerConnection {
         self.state.borrow_mut()
     }
 
-    pub fn state(&self) -> Ref<'_, PeerConnectionState> {
-        self.state.borrow()
+    pub fn state(&self) -> &PeerConnectionState {
+        &self.state
     }
 }

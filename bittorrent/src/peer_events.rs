@@ -1,4 +1,4 @@
-use crate::Piece;
+use crate::{Piece, PeerKey};
 
 #[derive(Debug)]
 pub enum PeerEventType {
@@ -28,6 +28,6 @@ pub enum PeerEventType {
 
 #[derive(Debug)]
 pub struct PeerEvent {
-    pub peer_id: [u8; 20],
+    pub peer_key: PeerKey,
     pub event_type: PeerEventType,
 }

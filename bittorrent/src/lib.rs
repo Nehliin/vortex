@@ -17,7 +17,7 @@ use bitvec::prelude::*;
 use lava_torrent::torrent::v1::Torrent;
 use parking_lot::Mutex;
 use peer_connection::PeerConnection;
-use peer_events::PeerEvent;
+use peer_events::{PeerEvent, PeerEventType};
 use piece_selector::PieceSelector;
 use sha1::{Digest, Sha1};
 use slotmap::{new_key_type, DenseSlotMap, SecondaryMap};
@@ -38,6 +38,7 @@ new_key_type! {
     pub struct PeerKey;
 }
 
+// TODO: Shouldn't need to be clonable?
 #[derive(Clone)]
 struct PeerList {
     peer_connection_states: Rc<RefCell<DenseSlotMap<PeerKey, PeerConnection>>>,
@@ -305,8 +306,114 @@ impl TorrentState {
         }
     }
 
-    async fn handle_event(&mut self, peer_event: PeerEvent) {
-        // Do stuff
+    async fn handle_event(&mut self, peer_event: PeerEvent) -> anyhow::Result<()> {
+        match peer_event.event_type {
+            PeerEventType::Choked => {
+                log::info!("Peer is choking us!");
+            }
+            PeerEventType::InterestingUnchoke => {
+                // The peer pieces can be owned by the piece selector and updated via
+                // events. Aka Bitfield is one event, Have is another one and the
+                // piece selector contains then a secondary map of peer_key -> bitfields
+                // that may all be merged when finding which piece should be next
+                if let Some(piece_idx) = self.piece_selector.next_piece(&self.peer_list) {
+                    let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
+                    let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
+                        log::warn!("received event for removed peer");
+                        return Ok(());
+                    };
+
+                    let peer_owns_piece = peer_connection.state().peer_pieces[piece_idx as usize];
+                    if peer_owns_piece {
+                        if let Err(err) = peer_connection.unchoke() {
+                            log::error!("Peer disconnected: {err}");
+                            // TODO: cleaner fix here
+                            drop(peer_connection);
+                            self.peer_list
+                                .peer_connection_states
+                                .borrow_mut()
+                                .remove(peer_event.peer_key)
+                                .unwrap();
+                            return Ok(());
+                        } else {
+                            self.num_unchoked += 1;
+                        }
+                        if let Err(err) = peer_connection
+                            .request_piece(piece_idx, self.piece_selector.piece_len(piece_idx))
+                        {
+                            log::error!("Peer disconnected: {err}");
+                            // TODO: cleaner fix here
+                            drop(peer_connection);
+                            self.peer_list
+                                .peer_connection_states
+                                .borrow_mut()
+                                .remove(peer_event.peer_key)
+                                .unwrap();
+                            return Ok(());
+                        }
+                        self.piece_selector.mark_inflight(piece_idx as usize);
+                    }
+                } else {
+                    log::warn!("No more pieces available");
+                }
+            }
+            PeerEventType::Intrest => {
+                log::info!("Peer is interested in us!");
+                let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
+                let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
+                    log::warn!("received event for removed peer");
+                    return;
+                };
+                if !peer_connection.state().is_choking {
+                    // if we are not choking them we might need to send a
+                    // unchoke to avoid some race conditions. Libtorrent
+                    // uses the same type of logic
+                    peer_connection.unchoke()?;
+                } else if self.should_unchoke() {
+                    log::debug!("Unchoking peer after intrest");
+                    peer_connection.unchoke()?;
+                }
+            }
+            PeerEventType::NotInterested => {
+                log::info!("Peer is no longer interested in us!");
+                let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
+                let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
+                    log::warn!("received event for removed peer");
+                    return;
+                };
+                peer_connection.choke()?;
+            }
+            PeerEventType::PieceRequest {
+                index,
+                begin,
+                length,
+            } => {
+                let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
+                let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
+                    log::warn!("received event for removed peer");
+                    return;
+                };
+                if self.should_unchoke() && peer_connection.state().is_choking {
+                    peer_connection.unchoke()?;
+                }
+                if !peer_connection.state().is_choking {
+                    match self.on_piece_request(index, begin, length).await {
+                        Ok(piece_data) => {
+                            peer_connection.piece(index, begin, piece_data)?;
+                        }
+                        Err(err) => log::error!("Invalid piece request: {err}"),
+                    }
+                } else {
+                    log::info!("Piece request ignored, peer can't be unchoked");
+                }
+            }
+            PeerEventType::PieceRequestSucceeded(piece) => {
+                log::debug!("Piece completed!");
+                self.on_piece_completed(piece.index, piece.memory).await;
+            }
+            PeerEventType::PieceRequestFailed => todo!(),
+        }
+        Ok(())
     }
 }
 
