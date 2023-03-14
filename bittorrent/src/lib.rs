@@ -306,12 +306,27 @@ impl TorrentState {
         }
     }
 
+    // TODO Just use the messag here, no point having separte event
     async fn handle_event(&mut self, peer_event: PeerEvent) -> anyhow::Result<()> {
+        let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
+        let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
+                    log::warn!("received event for removed peer");
+                    return Ok(());
+        };
         match peer_event.event_type {
             PeerEventType::Choked => {
                 log::info!("Peer is choking us!");
+                peer_connection.state_mut().peer_choking = true;
+                // TODO clear outgoing requests
             }
-            PeerEventType::InterestingUnchoke => {
+            PeerEventType::Unchoke => {
+                peer_connection.state_mut().peer_choking = false;
+                if !peer_connection.state().is_interested {
+                    // Not interested so don't do anything
+                    return Ok(());
+                }
+                drop(peer_connection);
+                drop(connection_states);
                 // The peer pieces can be owned by the piece selector and updated via
                 // events. Aka Bitfield is one event, Have is another one and the
                 // piece selector contains then a secondary map of peer_key -> bitfields
@@ -359,11 +374,7 @@ impl TorrentState {
             }
             PeerEventType::Intrest => {
                 log::info!("Peer is interested in us!");
-                let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
-                let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
-                    log::warn!("received event for removed peer");
-                    return;
-                };
+                peer_connection.state_mut().peer_interested = true;
                 if !peer_connection.state().is_choking {
                     // if we are not choking them we might need to send a
                     // unchoke to avoid some race conditions. Libtorrent
@@ -376,11 +387,7 @@ impl TorrentState {
             }
             PeerEventType::NotInterested => {
                 log::info!("Peer is no longer interested in us!");
-                let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
-                let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
-                    log::warn!("received event for removed peer");
-                    return;
-                };
+                peer_connection.state_mut().peer_interested = false;
                 peer_connection.choke()?;
             }
             PeerEventType::PieceRequest {
@@ -388,17 +395,20 @@ impl TorrentState {
                 begin,
                 length,
             } => {
-                let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
-                let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
-                    log::warn!("received event for removed peer");
-                    return;
-                };
                 if self.should_unchoke() && peer_connection.state().is_choking {
                     peer_connection.unchoke()?;
                 }
                 if !peer_connection.state().is_choking {
+                    drop(peer_connection);
+                    drop(connection_states);
                     match self.on_piece_request(index, begin, length).await {
                         Ok(piece_data) => {
+                            let mut connection_states =
+                                self.peer_list.peer_connection_states.borrow_mut();
+                            let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
+                                log::warn!("received event for removed peer");
+                                return Ok(());
+                            };
                             peer_connection.piece(index, begin, piece_data)?;
                         }
                         Err(err) => log::error!("Invalid piece request: {err}"),
@@ -409,6 +419,8 @@ impl TorrentState {
             }
             PeerEventType::PieceRequestSucceeded(piece) => {
                 log::debug!("Piece completed!");
+                drop(peer_connection);
+                drop(connection_states);
                 self.on_piece_completed(piece.index, piece.memory).await;
             }
             PeerEventType::PieceRequestFailed => todo!(),

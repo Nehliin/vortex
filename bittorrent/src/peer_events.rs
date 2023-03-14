@@ -4,8 +4,8 @@ use crate::{Piece, PeerKey};
 pub enum PeerEventType {
     /// We were choked by the peer
     Choked,
-    /// Unchoke from a peer we are interested in
-    InterestingUnchoke,
+    /// Unchoke
+    Unchoke,
     /// The peer is interested in us
     Intrest,
     /// The peer is not interested in us
