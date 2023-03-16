@@ -1,10 +1,8 @@
-use std::cell::{Ref, RefMut};
-use std::rc::Weak;
 use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Context;
 use bitvec::prelude::{BitBox, Msb0};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::BytesMut;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_uring::net::TcpStream;
@@ -12,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::peer_events::{PeerEvent, PeerEventType};
 use crate::peer_message::{PeerMessage, PeerMessageDecoder};
-use crate::{PeerKey, Piece, TorrentState, SUBPIECE_SIZE};
+use crate::{PeerKey, Piece, SUBPIECE_SIZE};
 
 #[derive(Debug)]
 pub struct PeerConnectionState {
@@ -58,23 +56,12 @@ impl PeerConnectionState {
     // on subpiece
 }
 
-fn handshake(info_hash: [u8; 20], peer_id: [u8; 20]) -> [u8; 68] {
-    const PROTOCOL: &[u8] = b"BitTorrent protocol";
-    let mut buffer: [u8; 68] = [0; PROTOCOL.len() + 8 + 20 + 20 + 1];
-    let mut writer: &mut [u8] = &mut buffer;
-    writer.put_u8(PROTOCOL.len() as u8);
-    writer.put(PROTOCOL);
-    writer.put(&[0_u8; 8] as &[u8]);
-    writer.put(&info_hash as &[u8]);
-    writer.put(&peer_id as &[u8]);
-    buffer
-}
-
 // Consider adding handlers for each msg as a trait which extensions can implement
 async fn process_incoming(
     peer_key: PeerKey,
     msg: PeerMessage,
     peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
+    // Get rid of rc refcell?
     currently_downloading: Rc<RefCell<Option<Piece>>>,
     // TODO: This is unnecessary and should be replaced
     // with writing directly to the socket
@@ -203,6 +190,14 @@ async fn process_incoming(
             } else {
                 log::error!("Recieved unexpected piece message");
             }
+        }
+        PeerMessage::Handshake { peer_id, info_hash } => {
+            peer_event_sender
+                .send(PeerEvent {
+                    peer_key,
+                    event_type: PeerEventType::Intrest,
+                })
+                .await?;
         }
     }
     Ok(())
@@ -337,51 +332,21 @@ fn start_network_thread(
 
 #[derive(Debug)]
 pub struct PeerConnection {
-    pub peer_id: [u8; 20],
+    pub peer_id: Option<[u8; 20]>,
     state: PeerConnectionState,
     outgoing: UnboundedSender<PeerMessage>,
 }
 
 impl PeerConnection {
-    // unsafe
-    pub(crate) async fn new(
-        stream: TcpStream,
-        our_id: [u8; 20],
-        info_hash: [u8; 20],
+    
+    pub fn new(
         peer_key: PeerKey,
         num_pieces: usize,
+        stream: TcpStream,
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) -> anyhow::Result<PeerConnection> {
-        let handshake_msg = handshake(info_hash, our_id).to_vec();
-        let (res, buf) = stream.write(handshake_msg).submit().await;
-        let _res = res?;
-
-        // TODO Add timeout here
-        let (res, buf) = stream.read(buf).await;
-        let read = res?;
-        let mut buf = buf.as_slice();
-        log::info!("Received data: {read}");
-        anyhow::ensure!(read >= 68);
-        log::info!("Handshake received");
-        let str_len = buf.get_u8();
-        anyhow::ensure!(str_len == 19);
-        anyhow::ensure!(buf.get(..str_len as usize) == Some(b"BitTorrent protocol" as &[u8]));
-        buf.advance(str_len as usize);
-        // Skip extensions for now
-        buf.advance(8);
-        anyhow::ensure!(Some(&info_hash as &[u8]) == buf.get(..20));
-        buf.advance(20_usize);
-        // Read their peer id
-        let peer_id: [u8; 20] = buf.get(..20).unwrap().try_into().unwrap();
-        buf.advance(20_usize);
-        if buf.has_remaining() {
-            log::warn!(
-                "{} is remaining after handshake data will be lost",
-                buf.remaining()
-            );
-        }
+        let peer_pieces = (0..num_pieces).map(|_| false).collect();
         let cancellation_token = CancellationToken::new();
-
         let outgoing_tx = start_network_thread(
             peer_key,
             SendableStream(stream),
@@ -389,9 +354,8 @@ impl PeerConnection {
             peer_event_sender,
         );
 
-        let peer_pieces = (0..num_pieces).map(|_| false).collect();
         let connection = PeerConnection {
-            peer_id,
+            peer_id: None,
             state: PeerConnectionState::new(peer_pieces, cancellation_token),
             outgoing: outgoing_tx,
         };
@@ -408,6 +372,16 @@ impl PeerConnection {
         });*/
 
         Ok(connection)
+    }
+
+    #[inline(always)]
+    pub fn connect(&self, our_id: [u8; 20], info_hash: [u8; 20]) -> anyhow::Result<()> {
+        self.outgoing
+            .send(PeerMessage::Handshake {
+                peer_id: our_id,
+                info_hash,
+            })
+            .context("Failed to queue outgoing handshake")
     }
 
     #[inline(always)]

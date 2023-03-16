@@ -7,7 +7,7 @@ use std::{
     cell::RefCell,
     net::SocketAddr,
     path::Path,
-    rc::{Rc, Weak},
+    rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -44,6 +44,7 @@ struct PeerList {
     peer_connection_states: Rc<RefCell<DenseSlotMap<PeerKey, PeerConnection>>>,
     addrs: Arc<Mutex<SecondaryMap<PeerKey, SocketAddr>>>,
     our_peer_id: [u8; 20],
+    info_hash: [u8; 20],
 }
 
 impl PeerList {
@@ -60,32 +61,46 @@ impl PeerList {
         self.peer_connection_states.borrow().is_empty()
     }
 
-    pub fn insert_peer(&self, addr: SocketAddr, connection: PeerConnection) {
-        let peer_key = self.peer_connection_states.borrow_mut().insert(connection);
+    // TODO rename
+    pub fn insert_peer(
+        &self,
+        addr: SocketAddr,
+        stream: TcpStream,
+        num_pieces: i32,
+        peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
+    ) {
+        let peer_key = self
+            .peer_connection_states
+            .borrow_mut()
+            .insert_with_key(|peer_key| {
+                let connection = PeerConnection::new(
+                    peer_key,
+                    num_pieces as usize,
+                    stream,
+                    peer_event_sender.clone(),
+                )
+                .unwrap();
+                connection
+                    .connect(self.our_peer_id, self.info_hash)
+                    .unwrap();
+                connection
+            });
+
+        // TODO: Only do this when connection is completed?
         self.addrs.lock().insert(peer_key, addr);
     }
 
-    pub fn handle(&self, torrent_state: Weak<RefCell<TorrentState>>) -> PeerListHandle {
+    pub fn handle(
+        &self,
+        num_pieces: i32,
+        peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
+    ) -> PeerListHandle {
         let (tx, mut rc) = tokio::sync::mpsc::unbounded_channel();
         let this = self.clone();
         tokio_uring::spawn(async move {
             while let Some(addr) = rc.recv().await {
                 if let Ok(stream) = TcpStream::connect(addr).await {
-                    if let Some(state) = torrent_state.upgrade() {
-                        let our_id = this.our_peer_id;
-                        let num_pieces = state.borrow().piece_selector.pieces();
-                        let info_hash = state.borrow().torrent_info.info_hash_bytes();
-                        let peer_connection = PeerConnection::new(
-                            stream,
-                            our_id,
-                            info_hash.try_into().unwrap(),
-                            num_pieces,
-                            torrent_state.clone(),
-                        )
-                        .await
-                        .unwrap();
-                        this.insert_peer(addr, peer_connection);
-                    }
+                    this.insert_peer(addr, stream, num_pieces, peer_event_sender);
                 } else {
                     log::warn!("Failed to connect to peer that was announced")
                 }
@@ -314,6 +329,13 @@ impl TorrentState {
                     return Ok(());
         };
         match peer_event.event_type {
+            PeerEventType::HandshakeComplete { peer_id, info_hash } => {
+                peer_connection.peer_id = Some(peer_id);
+                // TODO handle this more gracefully
+                assert_eq!(&info_hash, self.torrent_info.info_hash_bytes().as_slice());
+                log::info!("Handshake received");
+                // TODO: update peer list here
+            }
             PeerEventType::Choked => {
                 log::info!("Peer is choking us!");
                 peer_connection.state_mut().peer_choking = true;
@@ -434,6 +456,9 @@ pub struct TorrentManager {
     pub torrent_info: Arc<Torrent>,
     // TODO create newtype
     our_peer_id: [u8; 20],
+    // Keeping this bounded have the neat benefit of
+    // automatically throttling the peer connection threads
+    // from overloading the "main" thread
     peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     peer_list_handle: PeerListHandle,
 }
@@ -581,6 +606,7 @@ impl TorrentManager {
     pub async fn accept_incoming(&self, listener: &TcpListener) -> anyhow::Result<PeerConnection> {
         let (stream, peer_addr) = listener.accept().await.unwrap();
         log::info!("Incomming peer connection: {peer_addr}");
+        // skicka med null key o sätt den när handshake is received!!!!!?
         PeerConnection::new(
             stream,
             self.our_peer_id,
