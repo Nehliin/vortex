@@ -61,12 +61,12 @@ impl PeerConnectionState {
 async fn process_incoming(
     peer_key: PeerKey,
     msg: PeerMessage,
-    peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
-    // Get rid of rc refcell?
-    currently_downloading: Rc<RefCell<Option<Piece>>>,
+    peer_event_sender: &tokio::sync::mpsc::Sender<PeerEvent>,
+    // TODO: Get rid of rc refcell?
+    currently_downloading: &Rc<RefCell<Option<Piece>>>,
     // TODO: This is unnecessary and should be replaced
     // with writing directly to the socket
-    outgoing_tx: UnboundedSender<PeerMessage>,
+    outgoing_tx: &UnboundedSender<PeerMessage>,
 ) -> anyhow::Result<()> {
     match msg {
         PeerMessage::Choke => {
@@ -204,8 +204,6 @@ async fn process_incoming(
     Ok(())
 }
 
-
-
 fn start_network_thread(
     peer_key: PeerKey,
     sendable_stream: SendableStream,
@@ -301,7 +299,7 @@ fn start_network_thread(
                             Ok(bytes_read) => {
                                 let remainder = read_buf.split_off(bytes_read);
                                 while let Some(message) = message_decoder.decode(&mut read_buf) {
-                                    if process_incoming(peer_key, message, peer_event_sender, currently_downloading, outgoing_tx_clone).await.is_err() {
+                                    if process_incoming(peer_key, message, &peer_event_sender, &currently_downloading, &outgoing_tx_clone).await.is_err() {
                                         log::error!("No one is listening for incoming traffic, channel dropped");
                                     }
                                 }
@@ -332,7 +330,6 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
-    
     pub fn new(
         peer_key: PeerKey,
         num_pieces: usize,

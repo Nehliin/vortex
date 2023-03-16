@@ -233,20 +233,18 @@ impl PeerMessageDecoder {
                         //anyhow::ensure!(str_len == 19);
                         assert!(str_len == 19);
                         assert!(
-                            data.chunk().get(..str_len as usize) == Some(b"BitTorrent protocol" as &[u8])
+                            data.chunk().get(..str_len as usize)
+                                == Some(b"BitTorrent protocol" as &[u8])
                         );
                         data.advance(str_len as usize);
                         // Skip extensions for now
                         data.advance(8);
-                        let info_hash = &data.chunk()[..20];
+                        let info_hash = data.chunk()[..20].try_into().unwrap();
                         data.advance(20_usize);
-                        let peer_id = &data.chunk()[..20];
+                        let peer_id = data.chunk()[..20].try_into().unwrap();
                         data.advance(20_usize);
                         self.pending_handshake = false;
-                        break Some(PeerMessage::Handshake {
-                            peer_id: peer_id.try_into().unwrap(),
-                            info_hash: info_hash.try_into().unwrap(),
-                        });
+                        break Some(PeerMessage::Handshake { peer_id, info_hash });
                     }
                     if data.remaining() >= std::mem::size_of::<i32>() {
                         let msg_length = data.get_i32();

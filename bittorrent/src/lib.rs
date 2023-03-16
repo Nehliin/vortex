@@ -282,7 +282,7 @@ impl TorrentState {
                         // only peers that haven't choked us and that aren't currently downloading. 
                         // At least one peer must be available here to download, it might not have
                         // the desired piece though.
-                        let peer_connections = self.peer_list.peer_connection_states.borrow();
+                        /*let peer_connections = self.peer_list.peer_connection_states.borrow();
                         for (peer_key,peer) in peer_connections.iter().filter(|(_,peer)| !peer.state().peer_choking && peer.state().currently_downloading.is_none()) {
                             if peer.state().peer_pieces[next_piece as usize] {
                                 if peer.state().is_choking {
@@ -304,7 +304,7 @@ impl TorrentState {
                                     return;
                                 }
                             }
-                        }
+                        }*/
                     } else {
                        log::error!("No piece can be downloaded from any peer"); 
                         return;
