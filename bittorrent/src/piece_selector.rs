@@ -50,7 +50,7 @@ impl PieceSelector {
         let mut available_pieces: BitBox<u8, Msb0> =
             (0..self.completed_pieces.len()).map(|_| false).collect();
 
-        let peer_connections = peer_list.peer_connection_states.borrow();
+        let peer_connections = &peer_list.connections;
         for (_, peer) in peer_connections.iter() {
             available_pieces |= &peer.state().peer_pieces;
         }

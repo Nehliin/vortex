@@ -3,14 +3,7 @@
 // which requires support for http://www.bittorrent.org/beps/bep_0010.html
 // which needs the foundational http://www.bittorrent.org/beps/bep_0003.html implementation
 
-use std::{
-    cell::RefCell,
-    net::SocketAddr,
-    path::Path,
-    rc::Rc,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Instant};
 
 use anyhow::Context;
 use bitvec::prelude::*;
@@ -38,29 +31,27 @@ new_key_type! {
     pub struct PeerKey;
 }
 
-// TODO: Shouldn't need to be clonable?
-#[derive(Clone)]
 struct PeerList {
-    peer_connection_states: Rc<RefCell<DenseSlotMap<PeerKey, PeerConnection>>>,
+    connections: DenseSlotMap<PeerKey, PeerConnection>,
     addrs: Arc<Mutex<SecondaryMap<PeerKey, SocketAddr>>>,
 }
 
 impl PeerList {
     pub fn new() -> Self {
         Self {
-            peer_connection_states: Default::default(),
+            connections: Default::default(),
             addrs: Default::default(),
         }
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.peer_connection_states.borrow().is_empty()
+        self.connections.is_empty()
     }
 
     // TODO rename
     pub fn insert_peer(
-        &self,
+        &mut self,
         addr: SocketAddr,
         our_peer_id: [u8; 20],
         info_hash: [u8; 20],
@@ -68,20 +59,17 @@ impl PeerList {
         num_pieces: i32,
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) {
-        let peer_key = self
-            .peer_connection_states
-            .borrow_mut()
-            .insert_with_key(|peer_key| {
-                let connection = PeerConnection::new(
-                    peer_key,
-                    num_pieces as usize,
-                    stream,
-                    peer_event_sender.clone(),
-                )
-                .unwrap();
-                connection.connect(our_peer_id, info_hash).unwrap();
-                connection
-            });
+        let peer_key = self.connections.insert_with_key(|peer_key| {
+            let connection = PeerConnection::new(
+                peer_key,
+                num_pieces as usize,
+                stream,
+                peer_event_sender.clone(),
+            )
+            .unwrap();
+            connection.connect(our_peer_id, info_hash).unwrap();
+            connection
+        });
 
         // TODO: Only do this when connection is completed?
         self.addrs.lock().insert(peer_key, addr);
@@ -92,7 +80,6 @@ impl PeerList {
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) -> PeerListHandle {
         let (tx, mut rc) = tokio::sync::mpsc::unbounded_channel();
-        let this = self.clone();
         tokio_uring::spawn(async move {
             while let Some(addr) = rc.recv().await {
                 if let Ok(stream) = TcpStream::connect(addr).await {
@@ -217,7 +204,7 @@ impl TorrentState {
     }
 
     pub(crate) async fn on_piece_request(
-        &mut self,
+        &self,
         index: i32,
         begin: i32,
         length: i32,
@@ -267,7 +254,7 @@ impl TorrentState {
                 self.file_store.write_piece(index, data).await.unwrap();
 
                 // Purge disconnected peers 
-                let mut disconnected_peers:Vec<PeerKey> = self.peer_list.peer_connection_states.borrow().iter().filter_map(|(peer_key,peer)| peer.have(index).map(|_| peer_key).ok()).collect();
+                let mut disconnected_peers:Vec<PeerKey> = self.peer_list.connections.iter().filter_map(|(peer_key,peer)| peer.have(index).map(|_| peer_key).ok()).collect();
 
                 if self.piece_selector.completed_all() {
                     log::info!("Torrent completed!");
@@ -311,7 +298,7 @@ impl TorrentState {
                     }
                 }
                self
-                .peer_list.peer_connection_states.borrow_mut()
+                .peer_list.connections
                 .retain(|peer_key, _| !disconnected_peers.contains(&peer_key));
             }
             Some(piece_index) => log::error!(
@@ -331,11 +318,18 @@ impl TorrentState {
         // Need to propagate this when new connections are incoming
         peer_event_sender: &tokio::sync::mpsc::Sender<PeerEvent>,
     ) -> anyhow::Result<()> {
-        let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
-        let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
-                    log::warn!("received event for removed peer");
-                    return Ok(());
-        };
+        macro_rules! connection_mut_or_return {
+            () => {
+                {
+                    let Some(peer_connection) = self.peer_list.connections.get_mut(peer_event.peer_key) else {
+                        log::warn!("received event for removed peer");
+                        return Ok(());
+                    };
+                    peer_connection
+                }
+
+            }
+        }
         match peer_event.event_type {
             PeerEventType::NewConnection { stream, addr } => self.peer_list.insert_peer(
                 addr,
@@ -346,6 +340,7 @@ impl TorrentState {
                 peer_event_sender.clone(),
             ),
             PeerEventType::HandshakeComplete { peer_id, info_hash } => {
+                let peer_connection = connection_mut_or_return!();
                 peer_connection.peer_id = Some(peer_id);
                 // TODO handle this more gracefully
                 assert_eq!(&info_hash, self.torrent_info.info_hash_bytes().as_slice());
@@ -353,38 +348,31 @@ impl TorrentState {
                 // TODO: update peer list here
             }
             PeerEventType::Choked => {
+                let peer_connection = connection_mut_or_return!();
                 log::info!("Peer is choking us!");
                 peer_connection.state_mut().peer_choking = true;
                 // TODO clear outgoing requests
             }
             PeerEventType::Unchoke => {
+                let peer_connection = connection_mut_or_return!();
                 peer_connection.state_mut().peer_choking = false;
                 if !peer_connection.state().is_interested {
                     // Not interested so don't do anything
                     return Ok(());
                 }
-                drop(peer_connection);
-                drop(connection_states);
                 // The peer pieces can be owned by the piece selector and updated via
                 // events. Aka Bitfield is one event, Have is another one and the
                 // piece selector contains then a secondary map of peer_key -> bitfields
                 // that may all be merged when finding which piece should be next
                 if let Some(piece_idx) = self.piece_selector.next_piece(&self.peer_list) {
-                    let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
-                    let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
-                        log::warn!("received event for removed peer");
-                        return Ok(());
-                    };
-
+                    let peer_connection = connection_mut_or_return!();
                     let peer_owns_piece = peer_connection.state().peer_pieces[piece_idx as usize];
                     if peer_owns_piece {
                         if let Err(err) = peer_connection.unchoke() {
                             log::error!("Peer disconnected: {err}");
                             // TODO: cleaner fix here
-                            drop(peer_connection);
                             self.peer_list
-                                .peer_connection_states
-                                .borrow_mut()
+                                .connections
                                 .remove(peer_event.peer_key)
                                 .unwrap();
                             return Ok(());
@@ -398,8 +386,7 @@ impl TorrentState {
                             // TODO: cleaner fix here
                             drop(peer_connection);
                             self.peer_list
-                                .peer_connection_states
-                                .borrow_mut()
+                                .connections
                                 .remove(peer_event.peer_key)
                                 .unwrap();
                             return Ok(());
@@ -411,6 +398,8 @@ impl TorrentState {
                 }
             }
             PeerEventType::Intrest => {
+                let should_unchoke = self.should_unchoke();
+                let peer_connection = connection_mut_or_return!();
                 log::info!("Peer is interested in us!");
                 peer_connection.state_mut().peer_interested = true;
                 if !peer_connection.state().is_choking {
@@ -418,12 +407,13 @@ impl TorrentState {
                     // unchoke to avoid some race conditions. Libtorrent
                     // uses the same type of logic
                     peer_connection.unchoke()?;
-                } else if self.should_unchoke() {
+                } else if should_unchoke {
                     log::debug!("Unchoking peer after intrest");
                     peer_connection.unchoke()?;
                 }
             }
             PeerEventType::NotInterested => {
+                let peer_connection = connection_mut_or_return!();
                 log::info!("Peer is no longer interested in us!");
                 peer_connection.state_mut().peer_interested = false;
                 peer_connection.choke()?;
@@ -433,20 +423,15 @@ impl TorrentState {
                 begin,
                 length,
             } => {
-                if self.should_unchoke() && peer_connection.state().is_choking {
+                let should_unchoke = self.should_unchoke();
+                let peer_connection = connection_mut_or_return!();
+                if should_unchoke && peer_connection.state().is_choking {
                     peer_connection.unchoke()?;
                 }
                 if !peer_connection.state().is_choking {
-                    drop(peer_connection);
-                    drop(connection_states);
                     match self.on_piece_request(index, begin, length).await {
                         Ok(piece_data) => {
-                            let mut connection_states =
-                                self.peer_list.peer_connection_states.borrow_mut();
-                            let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
-                                log::warn!("received event for removed peer");
-                                return Ok(());
-                            };
+                            let peer_connection = connection_mut_or_return!();
                             peer_connection.piece(index, begin, piece_data)?;
                         }
                         Err(err) => log::error!("Invalid piece request: {err}"),
@@ -457,8 +442,6 @@ impl TorrentState {
             }
             PeerEventType::PieceRequestSucceeded(piece) => {
                 log::debug!("Piece completed!");
-                drop(peer_connection);
-                drop(connection_states);
                 self.on_piece_completed(piece.index, piece.memory).await;
             }
             PeerEventType::PieceRequestFailed => todo!(),
