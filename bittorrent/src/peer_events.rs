@@ -8,11 +8,11 @@ use crate::{PeerKey, Piece};
 // have been cloned at this point and importantly
 // there are not inflight operations at this point
 //
-// TODO safety here is a bit more unclear but should be possible to 
+// TODO safety here is a bit more unclear but should be possible to
 // remove this all together when accept_incoming case is handled
 pub struct SendableStream(pub TcpStream);
 unsafe impl Send for SendableStream {}
-// this is temporary and only necessary for error handling afaik 
+// this is temporary and only necessary for error handling afaik
 unsafe impl Sync for SendableStream {}
 
 impl Debug for SendableStream {
