@@ -20,11 +20,11 @@ use peer_connection::PeerConnection;
 use peer_events::{PeerEvent, PeerEventType};
 use piece_selector::PieceSelector;
 use sha1::{Digest, Sha1};
-use slotmap::{new_key_type, DenseSlotMap, SecondaryMap};
+use slotmap::{new_key_type, DenseSlotMap, Key, SecondaryMap};
 use tokio::sync::oneshot;
 use tokio_uring::net::{TcpListener, TcpStream};
 
-use crate::drive_io::FileStore;
+use crate::{drive_io::FileStore, peer_events::SendableStream};
 
 const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -43,16 +43,13 @@ new_key_type! {
 struct PeerList {
     peer_connection_states: Rc<RefCell<DenseSlotMap<PeerKey, PeerConnection>>>,
     addrs: Arc<Mutex<SecondaryMap<PeerKey, SocketAddr>>>,
-    our_peer_id: [u8; 20],
-    info_hash: [u8; 20],
 }
 
 impl PeerList {
-    pub fn new(our_peer_id: [u8; 20]) -> Self {
+    pub fn new() -> Self {
         Self {
             peer_connection_states: Default::default(),
             addrs: Default::default(),
-            our_peer_id,
         }
     }
 
@@ -65,7 +62,9 @@ impl PeerList {
     pub fn insert_peer(
         &self,
         addr: SocketAddr,
-        stream: TcpStream,
+        our_peer_id: [u8; 20],
+        info_hash: [u8; 20],
+        stream: SendableStream,
         num_pieces: i32,
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) {
@@ -80,9 +79,7 @@ impl PeerList {
                     peer_event_sender.clone(),
                 )
                 .unwrap();
-                connection
-                    .connect(self.our_peer_id, self.info_hash)
-                    .unwrap();
+                connection.connect(our_peer_id, info_hash).unwrap();
                 connection
             });
 
@@ -92,7 +89,6 @@ impl PeerList {
 
     pub fn handle(
         &self,
-        num_pieces: i32,
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) -> PeerListHandle {
         let (tx, mut rc) = tokio::sync::mpsc::unbounded_channel();
@@ -100,7 +96,13 @@ impl PeerList {
         tokio_uring::spawn(async move {
             while let Some(addr) = rc.recv().await {
                 if let Ok(stream) = TcpStream::connect(addr).await {
-                    this.insert_peer(addr, stream, num_pieces, peer_event_sender);
+                    peer_event_sender.send(PeerEvent {
+                        peer_key: PeerKey::null(),
+                        event_type: PeerEventType::NewConnection {
+                            stream: SendableStream(stream),
+                            addr,
+                        },
+                    });
                 } else {
                     log::warn!("Failed to connect to peer that was announced")
                 }
@@ -322,13 +324,27 @@ impl TorrentState {
     }
 
     // TODO Just use the messag here, no point having separte event
-    async fn handle_event(&mut self, peer_event: PeerEvent) -> anyhow::Result<()> {
+    async fn handle_event(
+        &mut self,
+        our_peer_id: &[u8; 20],
+        peer_event: PeerEvent,
+        // Need to propagate this when new connections are incoming
+        peer_event_sender: &tokio::sync::mpsc::Sender<PeerEvent>,
+    ) -> anyhow::Result<()> {
         let mut connection_states = self.peer_list.peer_connection_states.borrow_mut();
         let Some(peer_connection) = connection_states.get_mut(peer_event.peer_key) else {
                     log::warn!("received event for removed peer");
                     return Ok(());
         };
         match peer_event.event_type {
+            PeerEventType::NewConnection { stream, addr } => self.peer_list.insert_peer(
+                addr,
+                *our_peer_id,
+                self.torrent_info.info_hash_bytes().try_into().unwrap(),
+                stream,
+                self.torrent_info.pieces.len() as i32,
+                peer_event_sender.clone(),
+            ),
             PeerEventType::HandshakeComplete { peer_id, info_hash } => {
                 peer_connection.peer_id = Some(peer_id);
                 // TODO handle this more gracefully
@@ -494,10 +510,12 @@ impl TorrentManager {
         let file_store = FileStore::new("downloaded", &torrent_info).await.unwrap();
         let piece_selector = PieceSelector::new(&torrent_info);
         let our_peer_id = generate_peer_id();
-        let peer_list = PeerList::new(our_peer_id);
+        let peer_list = PeerList::new();
         let (tx, rc) = tokio::sync::oneshot::channel();
         let (peer_event_tx, mut peer_event_rc) = tokio::sync::mpsc::channel(512);
         let torrent_info_clone = torrent_info.clone();
+        let peer_event_tx_clone = peer_event_tx.clone();
+        let peer_list_handle = peer_list.handle(peer_event_tx.clone());
         tokio_uring::spawn(async move {
             let mut torrent_state = TorrentState {
                 num_unchoked: 0,
@@ -513,7 +531,9 @@ impl TorrentManager {
 
             while let Some(event) = peer_event_rc.recv().await {
                 // Spawn as separate tasks potentially
-                torrent_state.handle_event(event).await;
+                torrent_state
+                    .handle_event(&our_peer_id, event, &peer_event_tx_clone)
+                    .await;
             }
         });
 
@@ -521,8 +541,7 @@ impl TorrentManager {
             our_peer_id,
             torrent_info: Arc::new(torrent_info),
             peer_event_sender: peer_event_tx,
-            // Fix when peer connection no longer expects torrent state
-            peer_list_handle: todo!(),
+            peer_list_handle,
         }
     }
 
@@ -537,7 +556,7 @@ impl TorrentManager {
     }
 
     pub async fn start(&self) -> anyhow::Result<()> {
-        let mut disconnected_peers = Vec::new();
+        /*let mut disconnected_peers = Vec::new();
         let rc = {
             {
                 let state = self.torrent_state.borrow();
@@ -599,15 +618,25 @@ impl TorrentManager {
             state.download_rc.take()
         };
 
-        rc.unwrap().await?;
+        rc.unwrap().await?;*/
         Ok(())
     }
 
-    pub async fn accept_incoming(&self, listener: &TcpListener) -> anyhow::Result<PeerConnection> {
+    pub async fn accept_incoming(&self, listener: &TcpListener) -> anyhow::Result<()> {
         let (stream, peer_addr) = listener.accept().await.unwrap();
         log::info!("Incomming peer connection: {peer_addr}");
+        self.peer_event_sender
+            .send(PeerEvent {
+                peer_key: PeerKey::null(),
+                event_type: PeerEventType::NewConnection {
+                    stream: SendableStream(stream),
+                    addr: peer_addr,
+                },
+            })
+            .await
+            .unwrap();
         // skicka med null key o sätt den när handshake is received!!!!!?
-        PeerConnection::new(
+        /*PeerConnection::new(
             stream,
             self.our_peer_id,
             self.torrent_info.info_hash_bytes().try_into().unwrap(),
@@ -623,14 +652,26 @@ impl TorrentManager {
                 .peer_list
                 .insert_peer(peer_addr, peer_connection_clone);
             peer_connection
-        })
+        })*/
+        Ok(())
     }
 
-    pub async fn add_peer(&self, addr: SocketAddr) -> anyhow::Result<PeerConnection> {
+    // peer event som är new conneciton ->
+    pub async fn add_peer(&self, addr: SocketAddr) -> anyhow::Result<()> {
         let stream = TcpStream::connect(addr)
             .await
             .context("Failed to connect")?;
-        let peer_connection = PeerConnection::new(
+        self.peer_event_sender
+            .send(PeerEvent {
+                peer_key: PeerKey::null(),
+                event_type: PeerEventType::NewConnection {
+                    stream: SendableStream(stream),
+                    addr,
+                },
+            })
+            .await
+            .unwrap();
+        /*let peer_connection = PeerConnection::new(
             stream,
             self.our_peer_id,
             self.torrent_info.info_hash_bytes().try_into().unwrap(),
@@ -643,6 +684,7 @@ impl TorrentManager {
             .borrow_mut()
             .peer_list
             .insert_peer(addr, peer_connection.clone());
-        Ok(peer_connection)
+        Ok(peer_connection)*/
+        Ok(())
     }
 }

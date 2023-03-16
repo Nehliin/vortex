@@ -8,6 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_uring::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
+use crate::peer_events::SendableStream;
 use crate::peer_events::{PeerEvent, PeerEventType};
 use crate::peer_message::{PeerMessage, PeerMessageDecoder};
 use crate::{PeerKey, Piece, SUBPIECE_SIZE};
@@ -203,14 +204,7 @@ async fn process_incoming(
     Ok(())
 }
 
-// Safe since the inner Rc have yet to
-// have been cloned at this point and importantly
-// there are not inflight operations at this point
-//
-// TODO this should be safe but consider passing around an
-// Arc wrapped listener instead
-struct SendableStream(TcpStream);
-unsafe impl Send for SendableStream {}
+
 
 fn start_network_thread(
     peer_key: PeerKey,
@@ -342,14 +336,14 @@ impl PeerConnection {
     pub fn new(
         peer_key: PeerKey,
         num_pieces: usize,
-        stream: TcpStream,
+        stream: SendableStream,
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) -> anyhow::Result<PeerConnection> {
         let peer_pieces = (0..num_pieces).map(|_| false).collect();
         let cancellation_token = CancellationToken::new();
         let outgoing_tx = start_network_thread(
             peer_key,
-            SendableStream(stream),
+            stream,
             cancellation_token.child_token(),
             peer_event_sender,
         );

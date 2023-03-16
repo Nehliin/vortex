@@ -1,4 +1,25 @@
+use std::{fmt::Debug, net::SocketAddr};
+
+use tokio_uring::net::TcpStream;
+
 use crate::{PeerKey, Piece};
+
+// Safe since the inner Rc have yet to
+// have been cloned at this point and importantly
+// there are not inflight operations at this point
+//
+// TODO safety here is a bit more unclear but should be possible to 
+// remove this all together when accept_incoming case is handled
+pub struct SendableStream(pub TcpStream);
+unsafe impl Send for SendableStream {}
+// this is temporary and only necessary for error handling afaik 
+unsafe impl Sync for SendableStream {}
+
+impl Debug for SendableStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SendableStream").finish()
+    }
+}
 
 #[derive(Debug)]
 pub enum PeerEventType {
@@ -21,7 +42,12 @@ pub enum PeerEventType {
         peer_id: [u8; 20],
         // TODO: Perhaps this can be checked before this is sent?
         info_hash: [u8; 20],
-    }, 
+    },
+    NewConnection {
+        // Skip this all together?
+        stream: SendableStream,
+        addr: SocketAddr,
+    },
     // TODO: handshake failed
     // TODO: peer stats
 }
