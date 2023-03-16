@@ -1,4 +1,4 @@
-use crate::{Piece, PeerKey};
+use crate::{PeerKey, Piece};
 
 #[derive(Debug)]
 pub enum PeerEventType {
@@ -9,22 +9,22 @@ pub enum PeerEventType {
     /// The peer is interested in us
     Intrest,
     /// The peer is not interested in us
-    NotInterested, 
+    NotInterested,
     /// Peer requests a piece
-    PieceRequest {
-        index: i32,
-        begin: i32,
-        length: i32,
-    },
+    PieceRequest { index: i32, begin: i32, length: i32 },
     /// Piece request completed
     PieceRequestSucceeded(Piece),
     /// Piece request failed
     PieceRequestFailed,
-    // TODO: Handshake complete/failed?
+    /// Connection handshake completed succesfully
+    HandshakeComplete {
+        peer_id: [u8; 20],
+        // TODO: Perhaps this can be checked before this is sent?
+        info_hash: [u8; 20],
+    }, 
+    // TODO: handshake failed
     // TODO: peer stats
 }
-
-
 
 #[derive(Debug)]
 pub struct PeerEvent {
