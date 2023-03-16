@@ -83,13 +83,15 @@ impl PeerList {
         tokio_uring::spawn(async move {
             while let Some(addr) = rc.recv().await {
                 if let Ok(stream) = TcpStream::connect(addr).await {
-                    peer_event_sender.send(PeerEvent {
-                        peer_key: PeerKey::null(),
-                        event_type: PeerEventType::NewConnection {
-                            stream: SendableStream(stream),
-                            addr,
-                        },
-                    });
+                    peer_event_sender
+                        .send(PeerEvent {
+                            peer_key: PeerKey::null(),
+                            event_type: PeerEventType::NewConnection {
+                                stream: SendableStream(stream),
+                                addr,
+                            },
+                        })
+                        .await;
                 } else {
                     log::warn!("Failed to connect to peer that was announced")
                 }
@@ -269,8 +271,7 @@ impl TorrentState {
                         // only peers that haven't choked us and that aren't currently downloading. 
                         // At least one peer must be available here to download, it might not have
                         // the desired piece though.
-                        /*let peer_connections = self.peer_list.peer_connection_states.borrow();
-                        for (peer_key,peer) in peer_connections.iter().filter(|(_,peer)| !peer.state().peer_choking && peer.state().currently_downloading.is_none()) {
+                        for (peer_key,peer) in self.peer_list.connections.iter_mut().filter(|(_,peer)| !peer.state().peer_choking && peer.state().currently_downloading.is_none()) {
                             if peer.state().peer_pieces[next_piece as usize] {
                                 if peer.state().is_choking {
                                     if let Err(err) = peer.unchoke() {
@@ -291,7 +292,7 @@ impl TorrentState {
                                     return;
                                 }
                             }
-                        }*/
+                        }
                     } else {
                        log::error!("No piece can be downloaded from any peer"); 
                         return;
@@ -384,7 +385,6 @@ impl TorrentState {
                         {
                             log::error!("Peer disconnected: {err}");
                             // TODO: cleaner fix here
-                            drop(peer_connection);
                             self.peer_list
                                 .connections
                                 .remove(peer_event.peer_key)
