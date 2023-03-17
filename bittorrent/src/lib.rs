@@ -259,38 +259,36 @@ impl TorrentState {
                     self.download_tx.take().unwrap().send(()).unwrap();
                     return;
                 }
-                // TODO use a proper piece strategy here 
-               for _ in 0..5 {
-                    if let Some(next_piece) = self.piece_selector.next_piece(&self.peer_list) {
-                        // only peers that haven't choked us and that aren't currently downloading. 
-                        // At least one peer must be available here to download, it might not have
-                        // the desired piece though.
-                        for (peer_key,peer) in self.peer_list.connections.iter_mut().filter(|(_,peer)| !peer.state().peer_choking && peer.state().currently_downloading.is_none()) {
-                            if peer.state().peer_pieces[next_piece as usize] {
-                                if peer.state().is_choking {
-                                    if let Err(err) = peer.unchoke() {
-                                        log::error!("{err}");
-                                        disconnected_peers.push(peer_key);
-                                        continue;
-                                    } else {
-                                        self.num_unchoked += 1;
-                                    }
-                                }
-                                // Group to a single operation
-                                if let Err(err) = peer.request_piece(next_piece, self.piece_selector.piece_len(next_piece)) {
-                                    log::error!("{err}");
-                                    disconnected_peers.push(peer_key);
-                                    continue;
-                                } else {
-                                    self.piece_selector.mark_inflight(next_piece as usize);
-                                    return;
-                                }
+
+                let mut requested_piece = false;
+                let available_peers = self.peer_list.connections.iter_mut()
+                    .filter(|(_,peer)| !peer.state().peer_choking && peer.state().currently_downloading.is_none());
+                for (peer_key,peer) in available_peers {
+                    if let Some(next_piece) = self.piece_selector.next_piece(peer_key)  {
+                        if peer.state().is_choking {
+                            // TODO highly unclear if unchoke is desired here 
+                            if let Err(err) = peer.unchoke() {
+                                log::error!("{err}");
+                                disconnected_peers.push(peer_key);
+                                continue;
+                            } else {
+                                self.num_unchoked += 1;
                             }
                         }
-                    } else {
-                       log::error!("No piece can be downloaded from any peer"); 
-                        return;
+                        // Group to a single operation
+                        if let Err(err) = peer.request_piece(next_piece, self.piece_selector.piece_len(next_piece)) {
+                            log::error!("{err}");
+                            disconnected_peers.push(peer_key);
+                            continue;
+                        } else {
+                            requested_piece = true;
+                            self.piece_selector.mark_inflight(next_piece as usize);
+                            break;
+                        }
                     }
+                }
+                if requested_piece {
+                    log::error!("No piece can be downloaded from any peer");
                 }
                self
                 .peer_list.connections
@@ -331,7 +329,6 @@ impl TorrentState {
                 *our_peer_id,
                 self.torrent_info.info_hash_bytes().try_into().unwrap(),
                 stream,
-                self.torrent_info.pieces.len() as i32,
                 peer_event_sender.clone(),
             ),
             PeerEventType::HandshakeComplete { peer_id, info_hash } => {
@@ -355,40 +352,32 @@ impl TorrentState {
                     // Not interested so don't do anything
                     return Ok(());
                 }
-                // The peer pieces can be owned by the piece selector and updated via
-                // events. Aka Bitfield is one event, Have is another one and the
-                // piece selector contains then a secondary map of peer_key -> bitfields
-                // that may all be merged when finding which piece should be next
-                if let Some(piece_idx) = self.piece_selector.next_piece(&self.peer_list) {
-                    let peer_connection = connection_mut_or_return!();
-                    let peer_owns_piece = peer_connection.state().peer_pieces[piece_idx as usize];
-                    if peer_owns_piece {
-                        if let Err(err) = peer_connection.unchoke() {
-                            log::error!("Peer disconnected: {err}");
-                            // TODO: cleaner fix here
-                            self.peer_list
-                                .connections
-                                .remove(peer_event.peer_key)
-                                .unwrap();
-                            return Ok(());
-                        } else {
-                            self.num_unchoked += 1;
-                        }
-                        if let Err(err) = peer_connection
-                            .request_piece(piece_idx, self.piece_selector.piece_len(piece_idx))
-                        {
-                            log::error!("Peer disconnected: {err}");
-                            // TODO: cleaner fix here
-                            self.peer_list
-                                .connections
-                                .remove(peer_event.peer_key)
-                                .unwrap();
-                            return Ok(());
-                        }
-                        self.piece_selector.mark_inflight(piece_idx as usize);
+                if let Some(piece_idx) = self.piece_selector.next_piece(peer_event.peer_key) {
+                    if let Err(err) = peer_connection.unchoke() {
+                        log::error!("Peer disconnected: {err}");
+                        // TODO: cleaner fix here
+                        self.peer_list
+                            .connections
+                            .remove(peer_event.peer_key)
+                            .unwrap();
+                        return Ok(());
+                    } else {
+                        self.num_unchoked += 1;
                     }
+                    if let Err(err) = peer_connection
+                        .request_piece(piece_idx, self.piece_selector.piece_len(piece_idx))
+                    {
+                        log::error!("Peer disconnected: {err}");
+                        // TODO: cleaner fix here
+                        self.peer_list
+                            .connections
+                            .remove(peer_event.peer_key)
+                            .unwrap();
+                        return Ok(());
+                    }
+                    self.piece_selector.mark_inflight(piece_idx as usize);
                 } else {
-                    log::warn!("No more pieces available");
+                    log::warn!("No more pieces available from {:?}", peer_event.peer_key);
                 }
             }
             PeerEventType::Intrest => {

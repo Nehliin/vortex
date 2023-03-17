@@ -2,7 +2,7 @@ use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
 use slotmap::SecondaryMap;
 
-use crate::{PeerKey};
+use crate::PeerKey;
 
 // TODO
 /*pub trait PieceSelectionStrategy {
@@ -43,24 +43,16 @@ impl PieceSelector {
         }
     }
 
-    pub fn next_piece(&self) -> Option<i32> {
+    pub fn next_piece(&self, peer_key: PeerKey) -> Option<i32> {
         let pieces_left = self.completed_pieces.count_zeros();
         if pieces_left == 0 {
             log::info!("Torrent is completed, no next piece found");
             return None;
         }
-        let init_pieces: BitBox<u8, Msb0> =
-            (0..self.completed_pieces.len()).map(|_| false).collect();
 
-        // All pieces we haven't downloaded that peers have
-        let mut available_pieces =
-            self.peer_pieces
-                .values()
-                .fold(init_pieces, |mut available_pieces, peer_pieces| {
-                    available_pieces |= peer_pieces;
-                    available_pieces
-                });
-        // Get the available pieces - all already completed or inflight pieces
+        // TODO: avoid clone
+        let mut available_pieces = self.peer_pieces.get(peer_key)?.clone();
+        // Discount completed or inflight pieces
         let mut tmp = self.completed_pieces.clone();
         tmp |= &self.inflight_pieces;
         available_pieces &= !tmp;
@@ -118,15 +110,14 @@ impl PieceSelector {
         if let Some(entry) = self.peer_pieces.entry(peer_key) {
             entry
                 .and_modify(|pieces| pieces.set(piece_index, true))
-                .or_insert_with(|| {
-                    (0..self.completed_pieces.len()).map(|_| false).collect()
-                });
+                .or_insert_with(|| (0..self.completed_pieces.len()).map(|_| false).collect());
         } else {
             // TODO: this really isn't an error but want to make it visible for now
             log::error!("Attempted to update piece for peer that was removed");
         }
     }
 
+    // TODO: Get rid of this?
     #[inline]
     pub fn mark_complete(&mut self, index: usize) {
         debug_assert!(self.inflight_pieces[index]);
@@ -135,6 +126,7 @@ impl PieceSelector {
         self.inflight_pieces.set(index, false);
     }
 
+    // TODO: Get rid of this?
     #[inline]
     pub fn mark_inflight(&mut self, index: usize) {
         debug_assert!(!self.completed_pieces[index]);
