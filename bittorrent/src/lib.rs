@@ -56,17 +56,11 @@ impl PeerList {
         our_peer_id: [u8; 20],
         info_hash: [u8; 20],
         stream: SendableStream,
-        num_pieces: i32,
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) {
         let peer_key = self.connections.insert_with_key(|peer_key| {
-            let connection = PeerConnection::new(
-                peer_key,
-                num_pieces as usize,
-                stream,
-                peer_event_sender.clone(),
-            )
-            .unwrap();
+            let connection =
+                PeerConnection::new(peer_key, stream, peer_event_sender.clone()).unwrap();
             connection.connect(our_peer_id, info_hash).unwrap();
             connection
         });
@@ -417,6 +411,21 @@ impl TorrentState {
                 log::info!("Peer is no longer interested in us!");
                 peer_connection.state_mut().peer_interested = false;
                 peer_connection.choke()?;
+            }
+            PeerEventType::Have { index } => {
+                log::info!("Peer have piece with index: {index}");
+                self.piece_selector
+                    .set_peer_piece(peer_event.peer_key, index as usize);
+            }
+            PeerEventType::Bitfield(field) => {
+                if self.torrent_info.pieces.len() != field.len() {
+                    // TODO: disconnect?
+                    log::error!("Received invalid bitfield");
+                    return Ok(());
+                }
+                log::info!("Bifield received: {field}");
+                self.piece_selector
+                    .update_peer_pieces(peer_event.peer_key, field);
             }
             PeerEventType::PieceRequest {
                 index,
