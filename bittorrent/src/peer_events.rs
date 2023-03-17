@@ -8,11 +8,11 @@ use crate::{PeerKey, Piece};
 // have been cloned at this point and importantly
 // there are not inflight operations at this point
 //
-// TODO safety here is a bit more unclear but should be possible to
+// TODO safety here is a bit more unclear but should be possible to 
 // remove this all together when accept_incoming case is handled
 pub struct SendableStream(pub TcpStream);
 unsafe impl Send for SendableStream {}
-// this is temporary and only necessary for error handling afaik
+// this is temporary and only necessary for error handling afaik 
 unsafe impl Sync for SendableStream {}
 
 impl Debug for SendableStream {
@@ -43,6 +43,8 @@ pub enum PeerEventType {
         // TODO: Perhaps this can be checked before this is sent?
         info_hash: [u8; 20],
     },
+    // These sorts of events should probably live outside this particular enum
+    // this + start + stop + total stats? probably lives better somewhere else
     NewConnection {
         // Skip this all together?
         stream: SendableStream,
