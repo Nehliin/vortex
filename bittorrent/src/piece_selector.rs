@@ -1,7 +1,8 @@
 use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
+use slotmap::SecondaryMap;
 
-use crate::PeerList;
+use crate::{PeerKey};
 
 // TODO
 /*pub trait PieceSelectionStrategy {
@@ -20,6 +21,7 @@ pub(crate) struct PieceSelector {
     //    strategy: T,
     completed_pieces: BitBox<u8, Msb0>,
     inflight_pieces: BitBox<u8, Msb0>,
+    peer_pieces: SecondaryMap<PeerKey, BitBox<u8, Msb0>>,
     last_piece_length: u32,
     piece_length: u32,
 }
@@ -37,23 +39,27 @@ impl PieceSelector {
             inflight_pieces,
             last_piece_length: last_piece_length as u32,
             piece_length: piece_length as u32,
+            peer_pieces: SecondaryMap::new(),
         }
     }
 
-    pub fn next_piece(&self, peer_list: &PeerList) -> Option<i32> {
+    pub fn next_piece(&self) -> Option<i32> {
         let pieces_left = self.completed_pieces.count_zeros();
         if pieces_left == 0 {
             log::info!("Torrent is completed, no next piece found");
             return None;
         }
-        // All pieces we haven't downloaded that peers have
-        let mut available_pieces: BitBox<u8, Msb0> =
+        let init_pieces: BitBox<u8, Msb0> =
             (0..self.completed_pieces.len()).map(|_| false).collect();
 
-        let peer_connections = &peer_list.connections;
-        for (_, peer) in peer_connections.iter() {
-            available_pieces |= &peer.state().peer_pieces;
-        }
+        // All pieces we haven't downloaded that peers have
+        let mut available_pieces =
+            self.peer_pieces
+                .values()
+                .fold(init_pieces, |mut available_pieces, peer_pieces| {
+                    available_pieces |= peer_pieces;
+                    available_pieces
+                });
         // Get the available pieces - all already completed or inflight pieces
         let mut tmp = self.completed_pieces.clone();
         tmp |= &self.inflight_pieces;
@@ -80,8 +86,8 @@ impl PieceSelector {
             // Rarest first
             let mut count = vec![0; available_pieces.len()];
             for available in available_pieces.iter_ones() {
-                for (_, peer) in peer_connections.iter() {
-                    if peer.state().peer_pieces[available] {
+                for peer_pieces in self.peer_pieces.values() {
+                    if peer_pieces[available] {
                         count[available] += 1;
                     }
                 }
@@ -94,6 +100,30 @@ impl PieceSelector {
                 .map(|(pos, _)| pos as i32);
             log::debug!("Picking rarest piece to download, index: {index:?}");
             index
+        }
+    }
+
+    pub fn update_peer_pieces(&mut self, peer_key: PeerKey, peer_pieces: BitBox<u8, Msb0>) {
+        if let Some(entry) = self.peer_pieces.entry(peer_key) {
+            entry
+                .and_modify(|pieces| *pieces |= &peer_pieces)
+                .or_insert(peer_pieces);
+        } else {
+            // TODO: this really isn't an error but want to make it visible for now
+            log::error!("Attempted to update piece for peer that was removed");
+        }
+    }
+
+    pub fn set_peer_piece(&mut self, peer_key: PeerKey, piece_index: usize) {
+        if let Some(entry) = self.peer_pieces.entry(peer_key) {
+            entry
+                .and_modify(|pieces| pieces.set(piece_index, true))
+                .or_insert_with(|| {
+                    (0..self.completed_pieces.len()).map(|_| false).collect()
+                });
+        } else {
+            // TODO: this really isn't an error but want to make it visible for now
+            log::error!("Attempted to update piece for peer that was removed");
         }
     }
 

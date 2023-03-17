@@ -1,5 +1,6 @@
 use std::{fmt::Debug, net::SocketAddr};
 
+use bitvec::prelude::{BitBox, Msb0};
 use tokio_uring::net::TcpStream;
 
 use crate::{PeerKey, Piece};
@@ -8,11 +9,11 @@ use crate::{PeerKey, Piece};
 // have been cloned at this point and importantly
 // there are not inflight operations at this point
 //
-// TODO safety here is a bit more unclear but should be possible to 
+// TODO safety here is a bit more unclear but should be possible to
 // remove this all together when accept_incoming case is handled
 pub struct SendableStream(pub TcpStream);
 unsafe impl Send for SendableStream {}
-// this is temporary and only necessary for error handling afaik 
+// this is temporary and only necessary for error handling afaik
 unsafe impl Sync for SendableStream {}
 
 impl Debug for SendableStream {
@@ -31,6 +32,10 @@ pub enum PeerEventType {
     Intrest,
     /// The peer is not interested in us
     NotInterested,
+    /// Peer have downloaded a piece
+    Have { index: i32 },
+    /// Peer pieces
+    Bitfield(BitBox<u8, Msb0>),
     /// Peer requests a piece
     PieceRequest { index: i32, begin: i32, length: i32 },
     /// Piece request completed

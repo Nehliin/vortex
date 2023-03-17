@@ -23,8 +23,6 @@ pub struct PeerConnectionState {
     pub peer_choking: bool,
     /// The peer is interested what we have to offer
     pub peer_interested: bool,
-    /// Which pieces do the peer have
-    pub peer_pieces: BitBox<u8, Msb0>,
     /// Piece that is being currently downloaded
     /// from the peer. Might allow for more than 1 per peer
     /// in the future
@@ -39,16 +37,12 @@ impl Drop for PeerConnectionState {
 }
 
 impl PeerConnectionState {
-    pub(crate) fn new(
-        peer_pieces: BitBox<u8, Msb0>,
-        cancellation_token: CancellationToken,
-    ) -> Self {
+    pub(crate) fn new(cancellation_token: CancellationToken) -> Self {
         Self {
             is_choking: true,
             is_interested: false,
             peer_choking: true,
             peer_interested: false,
-            peer_pieces,
             currently_downloading: None,
             cancellation_token,
         }
@@ -102,16 +96,20 @@ async fn process_incoming(
                 .await?
         }
         PeerMessage::Have { index } => {
-            /*let mut state = self.state_mut();
-            log::info!("Peer have piece with index: {index}");
-            state.peer_pieces.set(index as usize, true);*/
-            todo!()
+            peer_event_sender
+                .send(PeerEvent {
+                    peer_key,
+                    event_type: PeerEventType::Have { index },
+                })
+                .await?;
         }
         PeerMessage::Bitfield(field) => {
-            /*let mut state = self.state_mut();
-            log::info!("Bifield received: {field}");
-            state.peer_pieces |= field;*/
-            todo!()
+            peer_event_sender
+                .send(PeerEvent {
+                    peer_key,
+                    event_type: PeerEventType::Bitfield(field),
+                })
+                .await?;
         }
         PeerMessage::Request {
             index,
@@ -332,11 +330,9 @@ pub struct PeerConnection {
 impl PeerConnection {
     pub fn new(
         peer_key: PeerKey,
-        num_pieces: usize,
         stream: SendableStream,
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) -> anyhow::Result<PeerConnection> {
-        let peer_pieces = (0..num_pieces).map(|_| false).collect();
         let cancellation_token = CancellationToken::new();
         let outgoing_tx = start_network_thread(
             peer_key,
@@ -347,7 +343,7 @@ impl PeerConnection {
 
         let connection = PeerConnection {
             peer_id: None,
-            state: PeerConnectionState::new(peer_pieces, cancellation_token),
+            state: PeerConnectionState::new(cancellation_token),
             outgoing: outgoing_tx,
         };
 
