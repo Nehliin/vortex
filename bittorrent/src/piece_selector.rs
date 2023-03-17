@@ -156,6 +156,4 @@ impl PieceSelector {
             self.piece_length
         }
     }
-
-    // TODO consider actually triggering the piece download from this struct?
 }

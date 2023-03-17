@@ -17,7 +17,7 @@ use slotmap::{new_key_type, DenseSlotMap, Key, SecondaryMap};
 use tokio::sync::oneshot;
 use tokio_uring::net::{TcpListener, TcpStream};
 
-use crate::{drive_io::FileStore, peer_events::SendableStream};
+use crate::drive_io::FileStore;
 
 const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -55,12 +55,11 @@ impl PeerList {
         addr: SocketAddr,
         our_peer_id: [u8; 20],
         info_hash: [u8; 20],
-        stream: SendableStream,
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) {
         let peer_key = self.connections.insert_with_key(|peer_key| {
             let connection =
-                PeerConnection::new(peer_key, stream, peer_event_sender.clone()).unwrap();
+                PeerConnection::new(peer_key, addr, peer_event_sender.clone()).unwrap();
             connection.connect(our_peer_id, info_hash).unwrap();
             connection
         });
@@ -76,19 +75,12 @@ impl PeerList {
         let (tx, mut rc) = tokio::sync::mpsc::unbounded_channel();
         tokio_uring::spawn(async move {
             while let Some(addr) = rc.recv().await {
-                if let Ok(stream) = TcpStream::connect(addr).await {
-                    peer_event_sender
-                        .send(PeerEvent {
-                            peer_key: PeerKey::null(),
-                            event_type: PeerEventType::NewConnection {
-                                stream: SendableStream(stream),
-                                addr,
-                            },
-                        })
-                        .await;
-                } else {
-                    log::warn!("Failed to connect to peer that was announced")
-                }
+                peer_event_sender
+                    .send(PeerEvent {
+                        peer_key: PeerKey::null(),
+                        event_type: PeerEventType::NewConnection { addr },
+                    })
+                    .await;
             }
         });
         PeerListHandle {
@@ -324,11 +316,13 @@ impl TorrentState {
             }
         }
         match peer_event.event_type {
-            PeerEventType::NewConnection { stream, addr } => self.peer_list.insert_peer(
+            // TODO: expected flow should probably convert NewConnecition event ->
+            // ConnectionEstablished and have a channel interacting directly with
+            // the network io thread
+            PeerEventType::NewConnection { addr } => self.peer_list.insert_peer(
                 addr,
                 *our_peer_id,
                 self.torrent_info.info_hash_bytes().try_into().unwrap(),
-                stream,
                 peer_event_sender.clone(),
             ),
             PeerEventType::HandshakeComplete { peer_id, info_hash } => {
@@ -603,7 +597,8 @@ impl TorrentManager {
         Ok(())
     }
 
-    pub async fn accept_incoming(&self, listener: &TcpListener) -> anyhow::Result<()> {
+    // Fix support via dedicated IO thread instead
+    /*pub async fn accept_incoming(&self, listener: &TcpListener) -> anyhow::Result<()> {
         let (stream, peer_addr) = listener.accept().await.unwrap();
         log::info!("Incomming peer connection: {peer_addr}");
         self.peer_event_sender
@@ -616,56 +611,17 @@ impl TorrentManager {
             })
             .await
             .unwrap();
-        // skicka med null key o sätt den när handshake is received!!!!!?
-        /*PeerConnection::new(
-            stream,
-            self.our_peer_id,
-            self.torrent_info.info_hash_bytes().try_into().unwrap(),
-            self.torrent_info.pieces.len(),
-            Rc::downgrade(&self.torrent_state),
-        )
-        .await
-        .map(|peer_connection| {
-            log::info!("Connection established: {peer_addr}");
-            let peer_connection_clone = peer_connection.clone();
-            self.torrent_state
-                .borrow_mut()
-                .peer_list
-                .insert_peer(peer_addr, peer_connection_clone);
-            peer_connection
-        })*/
         Ok(())
-    }
+    }*/
 
-    // peer event som är new conneciton ->
     pub async fn add_peer(&self, addr: SocketAddr) -> anyhow::Result<()> {
-        let stream = TcpStream::connect(addr)
-            .await
-            .context("Failed to connect")?;
         self.peer_event_sender
             .send(PeerEvent {
                 peer_key: PeerKey::null(),
-                event_type: PeerEventType::NewConnection {
-                    stream: SendableStream(stream),
-                    addr,
-                },
+                event_type: PeerEventType::NewConnection { addr },
             })
-            .await
-            .unwrap();
-        /*let peer_connection = PeerConnection::new(
-            stream,
-            self.our_peer_id,
-            self.torrent_info.info_hash_bytes().try_into().unwrap(),
-            self.torrent_info.pieces.len(),
-            Rc::downgrade(&self.torrent_state),
-        )
-        .await?;
+            .await?;
 
-        self.torrent_state
-            .borrow_mut()
-            .peer_list
-            .insert_peer(addr, peer_connection.clone());
-        Ok(peer_connection)*/
         Ok(())
     }
 }

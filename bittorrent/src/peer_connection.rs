@@ -1,14 +1,13 @@
+use std::net::SocketAddr;
 use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Context;
-use bitvec::prelude::{BitBox, Msb0};
 use bytes::BytesMut;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_uring::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::peer_events::SendableStream;
 use crate::peer_events::{PeerEvent, PeerEventType};
 use crate::peer_message::{PeerMessage, PeerMessageDecoder};
 use crate::{PeerKey, Piece, SUBPIECE_SIZE};
@@ -205,7 +204,7 @@ async fn process_incoming(
 
 fn start_network_thread(
     peer_key: PeerKey,
-    sendable_stream: SendableStream,
+    addr: SocketAddr,
     cancellation_token: CancellationToken,
     peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
 ) -> UnboundedSender<PeerMessage> {
@@ -217,14 +216,11 @@ fn start_network_thread(
     let outgoing_tx_clone = outgoing_tx.clone();
     std::thread::spawn(move || {
         tokio_uring::start(async move {
-            let sendable_stream = sendable_stream;
-            let stream = Rc::new(sendable_stream.0);
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let stream = Rc::new(stream);
             let stream_clone = stream.clone();
             // TODO remove rc/refcel after using tokio_select
             let currently_downloading = Rc::new(RefCell::new(None));
-
-            // Om man använder tokio_select! här istället så kan man ha hela statet i den här
-            // tråden typ
 
             let currently_downloading_clone = currently_downloading.clone();
             // Send loop, should be cancelled automatically in the next iteration when outgoing_rc is dropped.
@@ -331,13 +327,13 @@ pub struct PeerConnection {
 impl PeerConnection {
     pub fn new(
         peer_key: PeerKey,
-        stream: SendableStream,
+        addr: SocketAddr,
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) -> anyhow::Result<PeerConnection> {
         let cancellation_token = CancellationToken::new();
         let outgoing_tx = start_network_thread(
             peer_key,
-            stream,
+            addr,
             cancellation_token.child_token(),
             peer_event_sender,
         );
