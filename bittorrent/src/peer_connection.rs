@@ -191,10 +191,11 @@ async fn process_incoming(
             }
         }
         PeerMessage::Handshake { peer_id, info_hash } => {
+            // TODO: Check if handshake was pending?
             peer_event_sender
                 .send(PeerEvent {
                     peer_key,
-                    event_type: PeerEventType::Intrest,
+                    event_type: PeerEventType::HandshakeComplete { peer_id, info_hash },
                 })
                 .await?;
         }
