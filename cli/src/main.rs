@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Instant};
 
 use parking_lot::Mutex;
 use vortex_bittorrent::{PeerListHandle, TorrentManager};
@@ -50,13 +50,20 @@ fn main() {
             .await
             .unwrap();
 
+        let start_timer = Instant::now();
         dht.start().await.unwrap();
+        log::info!("DHT startup time: {}", start_timer.elapsed().as_secs());
+        let find_peers_timer = Instant::now();
         let mut peers_reciver = dht.find_peers(info_hash.as_ref());
 
         dht.save(Path::new("routing_table.json")).await.unwrap();
         let peer_list_handle = torrent_manager.peer_list_handle();
         tokio_uring::spawn(async move {
             while let Some(peers) = peers_reciver.recv().await {
+                log::info!(
+                    "DHT find peers time: {}",
+                    find_peers_timer.elapsed().as_secs()
+                );
                 for peer_addr in peers {
                     log::info!("Attempting connection to {}", peer_addr);
                     peer_list_handle.insert(peer_addr);
