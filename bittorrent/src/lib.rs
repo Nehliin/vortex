@@ -396,15 +396,28 @@ impl TorrentState {
                 self.piece_selector
                     .set_peer_piece(peer_event.peer_key, index as usize);
             }
-            PeerEventType::Bitfield(field) => {
+            PeerEventType::Bitfield(mut field) => {
                 if self.torrent_info.pieces.len() != field.len() {
-                    // TODO: disconnect?
-                    log::error!("Received invalid bitfield");
-                    return Ok(());
+                    if field.len() < self.torrent_info.pieces.len() {
+                        log::error!(
+                            "Received invalid bitfield, expected {}, got: {}",
+                            self.torrent_info.pieces.len(),
+                            field.len()
+                        );
+                        // TODO disconect here
+                        return Ok(());
+                    }
+                    // The bitfield might be padded with zeros, remove them first
+                    log::debug!(
+                        "Received padded bitfield, expected {}, got: {}",
+                        self.torrent_info.pieces.len(),
+                        field.len()
+                    );
+                    field.truncate(self.torrent_info.pieces.len());
                 }
                 log::info!("Bifield received: {field}");
                 self.piece_selector
-                    .update_peer_pieces(peer_event.peer_key, field);
+                    .update_peer_pieces(peer_event.peer_key, field.into_boxed_bitslice());
             }
             PeerEventType::PieceRequest {
                 index,

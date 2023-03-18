@@ -15,7 +15,7 @@ pub enum PeerMessage {
     Have {
         index: i32,
     },
-    Bitfield(BitBox<u8, Msb0>),
+    Bitfield(BitVec<u8, Msb0>),
     Request {
         index: i32,
         begin: i32,
@@ -143,7 +143,7 @@ impl<'a> Arbitrary<'a> for PeerMessage {
             PeerMessage::BITFIELD => {
                 let vec = u.arbitrary::<Vec<u8>>()?;
                 let bits = BitVec::<_, Msb0>::from_slice(&vec);
-                Ok(PeerMessage::Bitfield(bits.into_boxed_bitslice()))
+                Ok(PeerMessage::Bitfield(bits))
             }
             PeerMessage::REQUEST => {
                 let index = u.arbitrary()?;
@@ -283,7 +283,7 @@ pub fn parse_message(data: &mut impl Buf, length: i32) -> anyhow::Result<PeerMes
             let mut bitfield = vec![0; length as usize - 1];
             data.copy_to_slice(&mut bitfield);
             let bits = BitVec::<_, Msb0>::from_slice(&bitfield);
-            Ok(PeerMessage::Bitfield(bits.into_boxed_bitslice()))
+            Ok(PeerMessage::Bitfield(bits))
         }
         PeerMessage::REQUEST => {
             anyhow::ensure!(length >= 13);

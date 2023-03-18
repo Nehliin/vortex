@@ -1,6 +1,6 @@
 use std::{fmt::Debug, net::SocketAddr};
 
-use bitvec::prelude::{BitBox, Msb0};
+use bitvec::{prelude::Msb0, vec::BitVec};
 
 use crate::{PeerKey, Piece};
 
@@ -19,7 +19,7 @@ pub enum PeerEventType {
         index: i32,
     },
     /// Peer pieces
-    Bitfield(BitBox<u8, Msb0>),
+    Bitfield(BitVec<u8, Msb0>),
     /// Peer requests a piece
     PieceRequest {
         index: i32,
