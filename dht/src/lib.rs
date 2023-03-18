@@ -147,7 +147,7 @@ impl Dht {
                 for node in nodes {
                     if let IpAddr::V4(addr) = node.addr.ip() {
                         if let Some(token) = this.token_store.get_token(addr) {
-                            if this
+                            if let Err(err) = this
                                 .krpc_client
                                 .announce_peer(AnnouncePeer {
                                     id: own_id,
@@ -158,9 +158,8 @@ impl Dht {
                                 })
                                 .send(node.addr)
                                 .await
-                                .is_err()
                             {
-                                log::error!("Announce failed!");
+                                log::warn!("Announce failed!: {err}");
                             }
                         } else {
                             log::warn!("Token not found for: {addr}");
