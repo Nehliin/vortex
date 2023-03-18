@@ -333,7 +333,7 @@ impl TorrentState {
                 // TODO handle this more gracefully
                 assert_eq!(&info_hash, self.torrent_info.info_hash_bytes().as_slice());
                 log::info!("Handshake received");
-                // TODO: update peer list here
+                peer_connection.interested()?;
             }
             PeerEventType::Choked => {
                 let peer_connection = connection_mut_or_return!();
