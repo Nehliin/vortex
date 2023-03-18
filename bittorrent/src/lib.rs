@@ -3,9 +3,8 @@
 // which requires support for http://www.bittorrent.org/beps/bep_0010.html
 // which needs the foundational http://www.bittorrent.org/beps/bep_0003.html implementation
 
-use std::{borrow::BorrowMut, net::SocketAddr, path::Path, sync::Arc, time::Instant};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Instant};
 
-use anyhow::Context;
 use bitvec::prelude::*;
 use lava_torrent::torrent::v1::Torrent;
 use parking_lot::Mutex;
@@ -15,7 +14,6 @@ use piece_selector::PieceSelector;
 use sha1::{Digest, Sha1};
 use slotmap::{new_key_type, DenseSlotMap, Key, SecondaryMap};
 use tokio::sync::oneshot;
-use tokio_uring::net::{TcpListener, TcpStream};
 
 use crate::drive_io::FileStore;
 
@@ -42,11 +40,6 @@ impl PeerList {
             connections: Default::default(),
             addrs: Default::default(),
         }
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.connections.is_empty()
     }
 
     // TODO rename
@@ -174,11 +167,8 @@ impl Piece {
     }
 }
 
-type OnSubpieceCallback = Box<dyn FnMut(&[u8])>;
-
 pub struct TorrentState {
     torrent_info: Torrent,
-    on_subpiece_callback: Option<OnSubpieceCallback>,
     file_store: FileStore,
     download_complete_tx: Option<oneshot::Sender<()>>,
     max_unchoked: u32,
@@ -446,10 +436,6 @@ impl TorrentState {
 
 pub struct TorrentManager {
     pub torrent_info: Arc<Torrent>,
-    // Keeping this bounded have the neat benefit of
-    // automatically throttling the peer connection threads
-    // from overloading the "main" thread
-    peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     peer_list_handle: PeerListHandle,
     download_complete: Option<tokio::sync::oneshot::Receiver<()>>,
 }
@@ -487,15 +473,17 @@ impl TorrentManager {
         let our_peer_id = generate_peer_id();
         let peer_list = PeerList::new();
         let (tx, rc) = tokio::sync::oneshot::channel();
+        // Keeping this bounded have the neat benefit of
+        // automatically throttling the peer connection threads
+        // from overloading the "main" thread
         let (peer_event_tx, mut peer_event_rc) = tokio::sync::mpsc::channel(512);
         let torrent_info_clone = torrent_info.clone();
         let peer_event_tx_clone = peer_event_tx.clone();
-        let peer_list_handle = peer_list.handle(peer_event_tx.clone());
+        let peer_list_handle = peer_list.handle(peer_event_tx);
         tokio_uring::spawn(async move {
             let mut torrent_state = TorrentState {
                 num_unchoked: 0,
                 max_unchoked: UNCHOKED_PEERS as u32,
-                on_subpiece_callback: None,
                 file_store,
                 download_complete_tx: Some(tx),
                 torrent_info: torrent_info_clone,
@@ -507,26 +495,20 @@ impl TorrentManager {
                 // Spawn as separate tasks potentially
                 torrent_state
                     .handle_event(&our_peer_id, event, &peer_event_tx_clone)
-                    .await;
+                    .await
+                    .unwrap();
             }
         });
 
         Self {
             torrent_info: Arc::new(torrent_info),
-            peer_event_sender: peer_event_tx,
             download_complete: Some(rc),
             peer_list_handle,
         }
     }
 
     pub fn peer_list_handle(&self) -> PeerListHandle {
-        //let weak = Rc::downgrade(&self.torrent_state);
-        //self.torrent_state.borrow().peer_list.handle(weak)
         self.peer_list_handle.clone()
-    }
-
-    pub fn set_subpiece_callback(&self, callback: impl FnMut(&[u8]) + 'static) {
-        //self.torrent_state.borrow_mut().on_subpiece_callback = Some(Box::new(callback));
     }
 
     pub async fn download_complete(&mut self) {

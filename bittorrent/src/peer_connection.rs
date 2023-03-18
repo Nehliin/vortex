@@ -229,7 +229,7 @@ fn start_network_thread(
                 while let Some(outgoing) = outgoing_rc.recv().await {
                     if let PeerMessage::Request {
                         index,
-                        begin,
+                        begin: _,
                         length,
                     } = outgoing
                     {
@@ -345,17 +345,6 @@ impl PeerConnection {
             state: PeerConnectionState::new(cancellation_token),
             outgoing: outgoing_tx,
         };
-
-        // process incoming, should cancel automatically when incoming_tx is dropped
-        /*tokio_uring::spawn(async move {
-            while let Some(incoming) = incoming_rc.recv().await {
-                    process_incoming(incoming, &mut torrent_state)
-                    .await
-                {
-                    log::error!("[Peer: {peer_id:?}] Error processing incoming message: {err}");
-                }
-            }
-        });*/
 
         Ok(connection)
     }

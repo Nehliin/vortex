@@ -1,6 +1,5 @@
-use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
+use std::path::Path;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parking_lot::Mutex;
 use vortex_bittorrent::{PeerListHandle, TorrentManager};
 use vortex_dht::PeerProvider;
