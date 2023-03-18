@@ -6,7 +6,7 @@ use bytes::BytesMut;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_uring::net::TcpStream;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::peer_events::{PeerEvent, PeerEventType};
 use crate::peer_message::{PeerMessage, PeerMessageDecoder};
@@ -26,13 +26,7 @@ pub struct PeerConnectionState {
     /// from the peer? Might allow for more than 1 per peer
     /// in the future
     pub(crate) is_currently_downloading: bool,
-    cancellation_token: CancellationToken,
-}
-
-impl Drop for PeerConnectionState {
-    fn drop(&mut self) {
-        self.cancellation_token.cancel();
-    }
+    _cancellation_token_guard: DropGuard,
 }
 
 impl PeerConnectionState {
@@ -43,7 +37,7 @@ impl PeerConnectionState {
             peer_choking: true,
             peer_interested: false,
             is_currently_downloading: false,
-            cancellation_token,
+            _cancellation_token_guard: cancellation_token.drop_guard(),
         }
     }
 
