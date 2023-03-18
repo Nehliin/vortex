@@ -196,119 +196,162 @@ async fn process_incoming(
     Ok(())
 }
 
+async fn send_loop(
+    stream: Rc<TcpStream>,
+    mut outgoing_rc: UnboundedReceiver<PeerMessage>,
+    currently_downloading: Rc<RefCell<Option<Piece>>>,
+    cancellation_token: CancellationToken,
+) {
+    let mut send_buf = BytesMut::with_capacity(1 << 15);
+    loop {
+        tokio::select! {
+            maybe_message = outgoing_rc.recv() => {
+                let Some(outgoing) = maybe_message else {
+                    log::info!("Nothing more to send, shutting down connection");
+                    cancellation_token.cancel();
+                    break;
+                };
+                if let PeerMessage::Request {
+                        index,
+                        begin: _,
+                        length,
+                    } = outgoing
+                {
+                    let mut currently_downloading = currently_downloading.borrow_mut();
+                    // Split to subpieces and populate currently_downloading
+                    // Don't start on a new piece before the current one is completed
+                    assert!(currently_downloading.is_none());
+                    let mut piece = Piece::new(index, length as u32);
+                    // First subpiece that isn't already completed or inflight
+                    let last_subpiece_index = piece.completed_subpieces.len() - 1;
+                    // Should have 64 in flight subpieces at all times
+                    for _ in 0..piece.completed_subpieces.len().min(64) {
+                        if let Some(subindex) = piece.next_unstarted_subpice() {
+                            piece.inflight_subpieces.set(subindex, true);
+                            let subpiece_request = PeerMessage::Request {
+                                index: piece.index,
+                                begin: subindex as i32 * SUBPIECE_SIZE,
+                                length: if last_subpiece_index == subindex {
+                                    piece.last_subpiece_length
+                                } else {
+                                    SUBPIECE_SIZE
+                                },
+                            };
+                            subpiece_request.encode(&mut send_buf);
+                            // TODO: This shouldn't be needed?
+                            if subindex == last_subpiece_index {
+                                break;
+                            }
+                        }
+                    }
+                    *currently_downloading = Some(piece);
+                } else {
+                    // TODO Reuse buf and also try to coalece messages
+                    // and use write vectored instead. I.e try to receive 3-5
+                    // and write vectored. Have a timeout so it's not stalled forever
+                    // and writes less if no more msgs are incoming
+                    outgoing.encode(&mut send_buf);
+                }
+                // Write all since the buffer has only been filled with encoded data
+                let (result, buf) = stream.write_all(send_buf).await;
+                send_buf = buf;
+                // Need to prevent resending the same message
+                send_buf.clear();
+                if let Err(err) = result {
+                    log::error!("Sending PeerMessage failed: {err}");
+                }
+            },
+            _ = cancellation_token.cancelled() => {
+                log::info!("Cancelling tcp stream send loop");
+                break;
+            }
+        }
+    }
+}
+
+async fn recv_loop(
+    stream: Rc<TcpStream>,
+    peer_key: PeerKey,
+    currently_downloading: Rc<RefCell<Option<Piece>>>,
+    outgoing_tx: UnboundedSender<PeerMessage>,
+    peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
+    cancellation_token: CancellationToken,
+) {
+    // Spec says max size of request is 2^14 so double that for safety
+    let mut read_buf = BytesMut::zeroed(1 << 15);
+    let mut message_decoder = PeerMessageDecoder::default();
+    loop {
+        read_buf.resize(1 << 15, 0);
+        debug_assert_eq!(read_buf.len(), 1 << 15);
+        tokio::select! {
+            (result,buf) = stream.read(read_buf) => {
+                read_buf = buf;
+                match result {
+                    Ok(0) => {
+                        log::info!("Nothing more to read, shutting down connection");
+                        cancellation_token.cancel();
+                        break;
+                    }
+                    Ok(bytes_read) => {
+                        let remainder = read_buf.split_off(bytes_read);
+                        while let Some(message) = message_decoder.decode(&mut read_buf) {
+                            if process_incoming(peer_key, message, &peer_event_sender, &currently_downloading, &outgoing_tx).await.is_err() {
+                                log::error!("No one is listening for incoming traffic, channel dropped");
+                            }
+                        }
+                        read_buf.unsplit(remainder);
+                    }
+                    Err(err) => {
+                        log::error!("Failed to read from peer connection: {err}");
+                        break;
+                    }
+                }
+            },
+            _ = cancellation_token.cancelled() => {
+                log::info!("Cancelling tcp stream read loop");
+                break;
+            }
+        }
+    }
+}
+
 fn start_network_thread(
     peer_key: PeerKey,
     addr: SocketAddr,
     cancellation_token: CancellationToken,
     peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
 ) -> UnboundedSender<PeerMessage> {
-    let (outgoing_tx, mut outgoing_rc): (
-        UnboundedSender<PeerMessage>,
-        UnboundedReceiver<PeerMessage>,
-    ) = tokio::sync::mpsc::unbounded_channel();
+    let (outgoing_tx, outgoing_rc): (UnboundedSender<PeerMessage>, UnboundedReceiver<PeerMessage>) =
+        tokio::sync::mpsc::unbounded_channel();
 
     let outgoing_tx_clone = outgoing_tx.clone();
     std::thread::spawn(move || {
         tokio_uring::start(async move {
-            let stream = TcpStream::connect(addr).await.unwrap();
-            let stream = Rc::new(stream);
-            let stream_clone = stream.clone();
-            // TODO remove rc/refcel after using tokio_select
+            let stream = match TcpStream::connect(addr).await {
+                Ok(stream) => Rc::new(stream),
+                Err(err) => {
+                    log::error!("Connection failed: {err}");
+                    return;
+                }
+            };
             let currently_downloading = Rc::new(RefCell::new(None));
 
-            let currently_downloading_clone = currently_downloading.clone();
-            // Send loop, should be cancelled automatically in the next iteration when outgoing_rc is dropped.
-            tokio_uring::spawn(async move {
-                let mut send_buf = BytesMut::with_capacity(1 << 15);
-                while let Some(outgoing) = outgoing_rc.recv().await {
-                    if let PeerMessage::Request {
-                        index,
-                        begin: _,
-                        length,
-                    } = outgoing
-                    {
-                        let mut currently_downloading = currently_downloading_clone.borrow_mut();
-                        // Split to subpieces and populate currently_downloading
-                        // Don't start on a new piece before the current one is completed
-                        assert!(currently_downloading.is_none());
-                        let mut piece = Piece::new(index, length as u32);
-                        // First subpiece that isn't already completed or inflight
-                        let last_subpiece_index = piece.completed_subpieces.len() - 1;
-                        // Should have 64 in flight subpieces at all times
-                        for _ in 0..piece.completed_subpieces.len().min(64) {
-                            if let Some(subindex) = piece.next_unstarted_subpice() {
-                                piece.inflight_subpieces.set(subindex, true);
-                                let subpiece_request = PeerMessage::Request {
-                                    index: piece.index,
-                                    begin: subindex as i32 * SUBPIECE_SIZE,
-                                    length: if last_subpiece_index == subindex {
-                                        piece.last_subpiece_length
-                                    } else {
-                                        SUBPIECE_SIZE
-                                    },
-                                };
-                                subpiece_request.encode(&mut send_buf);
-                                // TODO: This shouldn't be needed?
-                                if subindex == last_subpiece_index {
-                                    break;
-                                }
-                            }
-                        }
-                        *currently_downloading = Some(piece);
-                    } else {
-                        // TODO Reuse buf and also try to coalece messages
-                        // and use write vectored instead. I.e try to receive 3-5
-                        // and write vectored. Have a timeout so it's not stalled forever
-                        // and writes less if no more msgs are incoming
-                        outgoing.encode(&mut send_buf);
-                    }
-                    // Write all since the buffer has only been filled with encoded data
-                    let (result, buf) = stream_clone.write_all(send_buf).await;
-                    send_buf = buf;
-                    // Need to prevent resending the same message
-                    send_buf.clear();
-                    if let Err(err) = result {
-                        log::error!("[Peer: {peer_key:?}] Sending PeerMessage failed: {err}");
-                    }
-                }
-            });
-
-            // Spec says max size of request is 2^14 so double that for safety
-            let mut read_buf = BytesMut::zeroed(1 << 15);
-            let mut message_decoder = PeerMessageDecoder::default();
-            loop {
-                read_buf.resize(1 << 15, 0);
-                debug_assert_eq!(read_buf.len(), 1 << 15);
-                tokio::select! {
-                    (result,buf) = stream.read(read_buf) => {
-                        read_buf = buf;
-                        match result {
-                            Ok(0) => {
-                                log::info!("Shutting down connection");
-                                break;
-                            }
-                            Ok(bytes_read) => {
-                                let remainder = read_buf.split_off(bytes_read);
-                                while let Some(message) = message_decoder.decode(&mut read_buf) {
-                                    if process_incoming(peer_key, message, &peer_event_sender, &currently_downloading, &outgoing_tx_clone).await.is_err() {
-                                        log::error!("No one is listening for incoming traffic, channel dropped");
-                                    }
-                                }
-                                read_buf.unsplit(remainder);
-                            }
-                            Err(err) => {
-                                log::error!("Failed to read from peer connection: {err}");
-                                break;
-                            }
-                        }
-                    },
-                    _ = cancellation_token.cancelled() => {
-                        log::info!("Cancelling tcp stream read");
-                        break;
-                    }
-                }
-            }
+            tokio_uring::spawn(send_loop(
+                stream.clone(),
+                outgoing_rc,
+                currently_downloading.clone(),
+                cancellation_token.clone(),
+            ));
+            tokio_uring::spawn(recv_loop(
+                stream,
+                peer_key,
+                currently_downloading,
+                outgoing_tx_clone,
+                peer_event_sender,
+                cancellation_token,
+            ));
         });
+        log::error!("THREAD EXIT");
     });
     outgoing_tx
 }
