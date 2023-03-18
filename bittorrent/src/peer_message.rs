@@ -4,15 +4,33 @@ use bytes::{Buf, BufMut, Bytes};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum PeerMessage {
+    Handshake {
+        peer_id: [u8; 20],
+        info_hash: [u8; 20],
+    },
     Choke,
     Unchoke,
     Interested,
     NotInterested,
-    Have { index: i32 },
-    Bitfield(BitBox<u8, Msb0>),
-    Request { index: i32, begin: i32, length: i32 },
-    Cancel { index: i32, begin: i32, length: i32 },
-    Piece { index: i32, begin: i32, data: Bytes },
+    Have {
+        index: i32,
+    },
+    Bitfield(BitVec<u8, Msb0>),
+    Request {
+        index: i32,
+        begin: i32,
+        length: i32,
+    },
+    Cancel {
+        index: i32,
+        begin: i32,
+        length: i32,
+    },
+    Piece {
+        index: i32,
+        begin: i32,
+        data: Bytes,
+    },
 }
 
 impl PeerMessage {
@@ -26,6 +44,7 @@ impl PeerMessage {
     pub const PIECE: u8 = 7;
     pub const CANCEL: u8 = 8;
 
+    // TODO: make use of me outside fuzzing
     pub fn encoded_size(&self) -> usize {
         match self {
             PeerMessage::Choke
@@ -36,6 +55,7 @@ impl PeerMessage {
             PeerMessage::Bitfield(bitfield) => 1 + bitfield.as_raw_slice().len(),
             PeerMessage::Request { .. } | PeerMessage::Cancel { .. } => 13,
             PeerMessage::Piece { data, .. } => 13 + data.len(),
+            PeerMessage::Handshake { .. } => 68,
         }
     }
 
@@ -65,7 +85,7 @@ impl PeerMessage {
             PeerMessage::Bitfield(bitfield) => {
                 buf.put_i32(1 + bitfield.as_raw_slice().len() as i32);
                 buf.put_u8(Self::BITFIELD);
-                buf.put(bitfield.as_raw_slice());
+                buf.put_slice(bitfield.as_raw_slice());
             }
             PeerMessage::Request {
                 index,
@@ -94,7 +114,15 @@ impl PeerMessage {
                 buf.put_u8(Self::PIECE);
                 buf.put_i32(index);
                 buf.put_i32(begin);
-                buf.put(data);
+                buf.put_slice(&data);
+            }
+            PeerMessage::Handshake { peer_id, info_hash } => {
+                const PROTOCOL: &[u8] = b"BitTorrent protocol";
+                buf.put_u8(PROTOCOL.len() as u8);
+                buf.put_slice(PROTOCOL);
+                buf.put_slice(&[0_u8; 8] as &[u8]);
+                buf.put_slice(&info_hash as &[u8]);
+                buf.put_slice(&peer_id as &[u8]);
             }
         }
     }
@@ -115,7 +143,7 @@ impl<'a> Arbitrary<'a> for PeerMessage {
             PeerMessage::BITFIELD => {
                 let vec = u.arbitrary::<Vec<u8>>()?;
                 let bits = BitVec::<_, Msb0>::from_slice(&vec);
-                Ok(PeerMessage::Bitfield(bits.into_boxed_bitslice()))
+                Ok(PeerMessage::Bitfield(bits))
             }
             PeerMessage::REQUEST => {
                 let index = u.arbitrary()?;
@@ -149,10 +177,21 @@ impl<'a> Arbitrary<'a> for PeerMessage {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PeerMessageDecoder {
     length: Option<i32>,
     data: Bytes,
+    pending_handshake: bool,
+}
+
+impl Default for PeerMessageDecoder {
+    fn default() -> Self {
+        Self {
+            length: Default::default(),
+            data: Default::default(),
+            pending_handshake: true,
+        }
+    }
 }
 
 impl PeerMessageDecoder {
@@ -188,6 +227,25 @@ impl PeerMessageDecoder {
                     }
                 }
                 None => {
+                    if self.pending_handshake && data.remaining() >= 68 {
+                        // TODO Move me and don't return errors here send handshake fail event
+                        let str_len = data.get_u8();
+                        //anyhow::ensure!(str_len == 19);
+                        assert!(str_len == 19);
+                        assert!(
+                            data.chunk().get(..str_len as usize)
+                                == Some(b"BitTorrent protocol" as &[u8])
+                        );
+                        data.advance(str_len as usize);
+                        // Skip extensions for now
+                        data.advance(8);
+                        let info_hash = data.chunk()[..20].try_into().unwrap();
+                        data.advance(20_usize);
+                        let peer_id = data.chunk()[..20].try_into().unwrap();
+                        data.advance(20_usize);
+                        self.pending_handshake = false;
+                        break Some(PeerMessage::Handshake { peer_id, info_hash });
+                    }
                     if data.remaining() >= std::mem::size_of::<i32>() {
                         let msg_length = data.get_i32();
                         if msg_length > 0 {
@@ -225,7 +283,7 @@ pub fn parse_message(data: &mut impl Buf, length: i32) -> anyhow::Result<PeerMes
             let mut bitfield = vec![0; length as usize - 1];
             data.copy_to_slice(&mut bitfield);
             let bits = BitVec::<_, Msb0>::from_slice(&bitfield);
-            Ok(PeerMessage::Bitfield(bits.into_boxed_bitslice()))
+            Ok(PeerMessage::Bitfield(bits))
         }
         PeerMessage::REQUEST => {
             anyhow::ensure!(length >= 13);

@@ -1,6 +1,5 @@
-use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
+use std::path::Path;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parking_lot::Mutex;
 use vortex_bittorrent::{PeerListHandle, TorrentManager};
 use vortex_dht::PeerProvider;
@@ -35,12 +34,10 @@ fn main() {
         .init();
 
     tokio_uring::start(async move {
-        let progress = MultiProgress::new();
-
         // TODO Should start dht first
         let torrent_info =
             lava_torrent::torrent::v1::Torrent::read_from_file("slackware.torrent").unwrap();
-        let torrent_manager = TorrentManager::new("slackware.torrent").await;
+        let mut torrent_manager = TorrentManager::new("slackware.torrent").await;
         let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
         let peer_list_map = Mutex::new(
             [(info_hash, torrent_manager.peer_list_handle())]
@@ -57,74 +54,16 @@ fn main() {
         let mut peers_reciver = dht.find_peers(info_hash.as_ref());
 
         dht.save(Path::new("routing_table.json")).await.unwrap();
-        let peers = peers_reciver.recv().await.unwrap();
-
-        let connection_progress = progress.add(ProgressBar::new_spinner());
-        connection_progress
-            .set_style(ProgressStyle::with_template("{spinner:.blue} {msg}").unwrap());
-        connection_progress.enable_steady_tick(Duration::from_millis(100));
-        let total_peers = peers.len();
-        let num_success = Rc::new(RefCell::new(0));
-        let num_failures = Rc::new(RefCell::new(0));
-
-        let connect_futures = peers.into_iter().enumerate().map(|(i, addr)| {
-            let num_success_clone = num_success.clone();
-            let num_failures_clone = num_failures.clone();
-            let manager_clone = torrent_manager.clone();
-            let connection_progress = connection_progress.clone();
-            tokio_uring::spawn(async move {
-                {
-                    let success = num_success_clone.borrow();
-                    let failures = num_failures_clone.borrow();
-                    connection_progress.set_message(format!(
-                        "Connecting to peer [{i}/{}], Success: {success}, Failures: {failures}",
-                        total_peers
-                    ));
+        let peer_list_handle = torrent_manager.peer_list_handle();
+        tokio_uring::spawn(async move {
+            while let Some(peers) = peers_reciver.recv().await {
+                for peer_addr in peers {
+                    log::info!("Attempting connection to {}", peer_addr);
+                    peer_list_handle.insert(peer_addr);
                 }
-
-                let connect_res =
-                    tokio::time::timeout(Duration::from_secs(5), manager_clone.add_peer(addr))
-                        .await;
-
-                match connect_res {
-                    Ok(Ok(_peer_con)) => {
-                        *num_success_clone.borrow_mut() += 1;
-                        log::info!("Connected to {}!", addr);
-                    }
-                    Ok(Err(err)) => {
-                        *num_failures_clone.borrow_mut() += 1;
-                        log::error!("Failed to connect to peer {}, error: {err}", addr);
-                    }
-                    Err(_) => {
-                        *num_failures_clone.borrow_mut() += 1;
-                        log::error!("Failed to connect to peer: {:?}, timedout", addr);
-                    }
-                }
-                {
-                    let success = num_success_clone.borrow();
-                    let failures = num_failures_clone.borrow();
-                    connection_progress.set_message(format!(
-                        "Connecting to peer [{i}/{}], Success: {success}, Failures: {failures}",
-                        total_peers
-                    ));
-                }
-            })
+            }
         });
 
-        futures::future::join_all(connect_futures).await;
-        connection_progress.finish_with_message(format!(
-            "Connected to {}/{} peers",
-            num_success.borrow(),
-            total_peers
-        ));
-        let download_progress = progress.add(ProgressBar::new(torrent_info.length as u64));
-        download_progress.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})").unwrap().progress_chars("#>-"));
-        let download_progress_clone = download_progress.clone();
-        torrent_manager.set_subpiece_callback(move |data| {
-            download_progress_clone.inc(data.len() as u64);
-        });
-        download_progress.tick();
-        torrent_manager.start().await.unwrap();
-        download_progress.finish_with_message("File dowloaded!");
+        torrent_manager.download_complete().await;
     });
 }

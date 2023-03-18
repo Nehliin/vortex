@@ -14,12 +14,11 @@ fn main() {
     let torrent =
         lava_torrent::torrent::v1::Torrent::read_from_file("assets/test-file-1.torrent").unwrap();
     tokio_uring::start(async move {
-        let torrent_manager = TorrentManager::new("assets/test-file-1.torrent").await;
-        let _peer_con = torrent_manager
-            .add_peer("172.17.0.2:51413".parse().unwrap())
-            .await
-            .unwrap();
-        log::info!("We are connected!!");
+        let mut torrent_manager = TorrentManager::new("assets/test-file-1.torrent").await;
+        let peer_list = torrent_manager.peer_list_handle();
+        peer_list.insert("172.17.0.3:51413".parse().unwrap());
+
+        log::info!("We are attempting a connection");
 
         println!("Total length: {}", torrent.length);
         println!("pieces: {}", torrent.pieces.len());
@@ -27,7 +26,7 @@ fn main() {
         // 1. 766s (with spawning write in separate task)
         // 2. 766s (without spawning write in separate task)
         let download_time = Instant::now();
-        torrent_manager.start().await.unwrap();
+        torrent_manager.download_complete().await;
         let elapsed = download_time.elapsed();
         log::info!("Download complete in: {}s", elapsed.as_secs());
 
