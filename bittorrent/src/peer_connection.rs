@@ -268,7 +268,7 @@ fn start_network_thread(
                         // and writes less if no more msgs are incoming
                         outgoing.encode(&mut send_buf);
                     }
-                    // Write all since the buffer has only been filled with encoded data 
+                    // Write all since the buffer has only been filled with encoded data
                     let (result, buf) = stream_clone.write_all(send_buf).await;
                     send_buf = buf;
                     // Need to prevent resending the same message

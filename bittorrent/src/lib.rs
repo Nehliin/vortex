@@ -3,7 +3,7 @@
 // which requires support for http://www.bittorrent.org/beps/bep_0010.html
 // which needs the foundational http://www.bittorrent.org/beps/bep_0003.html implementation
 
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Instant, borrow::BorrowMut};
+use std::{borrow::BorrowMut, net::SocketAddr, path::Path, sync::Arc, time::Instant};
 
 use anyhow::Context;
 use bitvec::prelude::*;
