@@ -225,7 +225,7 @@ fn start_network_thread(
             let currently_downloading_clone = currently_downloading.clone();
             // Send loop, should be cancelled automatically in the next iteration when outgoing_rc is dropped.
             tokio_uring::spawn(async move {
-                let mut send_buf = BytesMut::zeroed(1 << 15);
+                let mut send_buf = BytesMut::with_capacity(1 << 15);
                 while let Some(outgoing) = outgoing_rc.recv().await {
                     if let PeerMessage::Request {
                         index,
@@ -268,8 +268,10 @@ fn start_network_thread(
                         // and writes less if no more msgs are incoming
                         outgoing.encode(&mut send_buf);
                     }
+                    // Write all since the buffer has only been filled with encoded data 
                     let (result, buf) = stream_clone.write_all(send_buf).await;
                     send_buf = buf;
+                    // Need to prevent resending the same message
                     send_buf.clear();
                     if let Err(err) = result {
                         log::error!("[Peer: {peer_key:?}] Sending PeerMessage failed: {err}");

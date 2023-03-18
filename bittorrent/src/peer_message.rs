@@ -85,7 +85,7 @@ impl PeerMessage {
             PeerMessage::Bitfield(bitfield) => {
                 buf.put_i32(1 + bitfield.as_raw_slice().len() as i32);
                 buf.put_u8(Self::BITFIELD);
-                buf.put(bitfield.as_raw_slice());
+                buf.put_slice(bitfield.as_raw_slice());
             }
             PeerMessage::Request {
                 index,
@@ -114,15 +114,15 @@ impl PeerMessage {
                 buf.put_u8(Self::PIECE);
                 buf.put_i32(index);
                 buf.put_i32(begin);
-                buf.put(data);
+                buf.put_slice(&data);
             }
             PeerMessage::Handshake { peer_id, info_hash } => {
                 const PROTOCOL: &[u8] = b"BitTorrent protocol";
                 buf.put_u8(PROTOCOL.len() as u8);
-                buf.put(PROTOCOL);
-                buf.put(&[0_u8; 8] as &[u8]);
-                buf.put(&info_hash as &[u8]);
-                buf.put(&peer_id as &[u8]);
+                buf.put_slice(PROTOCOL);
+                buf.put_slice(&[0_u8; 8] as &[u8]);
+                buf.put_slice(&info_hash as &[u8]);
+                buf.put_slice(&peer_id as &[u8]);
             }
         }
     }
