@@ -234,7 +234,14 @@ impl TorrentState {
                 self.file_store.write_piece(index, data).await.unwrap();
 
                 // Purge disconnected peers 
-                let mut disconnected_peers:Vec<PeerKey> = self.peer_list.connections.iter().filter_map(|(peer_key,peer)| peer.have(index).map(|_| peer_key).ok()).collect();
+                let mut disconnected_peers:Vec<PeerKey> = self.peer_list.connections.iter()
+                    .filter_map(|(peer_key,peer)| {
+                        if peer.have(index).is_err() {
+                            Some(peer_key)
+                        } else {
+                            None
+                        }
+                    }).collect();
 
                 if self.piece_selector.completed_all() {
                     log::info!("Torrent completed!");
@@ -272,7 +279,7 @@ impl TorrentState {
                         }
                     }
                 }
-                if requested_piece {
+                if !requested_piece {
                     log::error!("No piece can be downloaded from any peer");
                 }
                self
