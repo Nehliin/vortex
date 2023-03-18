@@ -3,7 +3,7 @@
 // which requires support for http://www.bittorrent.org/beps/bep_0010.html
 // which needs the foundational http://www.bittorrent.org/beps/bep_0003.html implementation
 
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Instant};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Instant, borrow::BorrowMut};
 
 use anyhow::Context;
 use bitvec::prelude::*;
@@ -57,6 +57,7 @@ impl PeerList {
         info_hash: [u8; 20],
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) {
+        log::debug!("Inserting peer: {addr}");
         let peer_key = self.connections.insert_with_key(|peer_key| {
             let connection =
                 PeerConnection::new(peer_key, addr, peer_event_sender.clone()).unwrap();
@@ -73,6 +74,7 @@ impl PeerList {
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) -> PeerListHandle {
         let (tx, mut rc) = tokio::sync::mpsc::unbounded_channel();
+        // TODO consider cutting out the middleman if no new event is needed (other than peer event)
         tokio_uring::spawn(async move {
             while let Some(addr) = rc.recv().await {
                 peer_event_sender
@@ -80,7 +82,8 @@ impl PeerList {
                         peer_key: PeerKey::null(),
                         event_type: PeerEventType::NewConnection { addr },
                     })
-                    .await;
+                    .await
+                    .unwrap();
             }
         });
         PeerListHandle {
@@ -177,8 +180,7 @@ pub struct TorrentState {
     torrent_info: Torrent,
     on_subpiece_callback: Option<OnSubpieceCallback>,
     file_store: FileStore,
-    download_rc: Option<oneshot::Receiver<()>>,
-    download_tx: Option<oneshot::Sender<()>>,
+    download_complete_tx: Option<oneshot::Sender<()>>,
     max_unchoked: u32,
     pub num_unchoked: u32,
     peer_list: PeerList,
@@ -248,10 +250,11 @@ impl TorrentState {
                     log::info!("Torrent completed!");
                     let file_store = std::mem::take(&mut self.file_store);
                     file_store.close().await.unwrap();
-                    self.download_tx.take().unwrap().send(()).unwrap();
+                    self.download_complete_tx.take().unwrap().send(()).unwrap();
                     return;
                 }
 
+                // TODO: this entire logic needs to be adapted to the new flow eventually
                 let mut requested_piece = false;
                 let available_peers = self.peer_list.connections.iter_mut()
                     .filter(|(_,peer)| !peer.state().peer_choking && peer.state().currently_downloading.is_none());
@@ -295,7 +298,6 @@ impl TorrentState {
         }
     }
 
-    // TODO Just use the messag here, no point having separte event
     async fn handle_event(
         &mut self,
         our_peer_id: &[u8; 20],
@@ -442,16 +444,14 @@ impl TorrentState {
     }
 }
 
-#[derive(Clone)]
 pub struct TorrentManager {
     pub torrent_info: Arc<Torrent>,
-    // TODO create newtype
-    our_peer_id: [u8; 20],
     // Keeping this bounded have the neat benefit of
     // automatically throttling the peer connection threads
     // from overloading the "main" thread
     peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     peer_list_handle: PeerListHandle,
+    download_complete: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 fn generate_peer_id() -> [u8; 20] {
@@ -497,8 +497,7 @@ impl TorrentManager {
                 max_unchoked: UNCHOKED_PEERS as u32,
                 on_subpiece_callback: None,
                 file_store,
-                download_rc: Some(rc),
-                download_tx: Some(tx),
+                download_complete_tx: Some(tx),
                 torrent_info: torrent_info_clone,
                 piece_selector,
                 peer_list,
@@ -513,9 +512,9 @@ impl TorrentManager {
         });
 
         Self {
-            our_peer_id,
             torrent_info: Arc::new(torrent_info),
             peer_event_sender: peer_event_tx,
+            download_complete: Some(rc),
             peer_list_handle,
         }
     }
@@ -530,71 +529,10 @@ impl TorrentManager {
         //self.torrent_state.borrow_mut().on_subpiece_callback = Some(Box::new(callback));
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
-        /*let mut disconnected_peers = Vec::new();
-        let rc = {
-            {
-                let state = self.torrent_state.borrow();
-                if state.peer_list.is_empty() {
-                    anyhow::bail!("No peers to download from");
-                }
-                for (peer_key, peer) in state.peer_list.peer_connection_states.borrow().iter() {
-                    if let Err(err) = peer.interested() {
-                        log::error!("Peer disconnected: {err}");
-                        disconnected_peers.push(peer_key);
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(1500)).await;
-            {
-                let peer_list = self.torrent_state.borrow().peer_list.clone();
-                for (peer_key, peer) in peer_list
-                    .peer_connection_states
-                    .borrow()
-                    .iter()
-                    .take(UNCHOKED_PEERS)
-                {
-                    if let Err(err) = peer.interested() {
-                        log::error!("Peer disconnected: {err}");
-                        disconnected_peers.push(peer_key);
-                        continue;
-                    }
-                    let mut state = self.torrent_state.borrow_mut();
-                    if let Some(piece_idx) = state.piece_selector.next_piece(&peer_list) {
-                        let peer_owns_piece = peer.state().peer_pieces[piece_idx as usize];
-                        if peer_owns_piece {
-                            if let Err(err) = peer.unchoke() {
-                                log::error!("Peer disconnected: {err}");
-                                disconnected_peers.push(peer_key);
-                                continue;
-                            } else {
-                                state.num_unchoked += 1;
-                            }
-                            if let Err(err) = peer
-                                .request_piece(piece_idx, state.piece_selector.piece_len(piece_idx))
-                            {
-                                log::error!("Peer disconnected: {err}");
-                                disconnected_peers.push(peer_key);
-                                continue;
-                            }
-                            state.piece_selector.mark_inflight(piece_idx as usize);
-                        }
-                    } else {
-                        log::warn!("No more pieces available");
-                    }
-                }
-            }
-            let mut state = self.torrent_state.borrow_mut();
-            state
-                .peer_list
-                .peer_connection_states
-                .borrow_mut()
-                .retain(|peer_key, _| !disconnected_peers.contains(&peer_key));
-            state.download_rc.take()
-        };
-
-        rc.unwrap().await?;*/
-        Ok(())
+    pub async fn download_complete(&mut self) {
+        if let Some(download_waiter) = self.download_complete.take() {
+            download_waiter.await.unwrap();
+        }
     }
 
     // Fix support via dedicated IO thread instead
@@ -613,15 +551,4 @@ impl TorrentManager {
             .unwrap();
         Ok(())
     }*/
-
-    pub async fn add_peer(&self, addr: SocketAddr) -> anyhow::Result<()> {
-        self.peer_event_sender
-            .send(PeerEvent {
-                peer_key: PeerKey::null(),
-                event_type: PeerEventType::NewConnection { addr },
-            })
-            .await?;
-
-        Ok(())
-    }
 }
