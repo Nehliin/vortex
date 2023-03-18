@@ -1,6 +1,3 @@
-use std::time::Duration;
-
-use tokio_uring::net::TcpListener;
 use vortex_bittorrent::TorrentManager;
 
 // Make these tests automatic
