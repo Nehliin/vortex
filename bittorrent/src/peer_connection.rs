@@ -22,10 +22,10 @@ pub struct PeerConnectionState {
     pub peer_choking: bool,
     /// The peer is interested what we have to offer
     pub peer_interested: bool,
-    /// Piece that is being currently downloaded
-    /// from the peer. Might allow for more than 1 per peer
+    /// Is a piece currently being downloaded
+    /// from the peer? Might allow for more than 1 per peer
     /// in the future
-    pub(crate) currently_downloading: Option<Piece>,
+    pub(crate) is_currently_downloading: bool,
     cancellation_token: CancellationToken,
 }
 
@@ -42,7 +42,7 @@ impl PeerConnectionState {
             is_interested: false,
             peer_choking: true,
             peer_interested: false,
-            currently_downloading: None,
+            is_currently_downloading: false,
             cancellation_token,
         }
     }
@@ -398,36 +398,21 @@ impl PeerConnection {
             .context("Failed to queue outoing have msg")
     }
 
-    // Is this were we want to du subpice splitting?
     pub fn request_piece(&mut self, index: i32, length: u32) -> anyhow::Result<()> {
         // Don't start on a new piece before the current one is completed
-        assert!(self.state.currently_downloading.is_none());
-        // TODO This is racy
-        //assert!(state.peer_pieces[index as usize]);
-        let mut piece = Piece::new(index, length);
-        // First subpiece that isn't already completed or inflight
-        let last_subpiece_index = piece.completed_subpieces.len() - 1;
-        // Should have 64 in flight subpieces at all times
-        for _ in 0..piece.completed_subpieces.len().min(64) {
-            if let Some(subindex) = piece.next_unstarted_subpice() {
-                piece.inflight_subpieces.set(subindex, true);
-                self.outgoing
-                    .send(PeerMessage::Request {
-                        index: piece.index,
-                        begin: subindex as i32 * SUBPIECE_SIZE,
-                        length: if last_subpiece_index == subindex {
-                            piece.last_subpiece_length
-                        } else {
-                            SUBPIECE_SIZE
-                        },
-                    })
-                    .context("Failed to queue outgoing msg")?;
-                if subindex == last_subpiece_index {
-                    break;
-                }
-            }
-        }
-        self.state.currently_downloading = Some(piece);
+        assert!(!self.state.is_currently_downloading);
+        self.state.is_currently_downloading = true;
+        // Subpiece spliting happens on the io thread
+        self.outgoing
+            .send(PeerMessage::Request {
+                index,
+                // Begin is calculated based off index and piece length
+                // in the io thread
+                begin: 0,
+                length: length as i32,
+            })
+            .context("Failed to queue outgoing msg")?;
+
         Ok(())
     }
 

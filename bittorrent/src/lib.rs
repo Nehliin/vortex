@@ -247,7 +247,7 @@ impl TorrentState {
                 // TODO: this entire logic needs to be adapted to the new flow eventually
                 let mut requested_piece = false;
                 let available_peers = self.peer_list.connections.iter_mut()
-                    .filter(|(_,peer)| !peer.state().peer_choking && peer.state().currently_downloading.is_none());
+                    .filter(|(_,peer)| !peer.state().peer_choking && !peer.state().is_currently_downloading);
                 for (peer_key,peer) in available_peers {
                     if let Some(next_piece) = self.piece_selector.next_piece(peer_key)  {
                         if peer.state().is_choking {
@@ -338,6 +338,10 @@ impl TorrentState {
                     // Not interested so don't do anything
                     return Ok(());
                 }
+                // TODO: Get rid of this
+                if peer_connection.state().is_currently_downloading {
+                    return Ok(());
+                }
                 if let Some(piece_idx) = self.piece_selector.next_piece(peer_event.peer_key) {
                     if let Err(err) = peer_connection.unchoke() {
                         log::error!("Peer disconnected: {err}");
@@ -426,6 +430,8 @@ impl TorrentState {
             }
             PeerEventType::PieceRequestSucceeded(piece) => {
                 log::debug!("Piece completed!");
+                let peer_connection = connection_mut_or_return!();
+                peer_connection.state_mut().is_currently_downloading = false;
                 self.on_piece_completed(piece.index, piece.memory).await;
             }
             PeerEventType::PieceRequestFailed => todo!(),
