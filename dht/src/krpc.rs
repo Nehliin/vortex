@@ -79,7 +79,9 @@ impl<T: Rpc> QueryBuilder<'_, T> {
         res?;
 
         let response =
-            match tokio::time::timeout(self.timeout.unwrap_or(Duration::from_secs(5)), rx).await {
+            match tokio::time::timeout(self.timeout.unwrap_or(Duration::from_millis(1500)), rx)
+                .await
+            {
                 Ok(Ok(response)) => response?,
                 Err(elapsed) => {
                     self.client.connection_table.remove_rpc(&transaction_id);

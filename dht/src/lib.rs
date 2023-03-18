@@ -156,7 +156,6 @@ impl Dht {
                                     port: this.port,
                                     token: serde_bytes::ByteBuf::from(token),
                                 })
-                                .with_timeout(Duration::from_secs(3))
                                 .send(node.addr)
                                 .await
                                 .is_err()
@@ -392,7 +391,8 @@ impl Dht {
             match self
                 .krpc_client
                 .ping(Ping { id: our_id })
-                .with_timeout(Duration::from_secs(3))
+                // Agressive timeout since good nodes aren't immedietly removed
+                .with_timeout(Duration::from_millis(300))
                 .send(candiate.addr)
                 .await
             {
@@ -432,7 +432,8 @@ impl Dht {
                     id: our_id,
                     target: id,
                 })
-                .with_timeout(Duration::from_secs(3))
+                // Agressive timeout since good nodes aren't immedietly removed
+                .with_timeout(Duration::from_millis(350))
                 .send(candiate.addr)
                 .await
             {
@@ -528,7 +529,8 @@ impl Dht {
                     match self
                         .krpc_client
                         .ping(Ping { id: our_id })
-                        .with_timeout(Duration::from_secs(3))
+                        // Agressive timeout since good nodes aren't immedietly removed
+                        .with_timeout(Duration::from_millis(300))
                         .send(unknown_node.addr)
                         .await
                     {
@@ -544,8 +546,8 @@ impl Dht {
                         Err(krpc::error::Error::Timeout(_))
                             if unknown_node.last_status == NodeStatus::Unknown =>
                         {
-                            // TODO: Early return?
                             unknown_node.last_status = NodeStatus::Bad;
+                            break;
                         }
                         Err(_err) if unknown_node.last_status == NodeStatus::Good => {
                             unknown_node.last_status = NodeStatus::Unknown;
@@ -640,6 +642,8 @@ impl Dht {
                 let response = match self
                     .krpc_client
                     .find_nodes(FindNodes { id: own_id, target })
+                    // Agressive timeout since this will retry
+                    .with_timeout(Duration::from_millis(500))
                     .send(next_to_query.addr)
                     .await
                 {
@@ -718,7 +722,6 @@ impl Dht {
                     id: own_id,
                     info_hash: target.as_bytes(),
                 })
-                .with_timeout(Duration::from_secs(3))
                 .send(node.addr)
                 .await
             {
