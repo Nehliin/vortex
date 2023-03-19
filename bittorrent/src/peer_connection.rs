@@ -348,8 +348,10 @@ fn start_network_thread(
                 currently_downloading,
                 outgoing_tx_clone,
                 peer_event_sender,
-                cancellation_token,
+                cancellation_token.clone(),
             ));
+
+            cancellation_token.cancelled().await;
         });
         log::error!("THREAD EXIT");
     });
