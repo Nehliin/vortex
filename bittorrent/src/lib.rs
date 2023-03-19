@@ -30,6 +30,7 @@ new_key_type! {
 }
 
 struct PeerList {
+    // Hashmap with SocketAddr instead?
     connections: DenseSlotMap<PeerKey, PeerConnection>,
     addrs: Arc<Mutex<SecondaryMap<PeerKey, SocketAddr>>>,
 }
@@ -50,16 +51,22 @@ impl PeerList {
         info_hash: [u8; 20],
         peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     ) {
-        log::debug!("Inserting peer: {addr}");
-        let peer_key = self.connections.insert_with_key(|peer_key| {
-            let connection =
-                PeerConnection::new(peer_key, addr, peer_event_sender.clone()).unwrap();
-            connection.connect(our_peer_id, info_hash).unwrap();
-            connection
-        });
+        if self.connections.len() > 50 {
+            log::warn!("Skip insertion");
+            // Clear out connections that haven't been established
+            self.connections.retain(|_, conn| conn.peer_id.is_some());
+        } else {
+            let peer_key = self.connections.insert_with_key(|peer_key| {
+                log::debug!("[PeerKey: {peer_key:?}] Inserting peer: {addr}");
+                let connection =
+                    PeerConnection::new(peer_key, addr, peer_event_sender.clone()).unwrap();
+                connection.connect(our_peer_id, info_hash).unwrap();
+                connection
+            });
 
-        // TODO: Only do this when connection is completed?
-        self.addrs.lock().insert(peer_key, addr);
+            // TODO: Only do this when connection is completed?
+            self.addrs.lock().insert(peer_key, addr);
+        }
     }
 
     pub fn handle(
