@@ -304,12 +304,15 @@ async fn recv_loop(
                         while let Some(message) = message_decoder.decode(&mut read_buf) {
                             if let Err(err) =  process_incoming(peer_key, message, &peer_event_sender, &currently_downloading, &outgoing_tx).await {
                                 log::error!("[PeerKey: {peer_key:?}] Error processing incoming: {err}");
+                                cancellation_token.cancel();
+                                return;
                             }
                         }
                         read_buf.unsplit(remainder);
                     }
                     Err(err) => {
                         log::error!("[PeerKey: {peer_key:?}] Failed to read from peer connection: {err}");
+                        cancellation_token.cancel();
                         break;
                     }
                 }
