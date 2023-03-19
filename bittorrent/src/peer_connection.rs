@@ -110,9 +110,9 @@ async fn process_incoming(
             length,
         } => {
             // Potentially check for invalid indexes here already
-            log::info!("Peer wants piece with index: {index}, begin: {begin}, length: {length}");
+            log::info!("[PeerKey: {peer_key:?}] Peer wants piece with index: {index}, begin: {begin}, length: {length}");
             if length > SUBPIECE_SIZE {
-                log::error!("Piece request is too large, ignoring. Lenght: {length}");
+                log::error!("[PeerKey: {peer_key:?}] Piece request is too large, ignoring. Lenght: {length}");
                 return Ok(());
             }
             peer_event_sender
@@ -132,27 +132,27 @@ async fn process_incoming(
             length,
         } => {
             log::info!(
-                "Peer cancels request with index: {index}, begin: {begin}, length: {length}"
+                "[PeerKey: {peer_key:?}] Peer cancels request with index: {index}, begin: {begin}, length: {length}"
             );
             //TODO cancel if has yet to been sent I guess
             unimplemented!()
         }
         PeerMessage::Piece { index, begin, data } => {
             log::debug!(
-                "Recived a piece index: {index}, begin: {begin}, length: {}",
+                "[PeerKey: {peer_key:?}] Recived a piece index: {index}, begin: {begin}, length: {}",
                 data.len()
             );
             let downloading = { currently_downloading.borrow_mut().take() };
             if let Some(mut piece) = downloading {
                 if piece.index != index {
-                    log::warn!("Stale piece received, ignoring");
+                    log::warn!("[PeerKey: {peer_key:?}] Stale piece received, ignoring");
                     return Ok(());
                 }
                 // Should this be called unconditionally?
                 /*if let Some(callback) = torrent_state.on_subpiece_callback.as_mut() {
                     callback(&data[..]);
                 }*/
-                piece.on_subpiece(index, begin, &data[..]);
+                piece.on_subpiece(index, begin, &data[..], peer_key);
                 if !piece.is_complete() {
                     // Next subpice to download (that isn't already inflight)
                     if let Some(next_subpice) = piece.next_unstarted_subpice() {
@@ -171,7 +171,7 @@ async fn process_incoming(
                     // Still downloading the same piece
                     *currently_downloading.borrow_mut() = Some(piece);
                 } else {
-                    log::debug!("Piece completed!");
+                    log::debug!("[PeerKey: {peer_key:?}] Piece completed");
                     peer_event_sender
                         .send(PeerEvent {
                             peer_key,
@@ -180,10 +180,11 @@ async fn process_incoming(
                         .await?;
                 }
             } else {
-                log::error!("Recieved unexpected piece message");
+                log::error!("[PeerKey: {peer_key:?}] Recieved unexpected piece message");
             }
         }
         PeerMessage::Handshake { peer_id, info_hash } => {
+            log::debug!("[PeerKey: {peer_key:?}] Handshake message received");
             // TODO: Check if handshake was pending?
             peer_event_sender
                 .send(PeerEvent {
@@ -198,16 +199,19 @@ async fn process_incoming(
 
 async fn send_loop(
     stream: Rc<TcpStream>,
+    peer_key: PeerKey,
     mut outgoing_rc: UnboundedReceiver<PeerMessage>,
     currently_downloading: Rc<RefCell<Option<Piece>>>,
     cancellation_token: CancellationToken,
 ) {
     let mut send_buf = BytesMut::with_capacity(1 << 15);
+    // TODO: consider using drop guards here as well to avoid accidentally forgetting to
+    // get cancel the other task
     loop {
         tokio::select! {
             maybe_message = outgoing_rc.recv() => {
                 let Some(outgoing) = maybe_message else {
-                    log::info!("Nothing more to send, shutting down connection");
+                    log::info!("[PeerKey: {peer_key:?}] Nothing more to send, shutting down connection");
                     cancellation_token.cancel();
                     break;
                 };
@@ -258,11 +262,11 @@ async fn send_loop(
                 // Need to prevent resending the same message
                 send_buf.clear();
                 if let Err(err) = result {
-                    log::error!("Sending PeerMessage failed: {err}");
+                    log::error!("[PeerKey: {peer_key:?}] Sending PeerMessage failed: {err}");
                 }
             },
             _ = cancellation_token.cancelled() => {
-                log::info!("Cancelling tcp stream send loop");
+                log::info!("[PeerKey: {peer_key:?}] Cancelling tcp stream send loop");
                 break;
             }
         }
@@ -288,27 +292,27 @@ async fn recv_loop(
                 read_buf = buf;
                 match result {
                     Ok(0) => {
-                        log::info!("Nothing more to read, shutting down connection");
+                        log::info!("[PeerKey: {peer_key:?}] Nothing more to read, shutting down connection");
                         cancellation_token.cancel();
                         break;
                     }
                     Ok(bytes_read) => {
                         let remainder = read_buf.split_off(bytes_read);
                         while let Some(message) = message_decoder.decode(&mut read_buf) {
-                            if process_incoming(peer_key, message, &peer_event_sender, &currently_downloading, &outgoing_tx).await.is_err() {
-                                log::error!("No one is listening for incoming traffic, channel dropped");
+                            if let Err(err) =  process_incoming(peer_key, message, &peer_event_sender, &currently_downloading, &outgoing_tx).await {
+                                log::error!("[PeerKey: {peer_key:?}] Error processing incoming: {err}");
                             }
                         }
                         read_buf.unsplit(remainder);
                     }
                     Err(err) => {
-                        log::error!("Failed to read from peer connection: {err}");
+                        log::error!("[PeerKey: {peer_key:?}] Failed to read from peer connection: {err}");
                         break;
                     }
                 }
             },
             _ = cancellation_token.cancelled() => {
-                log::info!("Cancelling tcp stream read loop");
+                log::info!("[PeerKey: {peer_key:?}] Cancelling tcp stream read loop");
                 break;
             }
         }
@@ -330,7 +334,7 @@ fn start_network_thread(
             let stream = match TcpStream::connect(addr).await {
                 Ok(stream) => Rc::new(stream),
                 Err(err) => {
-                    log::error!("Connection failed: {err}");
+                    log::error!("[PeerKey: {peer_key:?}] Connection failed: {err}");
                     return;
                 }
             };
@@ -338,6 +342,7 @@ fn start_network_thread(
 
             tokio_uring::spawn(send_loop(
                 stream.clone(),
+                peer_key,
                 outgoing_rc,
                 currently_downloading.clone(),
                 cancellation_token.clone(),
@@ -352,8 +357,9 @@ fn start_network_thread(
             ));
 
             cancellation_token.cancelled().await;
+            log::info!("[PeerKey: {peer_key:?}] Peer thread shutting down");
         });
-        log::error!("THREAD EXIT");
+        log::debug!("[PeerKey: {peer_key:?}] THREAD EXIT");
     });
     outgoing_tx
 }
