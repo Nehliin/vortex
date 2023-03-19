@@ -146,6 +146,7 @@ async fn process_incoming(
             if let Some(mut piece) = downloading {
                 if piece.index != index {
                     log::warn!("[PeerKey: {peer_key:?}] Stale piece received, ignoring");
+                    *currently_downloading.borrow_mut() = Some(piece);
                     return Ok(());
                 }
                 // Should this be called unconditionally?
@@ -215,46 +216,48 @@ async fn send_loop(
                     cancellation_token.cancel();
                     break;
                 };
-                if let PeerMessage::Request {
+                let mut currently_downloading = currently_downloading.borrow_mut();
+                // TODO: Very hacky and implicit, fix this
+                match (&outgoing, currently_downloading.is_none()) {
+                    (PeerMessage::Request {
                         index,
                         begin: _,
                         length,
-                    } = outgoing
-                {
-                    let mut currently_downloading = currently_downloading.borrow_mut();
-                    // Split to subpieces and populate currently_downloading
-                    // Don't start on a new piece before the current one is completed
-                    assert!(currently_downloading.is_none());
-                    let mut piece = Piece::new(index, length as u32);
-                    // First subpiece that isn't already completed or inflight
-                    let last_subpiece_index = piece.completed_subpieces.len() - 1;
-                    // Should have 64 in flight subpieces at all times
-                    for _ in 0..piece.completed_subpieces.len().min(64) {
-                        if let Some(subindex) = piece.next_unstarted_subpice() {
-                            piece.inflight_subpieces.set(subindex, true);
-                            let subpiece_request = PeerMessage::Request {
-                                index: piece.index,
-                                begin: subindex as i32 * SUBPIECE_SIZE,
-                                length: if last_subpiece_index == subindex {
-                                    piece.last_subpiece_length
-                                } else {
-                                    SUBPIECE_SIZE
-                                },
-                            };
-                            subpiece_request.encode(&mut send_buf);
-                            // TODO: This shouldn't be needed?
-                            if subindex == last_subpiece_index {
-                                break;
+                    }, false) => {
+                        // Subpiece splitting
+                        // Don't start on a new piece before the current one is completed
+                        let mut piece = Piece::new(*index, *length as u32);
+                        // First subpiece that isn't already completed or inflight
+                        let last_subpiece_index = piece.completed_subpieces.len() - 1;
+                        // Should have 64 in flight subpieces at all times
+                        for _ in 0..piece.completed_subpieces.len().min(64) {
+                            if let Some(subindex) = piece.next_unstarted_subpice() {
+                                piece.inflight_subpieces.set(subindex, true);
+                                let subpiece_request = PeerMessage::Request {
+                                    index: piece.index,
+                                    begin: subindex as i32 * SUBPIECE_SIZE,
+                                    length: if last_subpiece_index == subindex {
+                                        piece.last_subpiece_length
+                                    } else {
+                                        SUBPIECE_SIZE
+                                    },
+                                };
+                                subpiece_request.encode(&mut send_buf);
+                                // TODO: This shouldn't be needed?
+                                if subindex == last_subpiece_index {
+                                    break;
+                                }
                             }
                         }
+                        *currently_downloading = Some(piece);
                     }
-                    *currently_downloading = Some(piece);
-                } else {
-                    // TODO Reuse buf and also try to coalece messages
-                    // and use write vectored instead. I.e try to receive 3-5
-                    // and write vectored. Have a timeout so it's not stalled forever
-                    // and writes less if no more msgs are incoming
-                    outgoing.encode(&mut send_buf);
+                    _ => {
+                        // TODO Reuse buf and also try to coalece messages
+                        // and use write vectored instead. I.e try to receive 3-5
+                        // and write vectored. Have a timeout so it's not stalled forever
+                        // and writes less if no more msgs are incoming
+                        outgoing.encode(&mut send_buf);
+                    }
                 }
                 // Write all since the buffer has only been filled with encoded data
                 let (result, buf) = stream.write_all(send_buf).await;
