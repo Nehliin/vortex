@@ -526,10 +526,12 @@ impl TorrentManager {
 
             while let Some(event) = peer_event_rc.recv().await {
                 // Spawn as separate tasks potentially
-                torrent_state
+                if let Err(err) = torrent_state
                     .handle_event(&our_peer_id, event, &peer_event_tx_clone)
                     .await
-                    .unwrap();
+                {
+                    log::error!("Failed to process peer event: {err}");
+                }
             }
         });
 
