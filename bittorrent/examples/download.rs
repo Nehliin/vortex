@@ -16,7 +16,7 @@ fn main() {
     tokio_uring::start(async move {
         let mut torrent_manager = TorrentManager::new("assets/test-file-1.torrent").await;
         let peer_list = torrent_manager.peer_list_handle();
-        peer_list.insert("172.17.0.3:51413".parse().unwrap());
+        peer_list.insert("172.17.0.2:51413".parse().unwrap());
 
         log::info!("We are attempting a connection");
 
@@ -25,6 +25,7 @@ fn main() {
 
         // 1. 766s (with spawning write in separate task)
         // 2. 766s (without spawning write in separate task)
+        // 3. 772s 
         let download_time = Instant::now();
         torrent_manager.download_complete().await;
         let elapsed = download_time.elapsed();
