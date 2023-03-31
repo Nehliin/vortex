@@ -315,7 +315,7 @@ async fn send_loop(
                         index,
                         begin: _,
                         length,
-                    }, false) => {
+                    }, true) => {
                         // Subpiece splitting
                         // Don't start on a new piece before the current one is completed
                         let mut piece = Piece::new(*index, *length as u32);
@@ -351,6 +351,7 @@ async fn send_loop(
                         outgoing.encode(&mut send_buf);
                     }
                 }
+                drop(currently_downloading);
                 // Write all since the buffer has only been filled with encoded data
                 let (result, buf) = stream.write_all(send_buf).await;
                 send_buf = buf;
@@ -461,7 +462,7 @@ async fn setup_peer_connection(
     let peer_id = match handshake(our_peer_id, info_hash, &stream).await {
         Ok(peer_id) => peer_id,
         Err(err) => {
-            log::error!("HANDSHAKE: {err}");
+            log::debug!("Handshake failed: {err}");
             return Err(err);
         }
     };
