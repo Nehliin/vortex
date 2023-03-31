@@ -112,7 +112,9 @@ async fn process_incoming(
             // Potentially check for invalid indexes here already
             log::info!("[PeerKey: {peer_key:?}] Peer wants piece with index: {index}, begin: {begin}, length: {length}");
             if length > SUBPIECE_SIZE {
-                log::error!("[PeerKey: {peer_key:?}] Piece request is too large, ignoring. Lenght: {length}");
+                log::error!(
+                    "[PeerKey: {peer_key:?}] Piece request is too large, ignoring. Lenght: {length}"
+                );
                 return Ok(());
             }
             peer_event_sender
@@ -149,10 +151,6 @@ async fn process_incoming(
                     *currently_downloading.borrow_mut() = Some(piece);
                     return Ok(());
                 }
-                // Should this be called unconditionally?
-                /*if let Some(callback) = torrent_state.on_subpiece_callback.as_mut() {
-                    callback(&data[..]);
-                }*/
                 piece.on_subpiece(index, begin, &data[..], peer_key);
                 if !piece.is_complete() {
                     // Next subpice to download (that isn't already inflight)
@@ -184,20 +182,114 @@ async fn process_incoming(
                 log::error!("[PeerKey: {peer_key:?}] Recieved unexpected piece message");
             }
         }
-        PeerMessage::Handshake { peer_id, info_hash } => {
-            log::debug!("[PeerKey: {peer_key:?}] Handshake message received");
-            // TODO: Check if handshake was pending?
-            peer_event_sender
-                .send(PeerEvent {
-                    peer_key,
-                    event_type: PeerEventType::HandshakeComplete { peer_id, info_hash },
-                })
-                .await?;
-        }
     }
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct PeerConnection {
+    pub peer_id: [u8; 20],
+    pub peer_addr: SocketAddr,
+    state: PeerConnectionState,
+    outgoing: UnboundedSender<PeerMessage>,
+}
+
+impl PeerConnection {
+    pub fn new(
+        peer_id: [u8; 20],
+        peer_addr: SocketAddr,
+        outgoing_tx: UnboundedSender<PeerMessage>,
+        cancellation_token: CancellationToken,
+    ) -> PeerConnection {
+        PeerConnection {
+            peer_id,
+            peer_addr,
+            state: PeerConnectionState::new(cancellation_token),
+            outgoing: outgoing_tx,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_alive(&self) -> bool {
+        !self.outgoing.is_closed()
+    }
+
+    #[inline(always)]
+    pub fn choke(&mut self) -> anyhow::Result<()> {
+        self.state.is_choking = true;
+        self.outgoing
+            .send(PeerMessage::Choke)
+            .context("Failed to queue outoing choke msg")
+    }
+
+    #[inline(always)]
+    pub fn unchoke(&mut self) -> anyhow::Result<()> {
+        self.state.is_choking = false;
+        self.outgoing
+            .send(PeerMessage::Unchoke)
+            .context("Failed to queue outoing unchoke msg")
+    }
+
+    #[inline(always)]
+    pub fn interested(&mut self) -> anyhow::Result<()> {
+        self.state.is_interested = true;
+        self.outgoing
+            .send(PeerMessage::Interested)
+            .context("Failed to queue outoing interested msg")
+    }
+
+    #[inline(always)]
+    pub fn not_interested(&mut self) -> anyhow::Result<()> {
+        self.state.is_interested = false;
+        self.outgoing
+            .send(PeerMessage::NotInterested)
+            .context("Failed to queue outoing not interestead msg")
+    }
+
+    #[inline(always)]
+    pub fn have(&self, index: i32) -> anyhow::Result<()> {
+        self.outgoing
+            .send(PeerMessage::Have { index })
+            .context("Failed to queue outoing have msg")
+    }
+
+    pub fn request_piece(&mut self, index: i32, length: u32) -> anyhow::Result<()> {
+        // Don't start on a new piece before the current one is completed
+        assert!(!self.state.is_currently_downloading);
+        self.state.is_currently_downloading = true;
+        // Subpiece spliting happens on the io thread
+        self.outgoing
+            .send(PeerMessage::Request {
+                index,
+                // Begin is calculated based off index and piece length
+                // in the io thread
+                begin: 0,
+                length: length as i32,
+            })
+            .context("Failed to queue outgoing msg")?;
+
+        Ok(())
+    }
+
+    pub fn piece(&self, index: i32, begin: i32, data: Vec<u8>) -> anyhow::Result<()> {
+        self.outgoing
+            .send(PeerMessage::Piece {
+                index,
+                begin,
+                data: data.into(),
+            })
+            .context("Failed to queue outgoing msg")
+    }
+
+    // Remove these
+    pub fn state(&self) -> &PeerConnectionState {
+        &self.state
+    }
+
+    pub fn state_mut(&mut self) -> &mut PeerConnectionState {
+        &mut self.state
+    }
+}
 async fn send_loop(
     stream: Rc<TcpStream>,
     peer_key: PeerKey,
@@ -325,164 +417,170 @@ async fn recv_loop(
     }
 }
 
-fn start_network_thread(
-    peer_key: PeerKey,
-    addr: SocketAddr,
-    cancellation_token: CancellationToken,
+async fn handshake(
+    our_peer_id: [u8; 20],
+    info_hash: [u8; 20],
+    stream: &TcpStream,
+) -> anyhow::Result<[u8; 20]> {
+    let mut buf: Vec<u8> = Vec::with_capacity(68);
+    const PROTOCOL: &[u8] = b"BitTorrent protocol";
+    buf.put_u8(PROTOCOL.len() as u8);
+    buf.put_slice(PROTOCOL);
+    buf.put_slice(&[0_u8; 8] as &[u8]);
+    buf.put_slice(&info_hash as &[u8]);
+    buf.put_slice(&our_peer_id as &[u8]);
+    let (res, buf) = stream.write_all(buf).await;
+    res?;
+    let (res, buf) = stream.read(buf).await;
+    let read_bytes = res?;
+    anyhow::ensure!(read_bytes == 68);
+    let mut buf = buf.as_slice();
+    let str_len = buf.get_u8();
+    anyhow::ensure!(str_len == 19);
+    anyhow::ensure!(buf.chunk().get(..str_len as usize) == Some(b"BitTorrent protocol" as &[u8]));
+    buf.advance(str_len as usize);
+    // Skip extensions for now
+    buf.advance(8);
+    let peer_info_hash: [u8; 20] = buf.chunk()[..20].try_into()?;
+    anyhow::ensure!(info_hash == peer_info_hash);
+    buf.advance(20_usize);
+    let peer_id = buf.chunk()[..20].try_into()?;
+    buf.advance(20_usize);
+    anyhow::ensure!(!buf.has_remaining());
+    Ok(peer_id)
+}
+
+async fn setup_peer_connection(
+    stream: TcpStream,
+    our_peer_id: [u8; 20],
+    info_hash: [u8; 20],
+    peer_addr: SocketAddr,
     peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
-) -> UnboundedSender<PeerMessage> {
-    let (outgoing_tx, outgoing_rc): (UnboundedSender<PeerMessage>, UnboundedReceiver<PeerMessage>) =
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<()> {
+    let peer_id = match handshake(our_peer_id, info_hash, &stream).await {
+        Ok(peer_id) => peer_id,
+        Err(err) => {
+            log::error!("HANDSHAKE: {err}");
+            return Err(err);
+        }
+    };
+    let (outgoing_tx, outgoing_rc) = tokio::sync::mpsc::unbounded_channel();
+    let connection = PeerConnection::new(
+        peer_id,
+        peer_addr,
+        outgoing_tx.clone(),
+        cancellation_token.clone(),
+    );
+    let (accept_tx, accept_rc) = tokio::sync::oneshot::channel();
+    peer_event_sender
+        .send(PeerEvent {
+            peer_key: PeerKey::null(),
+            event_type: PeerEventType::ConnectionEstablished {
+                connection,
+                accept: accept_tx,
+            },
+        })
+        .await
+        .context("Failed to send connection established")?;
+
+    let Ok(peer_key) = accept_rc.await else {
+        log::debug!("[Peer {peer_addr}]: Connection not accepted");
+        cancellation_token.cancel();
+        return Ok(());
+    };
+
+    let stream = Rc::new(stream);
+    let currently_downloading = Rc::new(RefCell::new(None));
+    let outgoing_tx_clone = outgoing_tx.clone();
+    tokio_uring::spawn(send_loop(
+        stream.clone(),
+        peer_key,
+        outgoing_rc,
+        currently_downloading.clone(),
+        cancellation_token.clone(),
+    ));
+    tokio_uring::spawn(recv_loop(
+        stream,
+        peer_key,
+        currently_downloading.clone(),
+        outgoing_tx_clone,
+        peer_event_sender.clone(),
+        cancellation_token.clone(),
+    ));
+    Ok(())
+}
+// TODO: return cancellation token here
+pub fn start_network_thread(
+    our_peer_id: [u8; 20],
+    info_hash: [u8; 20],
+    bind_addr: SocketAddr,
+    peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
+) -> UnboundedSender<SocketAddr> {
+    let (connect_tx, mut connect_rc): (UnboundedSender<SocketAddr>, UnboundedReceiver<SocketAddr>) =
         tokio::sync::mpsc::unbounded_channel();
 
-    let outgoing_tx_clone = outgoing_tx.clone();
     std::thread::spawn(move || {
         tokio_uring::start(async move {
-            let stream = match TcpStream::connect(addr).await {
-                Ok(stream) => Rc::new(stream),
-                Err(err) => {
-                    log::error!("[PeerKey: {peer_key:?}] Connection failed: {err}");
-                    return;
+            log::info!("Starting network thread: {bind_addr}");
+            let root_token = CancellationToken::new();
+            // Accept incoming task
+            let peer_event_sender_clone = peer_event_sender.clone();
+            let root_token_clone = root_token.clone();
+            tokio_uring::spawn(async move {
+                let listener = TcpListener::bind(bind_addr).unwrap();
+                while let Ok((stream, peer_addr)) = listener.accept().await {
+                    let peer_token = root_token_clone.child_token();
+                    if let Err(err) = setup_peer_connection(
+                        stream,
+                        our_peer_id,
+                        info_hash,
+                        peer_addr,
+                        peer_event_sender_clone.clone(),
+                        peer_token,
+                    )
+                    .await
+                    {
+                        log::error!("[Peer: {peer_addr}] setup fail: {err}");
+                    }
                 }
-            };
-            let currently_downloading = Rc::new(RefCell::new(None));
+            });
 
-            tokio_uring::spawn(send_loop(
-                stream.clone(),
-                peer_key,
-                outgoing_rc,
-                currently_downloading.clone(),
-                cancellation_token.clone(),
-            ));
-            tokio_uring::spawn(recv_loop(
-                stream,
-                peer_key,
-                currently_downloading,
-                outgoing_tx_clone,
-                peer_event_sender,
-                cancellation_token.clone(),
-            ));
-
-            cancellation_token.cancelled().await;
-            log::info!("[PeerKey: {peer_key:?}] Peer thread shutting down");
+            while let Some(peer_addr) = connect_rc.recv().await {
+                let child_token = root_token.child_token();
+                let event_sender = peer_event_sender.clone();
+                tokio_uring::spawn(async move {
+                    match tokio::time::timeout(
+                        Duration::from_secs(3),
+                        TcpStream::connect(peer_addr),
+                    )
+                    .await
+                    {
+                        Ok(Ok(stream)) => {
+                            log::debug!("TCP connect successful: {peer_addr}");
+                            if let Err(err) = setup_peer_connection(
+                                stream,
+                                our_peer_id,
+                                info_hash,
+                                peer_addr,
+                                event_sender,
+                                child_token,
+                            )
+                            .await
+                            {
+                                log::error!("[Peer: {peer_addr}] setup fail: {err}");
+                            }
+                        }
+                        Ok(Err(err)) => {
+                            log::warn!("[Peer: {peer_addr}] Connection failed: {err}");
+                        }
+                        Err(_) => {
+                            log::warn!("[Peer: {peer_addr}] Connection timedout");
+                        }
+                    };
+                });
+            }
         });
-        log::debug!("[PeerKey: {peer_key:?}] THREAD EXIT");
     });
-    outgoing_tx
-}
-
-#[derive(Debug)]
-pub struct PeerConnection {
-    pub peer_id: Option<[u8; 20]>,
-    state: PeerConnectionState,
-    outgoing: UnboundedSender<PeerMessage>,
-}
-
-impl PeerConnection {
-    pub fn new(
-        peer_key: PeerKey,
-        addr: SocketAddr,
-        peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
-    ) -> anyhow::Result<PeerConnection> {
-        let cancellation_token = CancellationToken::new();
-        let outgoing_tx = start_network_thread(
-            peer_key,
-            addr,
-            cancellation_token.child_token(),
-            peer_event_sender,
-        );
-
-        let connection = PeerConnection {
-            peer_id: None,
-            state: PeerConnectionState::new(cancellation_token),
-            outgoing: outgoing_tx,
-        };
-
-        Ok(connection)
-    }
-
-    #[inline(always)]
-    pub fn connect(&self, our_id: [u8; 20], info_hash: [u8; 20]) -> anyhow::Result<()> {
-        self.outgoing
-            .send(PeerMessage::Handshake {
-                peer_id: our_id,
-                info_hash,
-            })
-            .context("Failed to queue outgoing handshake")
-    }
-
-    #[inline(always)]
-    pub fn choke(&mut self) -> anyhow::Result<()> {
-        self.state.is_choking = true;
-        self.outgoing
-            .send(PeerMessage::Choke)
-            .context("Failed to queue outoing choke msg")
-    }
-
-    #[inline(always)]
-    pub fn unchoke(&mut self) -> anyhow::Result<()> {
-        self.state.is_choking = false;
-        self.outgoing
-            .send(PeerMessage::Unchoke)
-            .context("Failed to queue outoing unchoke msg")
-    }
-
-    #[inline(always)]
-    pub fn interested(&mut self) -> anyhow::Result<()> {
-        self.state.is_interested = true;
-        self.outgoing
-            .send(PeerMessage::Interested)
-            .context("Failed to queue outoing interested msg")
-    }
-
-    #[inline(always)]
-    pub fn not_interested(&mut self) -> anyhow::Result<()> {
-        self.state.is_interested = false;
-        self.outgoing
-            .send(PeerMessage::NotInterested)
-            .context("Failed to queue outoing not interestead msg")
-    }
-
-    #[inline(always)]
-    pub fn have(&self, index: i32) -> anyhow::Result<()> {
-        self.outgoing
-            .send(PeerMessage::Have { index })
-            .context("Failed to queue outoing have msg")
-    }
-
-    pub fn request_piece(&mut self, index: i32, length: u32) -> anyhow::Result<()> {
-        // Don't start on a new piece before the current one is completed
-        assert!(!self.state.is_currently_downloading);
-        self.state.is_currently_downloading = true;
-        // Subpiece spliting happens on the io thread
-        self.outgoing
-            .send(PeerMessage::Request {
-                index,
-                // Begin is calculated based off index and piece length
-                // in the io thread
-                begin: 0,
-                length: length as i32,
-            })
-            .context("Failed to queue outgoing msg")?;
-
-        Ok(())
-    }
-
-    pub fn piece(&self, index: i32, begin: i32, data: Vec<u8>) -> anyhow::Result<()> {
-        self.outgoing
-            .send(PeerMessage::Piece {
-                index,
-                begin,
-                data: data.into(),
-            })
-            .context("Failed to queue outgoing msg")
-    }
-
-    // Remove these
-    pub fn state(&self) -> &PeerConnectionState {
-        &self.state
-    }
-
-    pub fn state_mut(&mut self) -> &mut PeerConnectionState {
-        &mut self.state
-    }
+    connect_tx
 }

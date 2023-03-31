@@ -1,8 +1,6 @@
-use std::{fmt::Debug, net::SocketAddr};
-
 use bitvec::{prelude::Msb0, vec::BitVec};
 
-use crate::{PeerKey, Piece};
+use crate::{peer_connection::PeerConnection, PeerKey, Piece};
 
 #[derive(Debug)]
 pub enum PeerEventType {
@@ -15,34 +13,22 @@ pub enum PeerEventType {
     /// The peer is not interested in us
     NotInterested,
     /// Peer have downloaded a piece
-    Have {
-        index: i32,
-    },
+    Have { index: i32 },
     /// Peer pieces
     Bitfield(BitVec<u8, Msb0>),
     /// Peer requests a piece
-    PieceRequest {
-        index: i32,
-        begin: i32,
-        length: i32,
-    },
+    PieceRequest { index: i32, begin: i32, length: i32 },
     /// Piece request completed
     PieceRequestSucceeded(Piece),
     /// Piece request failed
-    PieceRequestFailed,
-    /// Connection handshake completed succesfully
-    HandshakeComplete {
-        peer_id: [u8; 20],
-        // TODO: Perhaps this can be checked before this is sent?
-        info_hash: [u8; 20],
-    },
+    PieceRequestFailed { index: i32 },
     // These sorts of events should probably live outside this particular enum
     // this + start + stop + total stats? probably lives better somewhere else
-    // connect fail could be another event
-    NewConnection {
-        addr: SocketAddr,
+    ConnectionEstablished {
+        connection: PeerConnection,
+        accept: tokio::sync::oneshot::Sender<PeerKey>,
     },
-    // TODO: handshake failed
+    // TODO: Connection failed
     // TODO: peer stats
 }
 
