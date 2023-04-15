@@ -72,5 +72,6 @@ fn main() {
         });
 
         torrent_manager.download_complete().await;
+        log::info!("Download complete!");
     });
 }
