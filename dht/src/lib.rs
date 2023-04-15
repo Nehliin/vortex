@@ -321,6 +321,7 @@ impl Dht {
                 let result = self
                     .krpc_client
                     .ping(Ping { id: our_id })
+                    .with_timeout(Duration::from_secs(3))
                     .send(node.addr)
                     .await;
                 (node, result)
