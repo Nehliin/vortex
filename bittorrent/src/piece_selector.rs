@@ -39,7 +39,7 @@ impl PieceSelector {
             inflight_pieces,
             last_piece_length: last_piece_length as u32,
             piece_length: piece_length as u32,
-            peer_pieces: SecondaryMap::new(),
+            peer_pieces: Default::default(),
         }
     }
 
@@ -58,7 +58,10 @@ impl PieceSelector {
         available_pieces &= !tmp;
 
         if available_pieces.not_any() {
-            log::error!("There are no available pieces!");
+            log::error!(
+                "There are no available pieces, inflight_pieces: {}",
+                self.inflight_pieces.count_ones()
+            );
             return None;
         }
 
@@ -134,6 +137,12 @@ impl PieceSelector {
     }
 
     #[inline]
+    pub fn mark_not_inflight(&mut self, index: usize) {
+        debug_assert!(self.inflight_pieces[index]);
+        self.inflight_pieces.set(index, false);
+    }
+
+    #[inline]
     pub fn completed_all(&self) -> bool {
         self.completed_pieces.all()
     }
@@ -141,6 +150,11 @@ impl PieceSelector {
     #[inline]
     pub fn has_completed(&self, index: usize) -> bool {
         self.completed_pieces[index]
+    }
+
+    #[inline]
+    pub fn is_inflight(&self, index: usize) -> bool {
+        self.inflight_pieces[index]
     }
 
     #[inline]

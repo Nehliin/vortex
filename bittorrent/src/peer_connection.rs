@@ -292,6 +292,7 @@ impl PeerConnection {
         &mut self.state
     }
 }
+
 async fn send_loop(
     stream: Rc<TcpStream>,
     peer_key: PeerKey,
@@ -507,13 +508,48 @@ async fn setup_peer_connection(
     tokio_uring::spawn(recv_loop(
         stream,
         peer_key,
-        currently_downloading,
+        currently_downloading.clone(),
         outgoing_tx_clone,
         peer_event_sender.clone(),
         cancellation_token.clone(),
     ));
+
+    let cancellation_token_clone = cancellation_token.clone();
+    let peer_event_sender_clone = peer_event_sender.clone();
+    tokio_uring::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(7));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut prev_idx;
+        loop {
+            // TODO select on cancellation token
+            prev_idx = currently_downloading
+                .borrow()
+                .as_ref()
+                .map(|piece| piece.index);
+            if cancellation_token_clone.is_cancelled() {
+                break;
+            }
+            interval.tick().await;
+            let current_idx = currently_downloading
+                .borrow()
+                .as_ref()
+                .map(|piece| piece.index);
+            if prev_idx == current_idx && current_idx.is_some() {
+                peer_event_sender_clone
+                    .send(PeerEvent {
+                        peer_key,
+                        event_type: PeerEventType::PieceRequestFailed {
+                            index: current_idx.unwrap(),
+                        },
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+    });
     Ok(())
 }
+
 // TODO: return cancellation token here
 pub fn start_network_thread(
     our_peer_id: [u8; 20],

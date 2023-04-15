@@ -31,7 +31,7 @@ new_key_type! {
 
 struct PeerList {
     connections: SlotMap<PeerKey, PeerConnection>,
-    // Only want to pay the price of locking when inserting or removing
+    // Only want to pay the price of locking when inserting
     addrs: Arc<RwLock<SecondaryMap<PeerKey, SocketAddr>>>,
 }
 
@@ -440,7 +440,19 @@ impl TorrentState {
                 peer_connection.state_mut().is_currently_downloading = false;
                 self.on_piece_completed(piece.index, piece.memory).await;
             }
-            PeerEventType::PieceRequestFailed { index: _ } => todo!(),
+            PeerEventType::PieceRequestFailed { index } => {
+                log::warn!("[PeerKey: {peer_key:?}] Piece {index} failed");
+                // TODO: do we want to double check the peer actually is downloading the piece
+                // here?
+                if self.piece_selector.is_inflight(index as usize) {
+                    // if the recv/send tasks are cancelled mid piece download
+                    // the task will conitnue sending request failed for the same piece
+                    // this will work as expected the first time but the second time another peer
+                    // might have picked up the piece thus triggering the assertion?
+                    self.piece_selector.mark_not_inflight(index as usize);
+                    self.peer_list.connections.remove(peer_key);
+                }
+            }
         }
         Ok(())
     }
