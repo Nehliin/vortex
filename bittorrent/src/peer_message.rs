@@ -4,33 +4,15 @@ use bytes::{Buf, BufMut, Bytes};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum PeerMessage {
-    Handshake {
-        peer_id: [u8; 20],
-        info_hash: [u8; 20],
-    },
     Choke,
     Unchoke,
     Interested,
     NotInterested,
-    Have {
-        index: i32,
-    },
+    Have { index: i32 },
     Bitfield(BitVec<u8, Msb0>),
-    Request {
-        index: i32,
-        begin: i32,
-        length: i32,
-    },
-    Cancel {
-        index: i32,
-        begin: i32,
-        length: i32,
-    },
-    Piece {
-        index: i32,
-        begin: i32,
-        data: Bytes,
-    },
+    Request { index: i32, begin: i32, length: i32 },
+    Cancel { index: i32, begin: i32, length: i32 },
+    Piece { index: i32, begin: i32, data: Bytes },
 }
 
 impl PeerMessage {
@@ -55,7 +37,6 @@ impl PeerMessage {
             PeerMessage::Bitfield(bitfield) => 1 + bitfield.as_raw_slice().len(),
             PeerMessage::Request { .. } | PeerMessage::Cancel { .. } => 13,
             PeerMessage::Piece { data, .. } => 13 + data.len(),
-            PeerMessage::Handshake { .. } => 68,
         }
     }
 
@@ -116,14 +97,6 @@ impl PeerMessage {
                 buf.put_i32(begin);
                 buf.put_slice(&data);
             }
-            PeerMessage::Handshake { peer_id, info_hash } => {
-                const PROTOCOL: &[u8] = b"BitTorrent protocol";
-                buf.put_u8(PROTOCOL.len() as u8);
-                buf.put_slice(PROTOCOL);
-                buf.put_slice(&[0_u8; 8] as &[u8]);
-                buf.put_slice(&info_hash as &[u8]);
-                buf.put_slice(&peer_id as &[u8]);
-            }
         }
     }
 }
@@ -177,21 +150,10 @@ impl<'a> Arbitrary<'a> for PeerMessage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PeerMessageDecoder {
     length: Option<i32>,
     data: Bytes,
-    pending_handshake: bool,
-}
-
-impl Default for PeerMessageDecoder {
-    fn default() -> Self {
-        Self {
-            length: Default::default(),
-            data: Default::default(),
-            pending_handshake: true,
-        }
-    }
 }
 
 impl PeerMessageDecoder {
@@ -227,25 +189,6 @@ impl PeerMessageDecoder {
                     }
                 }
                 None => {
-                    if self.pending_handshake && data.remaining() >= 68 {
-                        // TODO Move me and don't return errors here send handshake fail event
-                        let str_len = data.get_u8();
-                        //anyhow::ensure!(str_len == 19);
-                        assert!(str_len == 19);
-                        assert!(
-                            data.chunk().get(..str_len as usize)
-                                == Some(b"BitTorrent protocol" as &[u8])
-                        );
-                        data.advance(str_len as usize);
-                        // Skip extensions for now
-                        data.advance(8);
-                        let info_hash = data.chunk()[..20].try_into().unwrap();
-                        data.advance(20_usize);
-                        let peer_id = data.chunk()[..20].try_into().unwrap();
-                        data.advance(20_usize);
-                        self.pending_handshake = false;
-                        break Some(PeerMessage::Handshake { peer_id, info_hash });
-                    }
                     if data.remaining() >= std::mem::size_of::<i32>() {
                         let msg_length = data.get_i32();
                         if msg_length > 0 {

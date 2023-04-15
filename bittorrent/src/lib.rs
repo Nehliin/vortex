@@ -7,12 +7,12 @@ use std::{net::SocketAddr, path::Path, sync::Arc, time::Instant};
 
 use bitvec::prelude::*;
 use lava_torrent::torrent::v1::Torrent;
-use parking_lot::Mutex;
-use peer_connection::PeerConnection;
+use parking_lot::RwLock;
+use peer_connection::{start_network_thread, PeerConnection};
 use peer_events::{PeerEvent, PeerEventType};
 use piece_selector::PieceSelector;
 use sha1::{Digest, Sha1};
-use slotmap::{new_key_type, DenseSlotMap, Key, SecondaryMap};
+use slotmap::{new_key_type, SecondaryMap, SlotMap};
 use tokio::sync::oneshot;
 
 use crate::drive_io::FileStore;
@@ -30,9 +30,9 @@ new_key_type! {
 }
 
 struct PeerList {
-    // Hashmap with SocketAddr instead?
-    connections: DenseSlotMap<PeerKey, PeerConnection>,
-    addrs: Arc<Mutex<SecondaryMap<PeerKey, SocketAddr>>>,
+    connections: SlotMap<PeerKey, PeerConnection>,
+    // Only want to pay the price of locking when inserting or removing
+    addrs: Arc<RwLock<SecondaryMap<PeerKey, SocketAddr>>>,
 }
 
 impl PeerList {
@@ -43,51 +43,26 @@ impl PeerList {
         }
     }
 
-    // TODO rename
-    pub fn insert_peer(
-        &mut self,
-        addr: SocketAddr,
-        our_peer_id: [u8; 20],
-        info_hash: [u8; 20],
-        peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
-    ) {
-        if self.connections.len() > 50 {
-            log::warn!("Skip insertion");
-            // Clear out connections that haven't been established
-            self.connections.retain(|_, conn| conn.peer_id.is_some());
-        } else {
-            let peer_key = self.connections.insert_with_key(|peer_key| {
-                log::debug!("[PeerKey: {peer_key:?}] Inserting peer: {addr}");
-                let connection =
-                    PeerConnection::new(peer_key, addr, peer_event_sender.clone()).unwrap();
-                connection.connect(our_peer_id, info_hash).unwrap();
-                connection
-            });
+    pub fn insert(&mut self, peer_connection: PeerConnection) -> PeerKey {
+        let peer_addr = peer_connection.peer_addr;
+        let peer_key = self.connections.insert(peer_connection);
+        self.addrs.write().insert(peer_key, peer_addr);
+        peer_key
+    }
 
-            // TODO: Only do this when connection is completed?
-            self.addrs.lock().insert(peer_key, addr);
+    fn is_full(&mut self) -> bool {
+        if self.connections.len() > 50 {
+            self.connections.retain(|_, conn| conn.is_alive());
         }
+        self.connections.len() > 50
     }
 
     pub fn handle(
         &self,
-        peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
+        connect_tx: tokio::sync::mpsc::UnboundedSender<SocketAddr>,
     ) -> PeerListHandle {
-        let (tx, mut rc) = tokio::sync::mpsc::unbounded_channel();
-        // TODO consider cutting out the middleman if no new event is needed (other than peer event)
-        tokio_uring::spawn(async move {
-            while let Some(addr) = rc.recv().await {
-                peer_event_sender
-                    .send(PeerEvent {
-                        peer_key: PeerKey::null(),
-                        event_type: PeerEventType::NewConnection { addr },
-                    })
-                    .await
-                    .unwrap();
-            }
-        });
         PeerListHandle {
-            peer_sender: tx,
+            connect_tx,
             addrs: self.addrs.clone(),
         }
     }
@@ -95,17 +70,24 @@ impl PeerList {
 
 #[derive(Clone)]
 pub struct PeerListHandle {
-    peer_sender: tokio::sync::mpsc::UnboundedSender<SocketAddr>,
-    addrs: Arc<Mutex<SecondaryMap<PeerKey, SocketAddr>>>,
+    connect_tx: tokio::sync::mpsc::UnboundedSender<SocketAddr>,
+    addrs: Arc<RwLock<SecondaryMap<PeerKey, SocketAddr>>>,
 }
 
 impl PeerListHandle {
-    pub fn insert(&self, peer: SocketAddr) {
-        self.peer_sender.send(peer).unwrap()
+    pub fn insert(&self, peer_addr: SocketAddr) {
+        if !self.addrs.read().iter().any(|(_, addr)| *addr == peer_addr) {
+            self.connect_tx.send(peer_addr).unwrap()
+        }
     }
 
     pub fn peers(&self) -> Vec<SocketAddr> {
-        self.addrs.lock().values().copied().collect()
+        self.addrs
+            .read()
+            .iter()
+            .map(|(_, addr)| addr)
+            .copied()
+            .collect()
     }
 }
 
@@ -304,13 +286,7 @@ impl TorrentState {
         }
     }
 
-    async fn handle_event(
-        &mut self,
-        our_peer_id: &[u8; 20],
-        peer_event: PeerEvent,
-        // Need to propagate this when new connections are incoming
-        peer_event_sender: &tokio::sync::mpsc::Sender<PeerEvent>,
-    ) -> anyhow::Result<()> {
+    async fn handle_event(&mut self, peer_event: PeerEvent) -> anyhow::Result<()> {
         macro_rules! connection_mut_or_return {
             () => {
                 {
@@ -325,22 +301,21 @@ impl TorrentState {
         }
         let peer_key = peer_event.peer_key;
         match peer_event.event_type {
-            // TODO: expected flow should probably convert NewConnecition event ->
-            // ConnectionEstablished and have a channel interacting directly with
-            // the network io thread
-            PeerEventType::NewConnection { addr } => self.peer_list.insert_peer(
-                addr,
-                *our_peer_id,
-                self.torrent_info.info_hash_bytes().try_into().unwrap(),
-                peer_event_sender.clone(),
-            ),
-            PeerEventType::HandshakeComplete { peer_id, info_hash } => {
-                let peer_connection = connection_mut_or_return!();
-                peer_connection.peer_id = Some(peer_id);
-                // TODO handle this more gracefully
-                assert_eq!(&info_hash, self.torrent_info.info_hash_bytes().as_slice());
-                log::info!("[PeerKey: {peer_key:?}] Handshake complete");
-                peer_connection.interested()?;
+            PeerEventType::ConnectionEstablished {
+                mut connection,
+                accept,
+            } => {
+                if !self.peer_list.is_full() {
+                    connection.interested()?;
+                    let peer_key = self.peer_list.insert(connection);
+                    if accept.send(peer_key).is_err() {
+                        self.peer_list.connections.remove(peer_key);
+                    } else {
+                        log::info!("New peer Connection: {peer_key:?}");
+                    }
+                } else {
+                    log::debug!("Peer list full, ignoring");
+                }
             }
             PeerEventType::Choked => {
                 let peer_connection = connection_mut_or_return!();
@@ -363,7 +338,7 @@ impl TorrentState {
                     if let Err(err) = peer_connection.unchoke() {
                         log::error!("[PeerKey: {peer_key:?}] Peer disconnected: {err}");
                         // TODO: cleaner fix here
-                        self.peer_list.connections.remove(peer_key).unwrap();
+                        self.peer_list.connections.remove(peer_key);
                         return Ok(());
                     } else {
                         self.num_unchoked += 1;
@@ -373,7 +348,7 @@ impl TorrentState {
                     {
                         log::error!("[PeerKey: {peer_key:?}] Peer disconnected: {err}");
                         // TODO: cleaner fix here
-                        self.peer_list.connections.remove(peer_key).unwrap();
+                        self.peer_list.connections.remove(peer_key);
                         return Ok(());
                     }
                     self.piece_selector.mark_inflight(piece_idx as usize);
@@ -456,12 +431,16 @@ impl TorrentState {
                 }
             }
             PeerEventType::PieceRequestSucceeded(piece) => {
-                log::debug!("[PeerKey: {peer_key:?}] Piece completed!");
+                log::info!(
+                    "[PeerKey: {peer_key:?}] Piece {}/{} completed!",
+                    self.piece_selector.total_completed(),
+                    self.piece_selector.pieces()
+                );
                 let peer_connection = connection_mut_or_return!();
                 peer_connection.state_mut().is_currently_downloading = false;
                 self.on_piece_completed(piece.index, piece.memory).await;
             }
-            PeerEventType::PieceRequestFailed => todo!(),
+            PeerEventType::PieceRequestFailed { index: _ } => todo!(),
         }
         Ok(())
     }
@@ -510,9 +489,14 @@ impl TorrentManager {
         // automatically throttling the peer connection threads
         // from overloading the "main" thread
         let (peer_event_tx, mut peer_event_rc) = tokio::sync::mpsc::channel(512);
+        let connect_tx = start_network_thread(
+            our_peer_id,
+            torrent_info.info_hash_bytes().try_into().unwrap(),
+            "0.0.0.0:0".parse().unwrap(),
+            peer_event_tx,
+        );
         let torrent_info_clone = torrent_info.clone();
-        let peer_event_tx_clone = peer_event_tx.clone();
-        let peer_list_handle = peer_list.handle(peer_event_tx);
+        let peer_list_handle = peer_list.handle(connect_tx);
         tokio_uring::spawn(async move {
             let mut torrent_state = TorrentState {
                 num_unchoked: 0,
@@ -526,13 +510,11 @@ impl TorrentManager {
 
             while let Some(event) = peer_event_rc.recv().await {
                 // Spawn as separate tasks potentially
-                if let Err(err) = torrent_state
-                    .handle_event(&our_peer_id, event, &peer_event_tx_clone)
-                    .await
-                {
+                if let Err(err) = torrent_state.handle_event(event).await {
                     log::error!("Failed to process peer event: {err}");
                 }
             }
+            log::info!("Shutting down peer event handler");
         });
 
         Self {
@@ -551,21 +533,4 @@ impl TorrentManager {
             download_waiter.await.unwrap();
         }
     }
-
-    // Fix support via dedicated IO thread instead
-    /*pub async fn accept_incoming(&self, listener: &TcpListener) -> anyhow::Result<()> {
-        let (stream, peer_addr) = listener.accept().await.unwrap();
-        log::info!("Incomming peer connection: {peer_addr}");
-        self.peer_event_sender
-            .send(PeerEvent {
-                peer_key: PeerKey::null(),
-                event_type: PeerEventType::NewConnection {
-                    stream: SendableStream(stream),
-                    addr: peer_addr,
-                },
-            })
-            .await
-            .unwrap();
-        Ok(())
-    }*/
 }

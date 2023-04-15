@@ -75,7 +75,6 @@ impl PieceSelector {
             log::warn!("Random piece selection failed");
             available_pieces.first_one().map(|index| index as i32)
         } else {
-            // TODO: This must take into accouint all peer pieces
             // Rarest first
             let mut count = vec![0; available_pieces.len()];
             for available in available_pieces.iter_ones() {
@@ -147,6 +146,11 @@ impl PieceSelector {
     #[inline]
     pub fn pieces(&self) -> usize {
         self.completed_pieces.len()
+    }
+
+    #[inline]
+    pub fn total_completed(&self) -> usize {
+        self.completed_pieces.count_ones()
     }
 
     #[inline]
