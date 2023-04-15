@@ -1,11 +1,13 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Context;
-use bytes::BytesMut;
+use bytes::{Buf, BufMut, BytesMut};
+use slotmap::Key;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio_uring::net::TcpStream;
+use tokio_uring::net::{TcpListener, TcpStream};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::peer_events::{PeerEvent, PeerEventType};
@@ -308,50 +310,51 @@ async fn send_loop(
                     cancellation_token.cancel();
                     break;
                 };
-                let mut currently_downloading = currently_downloading.borrow_mut();
-                // TODO: Very hacky and implicit, fix this
-                match (&outgoing, currently_downloading.is_none()) {
-                    (PeerMessage::Request {
-                        index,
-                        begin: _,
-                        length,
-                    }, true) => {
-                        // Subpiece splitting
-                        // Don't start on a new piece before the current one is completed
-                        let mut piece = Piece::new(*index, *length as u32);
-                        // First subpiece that isn't already completed or inflight
-                        let last_subpiece_index = piece.completed_subpieces.len() - 1;
-                        // Should have 64 in flight subpieces at all times
-                        for _ in 0..piece.completed_subpieces.len().min(64) {
-                            if let Some(subindex) = piece.next_unstarted_subpice() {
-                                piece.inflight_subpieces.set(subindex, true);
-                                let subpiece_request = PeerMessage::Request {
-                                    index: piece.index,
-                                    begin: subindex as i32 * SUBPIECE_SIZE,
-                                    length: if last_subpiece_index == subindex {
-                                        piece.last_subpiece_length
-                                    } else {
-                                        SUBPIECE_SIZE
-                                    },
-                                };
-                                subpiece_request.encode(&mut send_buf);
-                                // TODO: This shouldn't be needed?
-                                if subindex == last_subpiece_index {
-                                    break;
+                {
+                    let mut currently_downloading = currently_downloading.borrow_mut();
+                    // TODO: Very hacky and implicit, fix this
+                    match (&outgoing, currently_downloading.is_none()) {
+                        (PeerMessage::Request {
+                            index,
+                            begin: _,
+                            length,
+                        }, true) => {
+                            // Subpiece splitting
+                            // Don't start on a new piece before the current one is completed
+                            let mut piece = Piece::new(*index, *length as u32);
+                            // First subpiece that isn't already completed or inflight
+                            let last_subpiece_index = piece.completed_subpieces.len() - 1;
+                            // Should have 64 in flight subpieces at all times
+                            for _ in 0..piece.completed_subpieces.len().min(64) {
+                                if let Some(subindex) = piece.next_unstarted_subpice() {
+                                    piece.inflight_subpieces.set(subindex, true);
+                                    let subpiece_request = PeerMessage::Request {
+                                        index: piece.index,
+                                        begin: subindex as i32 * SUBPIECE_SIZE,
+                                        length: if last_subpiece_index == subindex {
+                                            piece.last_subpiece_length
+                                        } else {
+                                            SUBPIECE_SIZE
+                                        },
+                                    };
+                                    subpiece_request.encode(&mut send_buf);
+                                    // TODO: This shouldn't be needed?
+                                    if subindex == last_subpiece_index {
+                                        break;
+                                    }
                                 }
                             }
+                            *currently_downloading = Some(piece);
                         }
-                        *currently_downloading = Some(piece);
-                    }
-                    _ => {
-                        // TODO Reuse buf and also try to coalece messages
-                        // and use write vectored instead. I.e try to receive 3-5
-                        // and write vectored. Have a timeout so it's not stalled forever
-                        // and writes less if no more msgs are incoming
-                        outgoing.encode(&mut send_buf);
+                        _ => {
+                            // TODO Reuse buf and also try to coalece messages
+                            // and use write vectored instead. I.e try to receive 3-5
+                            // and write vectored. Have a timeout so it's not stalled forever
+                            // and writes less if no more msgs are incoming
+                            outgoing.encode(&mut send_buf);
+                        }
                     }
                 }
-                drop(currently_downloading);
                 // Write all since the buffer has only been filled with encoded data
                 let (result, buf) = stream.write_all(send_buf).await;
                 send_buf = buf;
@@ -504,7 +507,7 @@ async fn setup_peer_connection(
     tokio_uring::spawn(recv_loop(
         stream,
         peer_key,
-        currently_downloading.clone(),
+        currently_downloading,
         outgoing_tx_clone,
         peer_event_sender.clone(),
         cancellation_token.clone(),

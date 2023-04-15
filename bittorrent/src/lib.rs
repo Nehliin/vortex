@@ -440,7 +440,7 @@ impl TorrentState {
                 peer_connection.state_mut().is_currently_downloading = false;
                 self.on_piece_completed(piece.index, piece.memory).await;
             }
-            PeerEventType::PieceRequestFailed { index } => todo!(),
+            PeerEventType::PieceRequestFailed { index: _ } => todo!(),
         }
         Ok(())
     }

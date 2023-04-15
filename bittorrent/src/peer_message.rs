@@ -8,25 +8,11 @@ pub enum PeerMessage {
     Unchoke,
     Interested,
     NotInterested,
-    Have {
-        index: i32,
-    },
+    Have { index: i32 },
     Bitfield(BitVec<u8, Msb0>),
-    Request {
-        index: i32,
-        begin: i32,
-        length: i32,
-    },
-    Cancel {
-        index: i32,
-        begin: i32,
-        length: i32,
-    },
-    Piece {
-        index: i32,
-        begin: i32,
-        data: Bytes,
-    },
+    Request { index: i32, begin: i32, length: i32 },
+    Cancel { index: i32, begin: i32, length: i32 },
+    Piece { index: i32, begin: i32, data: Bytes },
 }
 
 impl PeerMessage {
@@ -164,19 +150,10 @@ impl<'a> Arbitrary<'a> for PeerMessage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PeerMessageDecoder {
     length: Option<i32>,
     data: Bytes,
-}
-
-impl Default for PeerMessageDecoder {
-    fn default() -> Self {
-        Self {
-            length: Default::default(),
-            data: Default::default(),
-        }
-    }
 }
 
 impl PeerMessageDecoder {
