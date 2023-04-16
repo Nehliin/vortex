@@ -441,6 +441,8 @@ impl TorrentState {
                 self.on_piece_completed(piece.index, piece.memory).await;
             }
             PeerEventType::PieceRequestFailed { index } => {
+                let peer_connection = connection_mut_or_return!();
+                peer_connection.state_mut().is_currently_downloading = false;
                 log::warn!("[PeerKey: {peer_key:?}] Piece {index} failed");
                 // TODO: do we want to double check the peer actually is downloading the piece
                 // here?
