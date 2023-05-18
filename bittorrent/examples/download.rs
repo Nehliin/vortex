@@ -28,7 +28,7 @@ fn main() {
         // 1. 766s (with spawning write in separate task)
         // 2. 766s (without spawning write in separate task)
         // 3. 772s
-        // 3. 34s 
+        // 3. 34s
         let download_time = Instant::now();
         torrent_manager.download_complete().await;
         let elapsed = download_time.elapsed();
