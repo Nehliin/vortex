@@ -3,7 +3,7 @@
 // which requires support for http://www.bittorrent.org/beps/bep_0010.html
 // which needs the foundational http://www.bittorrent.org/beps/bep_0003.html implementation
 
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Instant};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use bitvec::prelude::*;
 use lava_torrent::torrent::v1::Torrent;
@@ -13,7 +13,7 @@ use peer_events::{PeerEvent, PeerEventType};
 use piece_selector::PieceSelector;
 use sha1::{Digest, Sha1};
 use slotmap::{new_key_type, SecondaryMap, SlotMap};
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, time::Instant};
 
 use crate::drive_io::FileStore;
 
@@ -240,8 +240,17 @@ impl TorrentState {
                     let file_store = std::mem::take(&mut self.file_store);
                     file_store.close().await.unwrap();
                     self.download_complete_tx.take().unwrap().send(()).unwrap();
-                    return;
                 }
+            }
+            Some(piece_index) => log::error!(
+                    "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
+            ),
+            None => {
+                log::error!("Piece sha1 hash not found!");
+            }
+        }
+    }
+
     async fn tick(&mut self) {
         let now = Instant::now();
         // TODO use retain instead of iter mut in the loop below and get rid of this
@@ -434,8 +443,8 @@ impl TorrentState {
                     // Not interested so don't do anything
                     return Ok(());
                 }
-                // TODO: Get rid of this
-                if peer_connection.state().is_currently_downloading {
+                // TODO: Get rid of this, should be allowed to continue here
+                if !peer_connection.state().currently_downloading.is_empty() {
                     return Ok(());
                 }
                 if let Some(piece_idx) = self.piece_selector.next_piece(peer_key) {
