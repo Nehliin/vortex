@@ -44,6 +44,56 @@ impl PeerConnectionState {
     }
 
     // on subpiece
+    pub fn on_subpiece(
+        &mut self,
+        m_index: i32,
+        m_begin: i32,
+        data: Bytes,
+        outgoing_tx: &UnboundedSender<PeerMessage>,
+    ) -> anyhow::Result<Option<Piece>> {
+        let position = self
+            .currently_downloading
+            .iter()
+            .position(|piece| piece.index == m_index);
+        if let Some(position) = position {
+            let mut piece = self.currently_downloading.swap_remove(position);
+            piece.on_subpiece(m_index, m_begin, &data[..], PeerKey::null());
+            if !piece.is_complete() {
+                // Next subpice to download (that isn't already inflight)
+                while let Some(next_subpice) = piece.next_unstarted_subpice() {
+                    if self.queued.len() < self.queue_capacity {
+                        piece.inflight_subpieces.set(next_subpice, true);
+                        let subpiece_request = PeerMessage::Request {
+                            index: piece.index,
+                            begin: SUBPIECE_SIZE * next_subpice as i32,
+                            length: if next_subpice as i32 == piece.last_subpiece_index() {
+                                piece.last_subpiece_length
+                            } else {
+                                SUBPIECE_SIZE
+                            },
+                        };
+                        self.queued.push(InflightSubpiece {
+                            started: Instant::now(),
+                            index: piece.index,
+                            begin: SUBPIECE_SIZE * next_subpice as i32,
+                        });
+                        // Write a new request, would slab + writev make sense?
+                        outgoing_tx.send(subpiece_request)?;
+                    } else {
+                        break;
+                    }
+                }
+                // still downloading
+                self.currently_downloading.push(piece);
+            } else {
+                log::debug!("[PeerKey] Piece completed");
+                return Ok(Some(piece));
+            }
+        } else {
+            log::error!("[PeerKey] Recieved unexpected piece message, index: {m_index}");
+        }
+        Ok(None)
+    }
 }
 
 // Consider adding handlers for each msg as a trait which extensions can implement
@@ -146,43 +196,12 @@ async fn process_incoming(
                 "[PeerKey: {peer_key:?}] Recived a piece index: {index}, begin: {begin}, length: {}",
                 data.len()
             );
-            let downloading = { currently_downloading.borrow_mut().take() };
-            if let Some(mut piece) = downloading {
-                if piece.index != index {
-                    log::warn!("[PeerKey: {peer_key:?}] Stale piece received, ignoring");
-                    *currently_downloading.borrow_mut() = Some(piece);
-                    return Ok(());
-                }
-                piece.on_subpiece(index, begin, &data[..], peer_key);
-                if !piece.is_complete() {
-                    // Next subpice to download (that isn't already inflight)
-                    if let Some(next_subpice) = piece.next_unstarted_subpice() {
-                        piece.inflight_subpieces.set(next_subpice, true);
-                        // Write a new request, would slab + writev make sense?
-                        outgoing_tx.send(PeerMessage::Request {
-                            index: piece.index,
-                            begin: SUBPIECE_SIZE * next_subpice as i32,
-                            length: if next_subpice as i32 == piece.last_subpiece_index() {
-                                piece.last_subpiece_length
-                            } else {
-                                SUBPIECE_SIZE
-                            },
-                        })?;
-                    }
-                    // Still downloading the same piece
-                    *currently_downloading.borrow_mut() = Some(piece);
-                } else {
-                    log::debug!("[PeerKey: {peer_key:?}] Piece completed");
-                    peer_event_sender
-                        .send(PeerEvent {
-                            peer_key,
-                            event_type: PeerEventType::PieceRequestSucceeded(piece),
-                        })
-                        .await?;
-                }
-            } else {
-                log::error!("[PeerKey: {peer_key:?}] Recieved unexpected piece message");
-            }
+            peer_event_sender
+                .send(PeerEvent {
+                    peer_key,
+                    event_type: PeerEventType::Subpiece { index, begin, data },
+                })
+                .await?;
         }
     }
     Ok(())
@@ -311,51 +330,11 @@ async fn send_loop(
                     cancellation_token.cancel();
                     break;
                 };
-                {
-                    let mut currently_downloading = currently_downloading.borrow_mut();
-                    // TODO: Very hacky and implicit, fix this
-                    match (&outgoing, currently_downloading.is_none()) {
-                        (PeerMessage::Request {
-                            index,
-                            begin: _,
-                            length,
-                        }, true) => {
-                            // Subpiece splitting
-                            // Don't start on a new piece before the current one is completed
-                            let mut piece = Piece::new(*index, *length as u32);
-                            // First subpiece that isn't already completed or inflight
-                            let last_subpiece_index = piece.completed_subpieces.len() - 1;
-                            // Should have 64 in flight subpieces at all times
-                            for _ in 0..piece.completed_subpieces.len().min(64) {
-                                if let Some(subindex) = piece.next_unstarted_subpice() {
-                                    piece.inflight_subpieces.set(subindex, true);
-                                    let subpiece_request = PeerMessage::Request {
-                                        index: piece.index,
-                                        begin: subindex as i32 * SUBPIECE_SIZE,
-                                        length: if last_subpiece_index == subindex {
-                                            piece.last_subpiece_length
-                                        } else {
-                                            SUBPIECE_SIZE
-                                        },
-                                    };
-                                    subpiece_request.encode(&mut send_buf);
-                                    // TODO: This shouldn't be needed?
-                                    if subindex == last_subpiece_index {
-                                        break;
-                                    }
-                                }
-                            }
-                            *currently_downloading = Some(piece);
-                        }
-                        _ => {
-                            // TODO Reuse buf and also try to coalece messages
-                            // and use write vectored instead. I.e try to receive 3-5
-                            // and write vectored. Have a timeout so it's not stalled forever
-                            // and writes less if no more msgs are incoming
-                            outgoing.encode(&mut send_buf);
-                        }
-                    }
-                }
+                // TODO Reuse buf and also try to coalece messages
+                // and use write vectored instead. I.e try to receive 3-5
+                // and write vectored. Have a timeout so it's not stalled forever
+                // and writes less if no more msgs are incoming
+                outgoing.encode(&mut send_buf);
                 // Write all since the buffer has only been filled with encoded data
                 let (result, buf) = stream.write_all(send_buf).await;
                 send_buf = buf;

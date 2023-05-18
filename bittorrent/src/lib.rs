@@ -139,6 +139,14 @@ impl Piece {
         self.memory[begin as usize..begin as usize + data.len()].copy_from_slice(data);
     }
 
+    #[inline]
+    fn on_subpiece_failed(&mut self, index: i32, begin: i32) {
+        // This subpice is part of the currently downloading piece
+        assert_eq!(self.index, index);
+        let subpiece_index = begin / SUBPIECE_SIZE;
+        self.inflight_subpieces.set(subpiece_index as usize, false);
+    }
+
     // Perhaps this can return the subpice or a peer request directly?
     #[inline]
     fn next_unstarted_subpice(&self) -> Option<usize> {
@@ -430,31 +438,32 @@ impl TorrentState {
                     );
                 }
             }
-            PeerEventType::PieceRequestSucceeded(piece) => {
-                log::info!(
-                    "[PeerKey: {peer_key:?}] Piece {}/{} completed!",
-                    self.piece_selector.total_completed(),
-                    self.piece_selector.pieces()
-                );
+            PeerEventType::Subpiece { index, begin, data } => {
                 let peer_connection = connection_mut_or_return!();
-                peer_connection.state_mut().is_currently_downloading = false;
-                self.on_piece_completed(piece.index, piece.memory).await;
-            }
-            PeerEventType::PieceRequestFailed { index } => {
-                let peer_connection = connection_mut_or_return!();
-                peer_connection.state_mut().is_currently_downloading = false;
-                log::warn!("[PeerKey: {peer_key:?}] Piece {index} failed");
-                // TODO: do we want to double check the peer actually is downloading the piece
-                // here?
-                if self.piece_selector.is_inflight(index as usize) {
-                    // if the recv/send tasks are cancelled mid piece download
-                    // the task will conitnue sending request failed for the same piece
-                    // this will work as expected the first time but the second time another peer
-                    // might have picked up the piece thus triggering the assertion?
-                    self.piece_selector.mark_not_inflight(index as usize);
-                    self.peer_list.connections.remove(peer_key);
+                log::debug!(
+                "[PeerKey: {peer_key:?}] Recived a piece index: {index}, begin: {begin}, length: {}",
+                data.len()
+            );
+                let clone = peer_connection.outgoing.clone();
+                let connection_state = peer_connection.state_mut();
+                connection_state.update_stats(index, begin, data.len() as u32);
+                let res = connection_state.on_subpiece(index, begin, data, &clone);
+
+                match res {
+                    Ok(Some(piece)) => {
+                        log::info!(
+                            "[PeerKey: {peer_key:?}] Piece {}/{} completed!",
+                            self.piece_selector.total_completed(),
+                            self.piece_selector.pieces()
+                        );
+                        self.on_piece_completed(piece.index, piece.memory).await;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        log::error!("[PeerKey: {peer_key:?}]: Subpiece handling failed: {err}");
+                    }
                 }
-            }
+            } 
         }
         Ok(())
     }
