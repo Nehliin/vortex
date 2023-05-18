@@ -130,6 +130,7 @@ impl Dht {
         let (tx, rc) = tokio::sync::mpsc::channel(64);
         let info_hash = NodeId::from(info_hash);
         tokio_uring::spawn(async move {
+            let mut provided_peers = ahash::HashSet::default();
             while !tx.is_closed() {
                 log::debug!("Start search for peers");
                 this.search(info_hash, true).await.unwrap();
@@ -137,7 +138,7 @@ impl Dht {
                     .routing_table
                     .borrow()
                     .get_k_closest(BUCKET_SIZE, &info_hash);
-                this.get_peers_from_nodes(&info_hash, &nodes, tx.clone())
+                this.get_peers_from_nodes(&info_hash, &nodes, &mut provided_peers, tx.clone())
                     .await
                     .unwrap();
                 let own_id = this.routing_table.borrow().own_id;
@@ -708,6 +709,7 @@ impl Dht {
         &self,
         target: &NodeId,
         nodes: &[Node],
+        provided_peers: &mut ahash::HashSet<SocketAddr>,
         peer_listener: tokio::sync::mpsc::Sender<Vec<SocketAddr>>,
     ) -> anyhow::Result<()> {
         let own_id = self.routing_table.borrow().own_id;
@@ -769,10 +771,13 @@ impl Dht {
                         log::debug!("Inserted node");
                     }
                 }
-                GetPeersResponseBody::Peers(peers) => {
-                    log::info!("Got peers! ({})", peers.len());
-                    if peer_listener.send(peers).await.is_err() {
-                        log::debug!("Peer listener disconnected");
+                GetPeersResponseBody::Peers(mut peers) => {
+                    peers.retain(|peer_addr| provided_peers.insert(*peer_addr));
+                    if !peers.is_empty() {
+                        log::info!("Got peers! ({})", peers.len());
+                        if peer_listener.send(peers).await.is_err() {
+                            log::debug!("Peer listener disconnected");
+                        }
                     }
                 }
             }
