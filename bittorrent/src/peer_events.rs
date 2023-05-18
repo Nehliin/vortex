@@ -1,7 +1,7 @@
 use bitvec::{prelude::Msb0, vec::BitVec};
 use bytes::Bytes;
 
-use crate::{peer_connection::PeerConnection, PeerKey, Piece};
+use crate::{peer_connection::PeerConnection, PeerKey};
 
 #[derive(Debug)]
 pub enum PeerEventType {

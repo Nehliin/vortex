@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::time::Duration;
-use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
