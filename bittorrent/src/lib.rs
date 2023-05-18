@@ -230,17 +230,10 @@ impl TorrentState {
                 self.piece_selector.mark_complete(piece_index);
                 self.file_store.write_piece(index, data).await.unwrap();
 
-                // Purge disconnected peers 
-                // TODO: Consider how PeerKey reuse might impact things. The key may be recycled 
-                // after disconnects.
-                let mut disconnected_peers:Vec<PeerKey> = self.peer_list.connections.iter()
-                    .filter_map(|(peer_key,peer)| {
-                        if peer.have(index).is_err() {
-                            Some(peer_key)
-                        } else {
-                            None
-                        }
-                    }).collect();
+                // Purge disconnected peers TODO move to tick instead
+                self.peer_list.connections.retain(|_, peer| {
+                    peer.have(index).is_ok() 
+                });
 
                 if self.piece_selector.completed_all() {
                     log::info!("Torrent completed!");
@@ -249,49 +242,152 @@ impl TorrentState {
                     self.download_complete_tx.take().unwrap().send(()).unwrap();
                     return;
                 }
+    async fn tick(&mut self) {
+        let now = Instant::now();
+        // TODO use retain instead of iter mut in the loop below and get rid of this
+        let mut disconnects = Vec::new();
+        for (peer_key, connection) in self.peer_list.connections.iter_mut() {
+            let state = connection.state_mut();
+            // If this connection have no inflight 2 iterations in a row
+            // disconnect it and clear all pieces it was currently downloading
+            // this is not very granular and will need tweaking
+            if state.pending_disconnect && !state.peer_choking && state.queued.is_empty() {
+                disconnects.push(peer_key);
+                continue;
+            }
 
-                // TODO: this entire logic needs to be adapted to the new flow eventually
-                let mut requested_piece = false;
-                let available_peers = self.peer_list.connections.iter_mut()
-                    .filter(|(_,peer)| !peer.state().peer_choking && !peer.state().is_currently_downloading);
-                for (peer_key,peer) in available_peers {
-                    if let Some(next_piece) = self.piece_selector.next_piece(peer_key)  {
-                        if peer.state().is_choking {
-                            // TODO highly unclear if unchoke is desired here 
-                            if let Err(err) = peer.unchoke() {
-                                log::error!("{err}");
-                                disconnected_peers.push(peer_key);
-                                continue;
-                            } else {
-                                self.num_unchoked += 1;
-                            }
-                        }
-                        // Group to a single operation
-                        if let Err(err) = peer.request_piece(next_piece, self.piece_selector.piece_len(next_piece)) {
-                            log::error!("{err}");
-                            disconnected_peers.push(peer_key);
-                            continue;
+            let timeout_threshold =
+                state.moving_rtt.mean() + (state.moving_rtt.average_deviation() * 4);
+            let queued = std::mem::take(&mut state.queued);
+            let new_queued = queued
+                .into_iter()
+                .filter(|inflight| {
+                    // consider removing the max clause
+                    if (now - inflight.started) > timeout_threshold.max(Duration::from_millis(2500))
+                    {
+                        log::debug!(
+                            "[PeerKey {peer_key:?}]: Subpiece timeout: {}, {}",
+                            inflight.index,
+                            inflight.begin
+                        );
+                        if let Some(piece) = state
+                            .currently_downloading
+                            .iter_mut()
+                            .find(|piece| piece.index == inflight.index)
+                        {
+                            // This is too harsh and should not be determined by individual
+                            // timeouts?
+                            state.slow_start = false;
+                            // TODO: time out recovery
+                            state.queue_capacity = 1;
+                            state.pending_disconnect = true;
+                            // TODO: is this even necessary? perhaps better to simply let the
+                            // peer timeout completely (answ yes better to timeout peer and let x
+                            // ticks to recover before puring)
+                            // when timing out, restrict request queue size and allow it to recover
+                            // before completely removing it
+                            piece.on_subpiece_failed(inflight.index, inflight.begin);
                         } else {
-                            requested_piece = true;
-                            self.piece_selector.mark_inflight(next_piece as usize);
+                            log::error!(
+                                "[PeerKey {peer_key:?}]: Peer wasn't dowloading parent piece"
+                            );
+                            state.pending_disconnect = true;
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            state.queued = new_queued;
+            if !state.peer_choking {
+                // slow start win size increase is handled in update_stats
+                if !state.slow_start && !state.pending_disconnect {
+                    // calculate new bandwitdth_delay product and set request queues
+                    let bandwitdth_delay =
+                        state.moving_rtt.mean().as_millis() as u64 * state.througput;
+                    let new_queue_capacity = bandwitdth_delay / SUBPIECE_SIZE as u64;
+                    state.queue_capacity = new_queue_capacity as usize;
+                }
+                state.queue_capacity = state.queue_capacity.max(1);
+            }
+            log::info!(
+                "[PeerKey {peer_key:?}]: throughput: {} bit/s, queue: {}/{}, rtt_mean: {}ms, currently_downloading: {}",
+                state.througput,
+                state.queued.len(),
+                state.queue_capacity,
+                state.moving_rtt.mean().as_millis(),
+                state.currently_downloading.len()
+            );
+            state.througput = 0;
+            // TODO: add to throughput total stats
+        }
+
+        // Request new pieces and fill up request queues
+        let mut peer_bandwidth: Vec<_> = self
+            .peer_list
+            .connections
+            .iter_mut()
+            .map(|(key, peer)| (key, peer.bandwitdth_available()))
+            .collect();
+
+        peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
+        for (peer_key, mut bandwidth) in peer_bandwidth {
+            let peer = &mut self.peer_list.connections[peer_key];
+            
+            while {
+                let bandwitdth_available_for_new_piece = bandwidth > (self.piece_selector.pieces() / 2);
+                let first_piece =
+                    peer.state().currently_downloading.is_empty() && !peer.state().peer_choking;
+                bandwitdth_available_for_new_piece || first_piece
+            } {
+                if let Some(next_piece) = self.piece_selector.next_piece(peer_key) {
+                    if peer.state().is_choking {
+                        // TODO highly unclear if unchoke is desired here
+                        if let Err(err) = peer.unchoke() {
+                            log::error!("{err}");
+                            disconnects.push(peer_key);
                             break;
+                        } else {
+                            self.num_unchoked += 1;
                         }
                     }
+                    peer.state_mut().currently_downloading.push(Piece::new(
+                        next_piece,
+                        self.piece_selector.piece_len(next_piece),
+                    ));
+                    // Remove all subpieces from available bandwidth
+                    bandwidth -= self.piece_selector.pieces().min(bandwidth);
+                    self.piece_selector.mark_inflight(next_piece as usize);
+                    
+                } else {
+                    break;
                 }
-                if !requested_piece {
-                    log::error!("No piece can be downloaded from any peer");
-                }
-               self
-                .peer_list.connections
-                .retain(|peer_key, _| !disconnected_peers.contains(&peer_key));
             }
-            Some(piece_index) => log::error!(
-                    "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
-            ),
-            None => {
-                log::error!("Piece sha1 hash not found!");
+            if let Err(err) = peer.fill_request_queue() {
+                log::error!("{err}");
+                disconnects.push(peer_key);
             }
         }
+
+        for peer_key in disconnects {
+            let peer_connection = self.peer_list.connections.remove(peer_key).unwrap();
+            log::warn!("[PeerKey: {peer_key:?}] timed out");
+            for downloading_piece in peer_connection.state().currently_downloading.iter() {
+                if self
+                    .piece_selector
+                    .is_inflight(downloading_piece.index as usize)
+                {
+                    // if the recv/send tasks are cancelled mid piece download
+                    // the task will conitnue sending request failed for the same piece
+                    // this will work as expected the first time but the second time another peer
+                    // might have picked up the piece thus triggering the assertion?
+                    self.piece_selector
+                        .mark_not_inflight(downloading_piece.index as usize);
+                }
+            }
+        }
+        // return total stats?
     }
 
     async fn handle_event(&mut self, peer_event: PeerEvent) -> anyhow::Result<()> {
@@ -531,10 +627,22 @@ impl TorrentManager {
                 peer_list,
             };
 
-            while let Some(event) = peer_event_rc.recv().await {
-                // Spawn as separate tasks potentially
-                if let Err(err) = torrent_state.handle_event(event).await {
-                    log::error!("Failed to process peer event: {err}");
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    maybe_event = peer_event_rc.recv() => {
+                        let Some(event) = maybe_event else {
+                            break;
+                        };
+                        // Spawn as separate tasks potentially
+                        if let Err(err) = torrent_state.handle_event(event).await {
+                            log::error!("Failed to process peer event: {err}");
+                        }
+                    }
+                    _ = interval.tick() => {
+                        torrent_state.tick().await;
+                    }
                 }
             }
             log::info!("Shutting down peer event handler");
