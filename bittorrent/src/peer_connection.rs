@@ -419,8 +419,7 @@ impl PeerConnection {
         Ok(())
     }
 
-    // BAD NAME IT's subpieces!
-    pub fn bandwitdth_available(&self) -> usize {
+    pub fn remaining_request_queue_spots(&self) -> usize {
         if self.state.peer_choking {
             return 0;
         }

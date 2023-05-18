@@ -337,7 +337,7 @@ impl TorrentState {
             .peer_list
             .connections
             .iter_mut()
-            .map(|(key, peer)| (key, peer.bandwitdth_available()))
+            .map(|(key, peer)| (key, peer.remaining_request_queue_spots()))
             .collect();
 
         peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
