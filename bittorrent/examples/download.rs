@@ -7,8 +7,10 @@ use vortex_bittorrent::TorrentManager;
 // ./transmission_containers.sh --name transmission-1
 // ./seed_new_torrent.sh --name test-file-1 --path assets/test-file-1 --seed transmission-1
 fn main() {
+    let log_file = std::fs::File::create("log.txt").unwrap();
     env_logger::builder()
         .filter_level(log::LevelFilter::Debug)
+//        .target(env_logger::Target::Pipe(Box::new(log_file)))
         .init();
 
     let torrent =
