@@ -289,19 +289,13 @@ impl TorrentState {
                             state.slow_start = false;
                             // TODO: time out recovery
                             state.queue_capacity = 1;
-                            state.pending_disconnect = true;
-                            // TODO: is this even necessary? perhaps better to simply let the
-                            // peer timeout completely (answ yes better to timeout peer and let x
-                            // ticks to recover before puring)
-                            // when timing out, restrict request queue size and allow it to recover
-                            // before completely removing it
                             piece.on_subpiece_failed(inflight.index, inflight.begin);
                         } else {
                             log::error!(
                                 "[PeerKey {peer_key:?}]: Peer wasn't dowloading parent piece"
                             );
-                            state.pending_disconnect = true;
                         }
+                        state.pending_disconnect = true;
                         false
                     } else {
                         true
@@ -346,7 +340,7 @@ impl TorrentState {
 
             while {
                 let bandwitdth_available_for_new_piece =
-                    bandwidth > (self.piece_selector.pieces() / 2);
+                    bandwidth > (self.piece_selector.avg_num_subpieces() as usize / 2);
                 let first_piece =
                     peer.state().currently_downloading.is_empty() && !peer.state().peer_choking;
                 bandwitdth_available_for_new_piece || first_piece
@@ -367,7 +361,8 @@ impl TorrentState {
                         self.piece_selector.piece_len(next_piece),
                     ));
                     // Remove all subpieces from available bandwidth
-                    bandwidth -= self.piece_selector.pieces().min(bandwidth);
+                    bandwidth -=
+                        (self.piece_selector.num_subpieces(next_piece) as usize).min(bandwidth);
                     self.piece_selector.mark_inflight(next_piece as usize);
                 } else {
                     break;

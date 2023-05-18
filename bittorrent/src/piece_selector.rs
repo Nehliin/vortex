@@ -2,7 +2,7 @@ use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
 use slotmap::SecondaryMap;
 
-use crate::PeerKey;
+use crate::{PeerKey, SUBPIECE_SIZE};
 
 // TODO
 /*pub trait PieceSelectionStrategy {
@@ -173,6 +173,20 @@ impl PieceSelector {
             self.last_piece_length
         } else {
             self.piece_length
+        }
+    }
+
+    #[inline]
+    pub fn avg_num_subpieces(&self) -> u32 {
+        self.piece_length / SUBPIECE_SIZE as u32
+    }
+
+    #[inline]
+    pub fn num_subpieces(&self, index: i32) -> u32 {
+        if index == (self.completed_pieces.len() as i32 - 1) {
+            self.last_piece_length / SUBPIECE_SIZE as u32
+        } else {
+            self.piece_length / SUBPIECE_SIZE as u32
         }
     }
 }
