@@ -3,10 +3,11 @@ use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Context;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use slotmap::Key;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::time::Instant;
 use tokio_uring::net::{TcpListener, TcpStream};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -76,6 +77,13 @@ impl MovingRttAverage {
 }
 
 #[derive(Debug)]
+pub struct InflightSubpiece {
+    pub started: Instant,
+    pub index: i32,
+    pub begin: i32,
+}
+
+#[derive(Debug)]
 pub struct PeerConnectionState {
     /// This side is choking the peer
     pub is_choking: bool,
@@ -85,10 +93,19 @@ pub struct PeerConnectionState {
     pub peer_choking: bool,
     /// The peer is interested what we have to offer
     pub peer_interested: bool,
-    /// Is a piece currently being downloaded
-    /// from the peer? Might allow for more than 1 per peer
-    /// in the future
-    pub(crate) is_currently_downloading: bool,
+
+    // TODO: do we need this both with queued?
+    pub currently_downloading: Vec<Piece>,
+    pub queue_capacity: usize,
+    pub queued: Vec<InflightSubpiece>,
+    pub slow_start: bool,
+    pub moving_rtt: MovingRttAverage,
+    // TODO calculate this meaningfully
+    pub througput: u64,
+    // If this connection is about to be disconnected
+    // because of low througput. (Choke instead?)
+    pub pending_disconnect: bool,
+
     _cancellation_token_guard: DropGuard,
 }
 
@@ -99,12 +116,41 @@ impl PeerConnectionState {
             is_interested: false,
             peer_choking: true,
             peer_interested: false,
-            is_currently_downloading: false,
+            queue_capacity: 4,
+            slow_start: true,
+            queued: Vec::with_capacity(4),
+            currently_downloading: Vec::new(),
+            moving_rtt: MovingRttAverage::default(),
+            througput: 0,
+            pending_disconnect: false,
             _cancellation_token_guard: cancellation_token.drop_guard(),
         }
     }
 
-    // on subpiece
+    pub fn update_stats(&mut self, m_index: i32, m_begin: i32, length: u32) {
+        // horribly inefficient
+        let Some(pos) = self
+            .queued
+            .iter()
+            .position(|sub| sub.index == m_index && m_begin == sub.begin) else {
+
+            // TODO: not really an error? should be handled better
+            log::error!("Received pieced i: {} begin: {} was marked as timed out", m_index, m_begin);
+            return;
+        };
+        if self.slow_start {
+            self.queue_capacity += 1;
+        }
+        if self.pending_disconnect {
+            self.pending_disconnect = false;
+        }
+        self.througput += length as u64;
+        let request = self.queued.swap_remove(pos);
+        log::debug!("Subpiece completed: {}, {}", request.index, request.begin);
+        let rtt = Instant::now() - request.started;
+        self.moving_rtt.add_sample(&rtt);
+    }
+
     pub fn on_subpiece(
         &mut self,
         m_index: i32,
@@ -161,12 +207,9 @@ impl PeerConnectionState {
 async fn process_incoming(
     peer_key: PeerKey,
     msg: PeerMessage,
-    peer_event_sender: &tokio::sync::mpsc::Sender<PeerEvent>,
-    // TODO: Get rid of rc refcell?
-    currently_downloading: &Rc<RefCell<Option<Piece>>>,
     // TODO: This is unnecessary and should be replaced
     // with writing directly to the socket
-    outgoing_tx: &UnboundedSender<PeerMessage>,
+    peer_event_sender: &tokio::sync::mpsc::Sender<PeerEvent>,
 ) -> anyhow::Result<()> {
     match msg {
         PeerMessage::Choke => {
@@ -273,7 +316,7 @@ pub struct PeerConnection {
     pub peer_id: [u8; 20],
     pub peer_addr: SocketAddr,
     state: PeerConnectionState,
-    outgoing: UnboundedSender<PeerMessage>,
+    pub outgoing: UnboundedSender<PeerMessage>,
 }
 
 impl PeerConnection {
@@ -336,21 +379,55 @@ impl PeerConnection {
     }
 
     pub fn request_piece(&mut self, index: i32, length: u32) -> anyhow::Result<()> {
-        // Don't start on a new piece before the current one is completed
-        assert!(!self.state.is_currently_downloading);
-        self.state.is_currently_downloading = true;
-        // Subpiece spliting happens on the io thread
-        self.outgoing
-            .send(PeerMessage::Request {
-                index,
-                // Begin is calculated based off index and piece length
-                // in the io thread
-                begin: 0,
-                length: length as i32,
-            })
-            .context("Failed to queue outgoing msg")?;
+        self.state
+            .currently_downloading
+            .push(Piece::new(index, length));
+        self.fill_request_queue()
+    }
 
+    pub fn fill_request_queue(&mut self) -> anyhow::Result<()> {
+        'outer: for piece in self.state.currently_downloading.iter_mut() {
+            let mut available_pieces = piece.completed_subpieces.clone();
+            available_pieces |= &piece.inflight_subpieces;
+            while let Some(subindex) = available_pieces.first_zero() {
+                if self.state.queued.len() < self.state.queue_capacity {
+                    piece.inflight_subpieces.set(subindex, true);
+                    // must update to prevent re-requesting same piece
+                    available_pieces.set(subindex, true);
+                    let subpiece_request = PeerMessage::Request {
+                        index: piece.index,
+                        begin: subindex as i32 * SUBPIECE_SIZE,
+                        length: if subindex as i32 == piece.last_subpiece_index() {
+                            piece.last_subpiece_length
+                        } else {
+                            SUBPIECE_SIZE
+                        },
+                    };
+                    self.state.queued.push(InflightSubpiece {
+                        started: Instant::now(),
+                        begin: subindex as i32 * SUBPIECE_SIZE,
+                        index: piece.index,
+                    });
+                    self.outgoing
+                        .send(subpiece_request)
+                        .context("Failed to queue outgoing msg")?;
+                } else {
+                    break 'outer;
+                }
+            }
+        }
         Ok(())
+    }
+
+    // BAD NAME IT's subpieces!
+    pub fn bandwitdth_available(&self) -> usize {
+        if self.state.peer_choking {
+            return 0;
+        }
+        // This will work even if we are in a slow start since
+        // the window will continue to increase until a timeout is hit
+        // TODO: Should we really return 0 here?
+        self.state.queue_capacity - self.state.queued.len().min(self.state.queue_capacity)
     }
 
     pub fn piece(&self, index: i32, begin: i32, data: Vec<u8>) -> anyhow::Result<()> {
@@ -377,7 +454,6 @@ async fn send_loop(
     stream: Rc<TcpStream>,
     peer_key: PeerKey,
     mut outgoing_rc: UnboundedReceiver<PeerMessage>,
-    currently_downloading: Rc<RefCell<Option<Piece>>>,
     cancellation_token: CancellationToken,
 ) {
     let mut send_buf = BytesMut::with_capacity(1 << 15);
@@ -416,8 +492,6 @@ async fn send_loop(
 async fn recv_loop(
     stream: Rc<TcpStream>,
     peer_key: PeerKey,
-    currently_downloading: Rc<RefCell<Option<Piece>>>,
-    outgoing_tx: UnboundedSender<PeerMessage>,
     peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     cancellation_token: CancellationToken,
 ) {
@@ -439,7 +513,7 @@ async fn recv_loop(
                     Ok(bytes_read) => {
                         let remainder = read_buf.split_off(bytes_read);
                         while let Some(message) = message_decoder.decode(&mut read_buf) {
-                            if let Err(err) =  process_incoming(peer_key, message, &peer_event_sender, &currently_downloading, &outgoing_tx).await {
+                            if let Err(err) = process_incoming(peer_key, message, &peer_event_sender).await {
                                 log::error!("[PeerKey: {peer_key:?}] Error processing incoming: {err}");
                                 cancellation_token.cancel();
                                 return;
@@ -536,20 +610,15 @@ async fn setup_peer_connection(
     };
 
     let stream = Rc::new(stream);
-    let currently_downloading = Rc::new(RefCell::new(None));
-    let outgoing_tx_clone = outgoing_tx.clone();
     tokio_uring::spawn(send_loop(
         stream.clone(),
         peer_key,
         outgoing_rc,
-        currently_downloading.clone(),
         cancellation_token.clone(),
     ));
     tokio_uring::spawn(recv_loop(
         stream,
         peer_key,
-        currently_downloading.clone(),
-        outgoing_tx_clone,
         peer_event_sender.clone(),
         cancellation_token.clone(),
     ));
