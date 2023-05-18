@@ -142,6 +142,7 @@ impl PeerConnectionState {
             self.queue_capacity += 1;
         }
         if self.pending_disconnect {
+            // Restart slow_start here? Or clear rrt?
             self.pending_disconnect = false;
         }
         self.througput += length as u64;

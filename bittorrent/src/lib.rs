@@ -289,19 +289,13 @@ impl TorrentState {
                             state.slow_start = false;
                             // TODO: time out recovery
                             state.queue_capacity = 1;
-                            state.pending_disconnect = true;
-                            // TODO: is this even necessary? perhaps better to simply let the
-                            // peer timeout completely (answ yes better to timeout peer and let x
-                            // ticks to recover before puring)
-                            // when timing out, restrict request queue size and allow it to recover
-                            // before completely removing it
                             piece.on_subpiece_failed(inflight.index, inflight.begin);
                         } else {
                             log::error!(
                                 "[PeerKey {peer_key:?}]: Peer wasn't dowloading parent piece"
                             );
-                            state.pending_disconnect = true;
                         }
+                        state.pending_disconnect = true;
                         false
                     } else {
                         true
