@@ -1,18 +1,87 @@
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::time::Duration;
-use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Context;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use slotmap::Key;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::time::Instant;
 use tokio_uring::net::{TcpListener, TcpStream};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::peer_events::{PeerEvent, PeerEventType};
 use crate::peer_message::{PeerMessage, PeerMessageDecoder};
 use crate::{PeerKey, Piece, SUBPIECE_SIZE};
+
+// Taken from
+// https://github.com/arvidn/moving_average/blob/master/moving_average.hpp
+#[derive(Debug)]
+pub struct MovingRttAverage {
+    // u32?
+    mean: i32,
+    average_deviation: i32,
+    num_samples: i32,
+    inverted_gain: i32,
+}
+
+impl Default for MovingRttAverage {
+    fn default() -> Self {
+        Self {
+            mean: 0,
+            average_deviation: 0,
+            num_samples: 0,
+            inverted_gain: 10,
+        }
+    }
+}
+
+impl MovingRttAverage {
+    pub fn add_sample(&mut self, rtt_sample: &Duration) {
+        let mut sample = rtt_sample.as_millis() as i32;
+        sample *= 64;
+
+        let old_mean = self.mean;
+
+        if self.num_samples < self.inverted_gain {
+            self.num_samples += 1;
+        }
+
+        self.mean += (sample - self.mean) / self.num_samples;
+        if self.num_samples > 1 {
+            let deviation = (old_mean - sample).abs();
+            self.average_deviation += (deviation - self.average_deviation) / (self.num_samples - 1);
+        }
+    }
+
+    #[inline]
+    pub fn mean(&self) -> Duration {
+        if self.num_samples > 0 {
+            let mean = (self.mean + 32) / 64;
+            Duration::from_millis(mean as u64)
+        } else {
+            Duration::from_millis(0)
+        }
+    }
+
+    #[inline]
+    pub fn average_deviation(&self) -> Duration {
+        if self.num_samples > 1 {
+            let avg_mean = (self.average_deviation + 32) / 64;
+            Duration::from_millis(avg_mean as u64)
+        } else {
+            Duration::from_millis(0)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct InflightSubpiece {
+    pub started: Instant,
+    pub index: i32,
+    pub begin: i32,
+}
 
 #[derive(Debug)]
 pub struct PeerConnectionState {
@@ -24,10 +93,19 @@ pub struct PeerConnectionState {
     pub peer_choking: bool,
     /// The peer is interested what we have to offer
     pub peer_interested: bool,
-    /// Is a piece currently being downloaded
-    /// from the peer? Might allow for more than 1 per peer
-    /// in the future
-    pub(crate) is_currently_downloading: bool,
+
+    // TODO: do we need this both with queued?
+    pub currently_downloading: Vec<Piece>,
+    pub queue_capacity: usize,
+    pub queued: Vec<InflightSubpiece>,
+    pub slow_start: bool,
+    pub moving_rtt: MovingRttAverage,
+    // TODO calculate this meaningfully
+    pub througput: u64,
+    // If this connection is about to be disconnected
+    // because of low througput. (Choke instead?)
+    pub pending_disconnect: bool,
+
     _cancellation_token_guard: DropGuard,
 }
 
@@ -38,24 +116,100 @@ impl PeerConnectionState {
             is_interested: false,
             peer_choking: true,
             peer_interested: false,
-            is_currently_downloading: false,
+            queue_capacity: 4,
+            slow_start: true,
+            queued: Vec::with_capacity(4),
+            currently_downloading: Vec::new(),
+            moving_rtt: MovingRttAverage::default(),
+            througput: 0,
+            pending_disconnect: false,
             _cancellation_token_guard: cancellation_token.drop_guard(),
         }
     }
 
-    // on subpiece
+    pub fn update_stats(&mut self, m_index: i32, m_begin: i32, length: u32) {
+        // horribly inefficient
+        let Some(pos) = self
+            .queued
+            .iter()
+            .position(|sub| sub.index == m_index && m_begin == sub.begin) else {
+
+            // TODO: not really an error? should be handled better
+            log::error!("Received pieced i: {} begin: {} was marked as timed out", m_index, m_begin);
+            return;
+        };
+        if self.slow_start {
+            self.queue_capacity += 1;
+        }
+        if self.pending_disconnect {
+            self.pending_disconnect = false;
+        }
+        self.througput += length as u64;
+        let request = self.queued.swap_remove(pos);
+        log::debug!("Subpiece completed: {}, {}", request.index, request.begin);
+        let rtt = Instant::now() - request.started;
+        self.moving_rtt.add_sample(&rtt);
+    }
+
+    pub fn on_subpiece(
+        &mut self,
+        m_index: i32,
+        m_begin: i32,
+        data: Bytes,
+        outgoing_tx: &UnboundedSender<PeerMessage>,
+    ) -> anyhow::Result<Option<Piece>> {
+        let position = self
+            .currently_downloading
+            .iter()
+            .position(|piece| piece.index == m_index);
+        if let Some(position) = position {
+            let mut piece = self.currently_downloading.swap_remove(position);
+            piece.on_subpiece(m_index, m_begin, &data[..], PeerKey::null());
+            if !piece.is_complete() {
+                // Next subpice to download (that isn't already inflight)
+                while let Some(next_subpice) = piece.next_unstarted_subpice() {
+                    if self.queued.len() < self.queue_capacity {
+                        piece.inflight_subpieces.set(next_subpice, true);
+                        let subpiece_request = PeerMessage::Request {
+                            index: piece.index,
+                            begin: SUBPIECE_SIZE * next_subpice as i32,
+                            length: if next_subpice as i32 == piece.last_subpiece_index() {
+                                piece.last_subpiece_length
+                            } else {
+                                SUBPIECE_SIZE
+                            },
+                        };
+                        self.queued.push(InflightSubpiece {
+                            started: Instant::now(),
+                            index: piece.index,
+                            begin: SUBPIECE_SIZE * next_subpice as i32,
+                        });
+                        // Write a new request, would slab + writev make sense?
+                        outgoing_tx.send(subpiece_request)?;
+                    } else {
+                        break;
+                    }
+                }
+                // still downloading
+                self.currently_downloading.push(piece);
+            } else {
+                log::debug!("[PeerKey] Piece completed");
+                return Ok(Some(piece));
+            }
+        } else {
+            log::error!("[PeerKey] Recieved unexpected piece message, index: {m_index}");
+        }
+        Ok(None)
+    }
 }
 
 // Consider adding handlers for each msg as a trait which extensions can implement
 async fn process_incoming(
     peer_key: PeerKey,
     msg: PeerMessage,
-    peer_event_sender: &tokio::sync::mpsc::Sender<PeerEvent>,
-    // TODO: Get rid of rc refcell?
-    currently_downloading: &Rc<RefCell<Option<Piece>>>,
     // TODO: This is unnecessary and should be replaced
     // with writing directly to the socket
-    outgoing_tx: &UnboundedSender<PeerMessage>,
+    peer_event_sender: &tokio::sync::mpsc::Sender<PeerEvent>,
 ) -> anyhow::Result<()> {
     match msg {
         PeerMessage::Choke => {
@@ -146,43 +300,12 @@ async fn process_incoming(
                 "[PeerKey: {peer_key:?}] Recived a piece index: {index}, begin: {begin}, length: {}",
                 data.len()
             );
-            let downloading = { currently_downloading.borrow_mut().take() };
-            if let Some(mut piece) = downloading {
-                if piece.index != index {
-                    log::warn!("[PeerKey: {peer_key:?}] Stale piece received, ignoring");
-                    *currently_downloading.borrow_mut() = Some(piece);
-                    return Ok(());
-                }
-                piece.on_subpiece(index, begin, &data[..], peer_key);
-                if !piece.is_complete() {
-                    // Next subpice to download (that isn't already inflight)
-                    if let Some(next_subpice) = piece.next_unstarted_subpice() {
-                        piece.inflight_subpieces.set(next_subpice, true);
-                        // Write a new request, would slab + writev make sense?
-                        outgoing_tx.send(PeerMessage::Request {
-                            index: piece.index,
-                            begin: SUBPIECE_SIZE * next_subpice as i32,
-                            length: if next_subpice as i32 == piece.last_subpiece_index() {
-                                piece.last_subpiece_length
-                            } else {
-                                SUBPIECE_SIZE
-                            },
-                        })?;
-                    }
-                    // Still downloading the same piece
-                    *currently_downloading.borrow_mut() = Some(piece);
-                } else {
-                    log::debug!("[PeerKey: {peer_key:?}] Piece completed");
-                    peer_event_sender
-                        .send(PeerEvent {
-                            peer_key,
-                            event_type: PeerEventType::PieceRequestSucceeded(piece),
-                        })
-                        .await?;
-                }
-            } else {
-                log::error!("[PeerKey: {peer_key:?}] Recieved unexpected piece message");
-            }
+            peer_event_sender
+                .send(PeerEvent {
+                    peer_key,
+                    event_type: PeerEventType::Subpiece { index, begin, data },
+                })
+                .await?;
         }
     }
     Ok(())
@@ -193,7 +316,7 @@ pub struct PeerConnection {
     pub peer_id: [u8; 20],
     pub peer_addr: SocketAddr,
     state: PeerConnectionState,
-    outgoing: UnboundedSender<PeerMessage>,
+    pub outgoing: UnboundedSender<PeerMessage>,
 }
 
 impl PeerConnection {
@@ -256,21 +379,54 @@ impl PeerConnection {
     }
 
     pub fn request_piece(&mut self, index: i32, length: u32) -> anyhow::Result<()> {
-        // Don't start on a new piece before the current one is completed
-        assert!(!self.state.is_currently_downloading);
-        self.state.is_currently_downloading = true;
-        // Subpiece spliting happens on the io thread
-        self.outgoing
-            .send(PeerMessage::Request {
-                index,
-                // Begin is calculated based off index and piece length
-                // in the io thread
-                begin: 0,
-                length: length as i32,
-            })
-            .context("Failed to queue outgoing msg")?;
+        self.state
+            .currently_downloading
+            .push(Piece::new(index, length));
+        self.fill_request_queue()
+    }
 
+    pub fn fill_request_queue(&mut self) -> anyhow::Result<()> {
+        'outer: for piece in self.state.currently_downloading.iter_mut() {
+            let mut available_pieces = piece.completed_subpieces.clone();
+            available_pieces |= &piece.inflight_subpieces;
+            while let Some(subindex) = available_pieces.first_zero() {
+                if self.state.queued.len() < self.state.queue_capacity {
+                    piece.inflight_subpieces.set(subindex, true);
+                    // must update to prevent re-requesting same piece
+                    available_pieces.set(subindex, true);
+                    let subpiece_request = PeerMessage::Request {
+                        index: piece.index,
+                        begin: subindex as i32 * SUBPIECE_SIZE,
+                        length: if subindex as i32 == piece.last_subpiece_index() {
+                            piece.last_subpiece_length
+                        } else {
+                            SUBPIECE_SIZE
+                        },
+                    };
+                    self.state.queued.push(InflightSubpiece {
+                        started: Instant::now(),
+                        begin: subindex as i32 * SUBPIECE_SIZE,
+                        index: piece.index,
+                    });
+                    self.outgoing
+                        .send(subpiece_request)
+                        .context("Failed to queue outgoing msg")?;
+                } else {
+                    break 'outer;
+                }
+            }
+        }
         Ok(())
+    }
+
+    pub fn remaining_request_queue_spots(&self) -> usize {
+        if self.state.peer_choking {
+            return 0;
+        }
+        // This will work even if we are in a slow start since
+        // the window will continue to increase until a timeout is hit
+        // TODO: Should we really return 0 here?
+        self.state.queue_capacity - self.state.queued.len().min(self.state.queue_capacity)
     }
 
     pub fn piece(&self, index: i32, begin: i32, data: Vec<u8>) -> anyhow::Result<()> {
@@ -297,7 +453,6 @@ async fn send_loop(
     stream: Rc<TcpStream>,
     peer_key: PeerKey,
     mut outgoing_rc: UnboundedReceiver<PeerMessage>,
-    currently_downloading: Rc<RefCell<Option<Piece>>>,
     cancellation_token: CancellationToken,
 ) {
     let mut send_buf = BytesMut::with_capacity(1 << 15);
@@ -311,51 +466,11 @@ async fn send_loop(
                     cancellation_token.cancel();
                     break;
                 };
-                {
-                    let mut currently_downloading = currently_downloading.borrow_mut();
-                    // TODO: Very hacky and implicit, fix this
-                    match (&outgoing, currently_downloading.is_none()) {
-                        (PeerMessage::Request {
-                            index,
-                            begin: _,
-                            length,
-                        }, true) => {
-                            // Subpiece splitting
-                            // Don't start on a new piece before the current one is completed
-                            let mut piece = Piece::new(*index, *length as u32);
-                            // First subpiece that isn't already completed or inflight
-                            let last_subpiece_index = piece.completed_subpieces.len() - 1;
-                            // Should have 64 in flight subpieces at all times
-                            for _ in 0..piece.completed_subpieces.len().min(64) {
-                                if let Some(subindex) = piece.next_unstarted_subpice() {
-                                    piece.inflight_subpieces.set(subindex, true);
-                                    let subpiece_request = PeerMessage::Request {
-                                        index: piece.index,
-                                        begin: subindex as i32 * SUBPIECE_SIZE,
-                                        length: if last_subpiece_index == subindex {
-                                            piece.last_subpiece_length
-                                        } else {
-                                            SUBPIECE_SIZE
-                                        },
-                                    };
-                                    subpiece_request.encode(&mut send_buf);
-                                    // TODO: This shouldn't be needed?
-                                    if subindex == last_subpiece_index {
-                                        break;
-                                    }
-                                }
-                            }
-                            *currently_downloading = Some(piece);
-                        }
-                        _ => {
-                            // TODO Reuse buf and also try to coalece messages
-                            // and use write vectored instead. I.e try to receive 3-5
-                            // and write vectored. Have a timeout so it's not stalled forever
-                            // and writes less if no more msgs are incoming
-                            outgoing.encode(&mut send_buf);
-                        }
-                    }
-                }
+                // TODO Reuse buf and also try to coalece messages
+                // and use write vectored instead. I.e try to receive 3-5
+                // and write vectored. Have a timeout so it's not stalled forever
+                // and writes less if no more msgs are incoming
+                outgoing.encode(&mut send_buf);
                 // Write all since the buffer has only been filled with encoded data
                 let (result, buf) = stream.write_all(send_buf).await;
                 send_buf = buf;
@@ -376,8 +491,6 @@ async fn send_loop(
 async fn recv_loop(
     stream: Rc<TcpStream>,
     peer_key: PeerKey,
-    currently_downloading: Rc<RefCell<Option<Piece>>>,
-    outgoing_tx: UnboundedSender<PeerMessage>,
     peer_event_sender: tokio::sync::mpsc::Sender<PeerEvent>,
     cancellation_token: CancellationToken,
 ) {
@@ -399,7 +512,7 @@ async fn recv_loop(
                     Ok(bytes_read) => {
                         let remainder = read_buf.split_off(bytes_read);
                         while let Some(message) = message_decoder.decode(&mut read_buf) {
-                            if let Err(err) =  process_incoming(peer_key, message, &peer_event_sender, &currently_downloading, &outgoing_tx).await {
+                            if let Err(err) = process_incoming(peer_key, message, &peer_event_sender).await {
                                 log::error!("[PeerKey: {peer_key:?}] Error processing incoming: {err}");
                                 cancellation_token.cancel();
                                 return;
@@ -496,57 +609,19 @@ async fn setup_peer_connection(
     };
 
     let stream = Rc::new(stream);
-    let currently_downloading = Rc::new(RefCell::new(None));
-    let outgoing_tx_clone = outgoing_tx.clone();
     tokio_uring::spawn(send_loop(
         stream.clone(),
         peer_key,
         outgoing_rc,
-        currently_downloading.clone(),
         cancellation_token.clone(),
     ));
     tokio_uring::spawn(recv_loop(
         stream,
         peer_key,
-        currently_downloading.clone(),
-        outgoing_tx_clone,
         peer_event_sender.clone(),
         cancellation_token.clone(),
     ));
 
-    let cancellation_token_clone = cancellation_token.clone();
-    let peer_event_sender_clone = peer_event_sender.clone();
-    tokio_uring::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(7));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut prev_idx;
-        loop {
-            // TODO select on cancellation token
-            prev_idx = currently_downloading
-                .borrow()
-                .as_ref()
-                .map(|piece| piece.index);
-            if cancellation_token_clone.is_cancelled() {
-                break;
-            }
-            interval.tick().await;
-            let current_idx = currently_downloading
-                .borrow()
-                .as_ref()
-                .map(|piece| piece.index);
-            if prev_idx == current_idx && current_idx.is_some() {
-                peer_event_sender_clone
-                    .send(PeerEvent {
-                        peer_key,
-                        event_type: PeerEventType::PieceRequestFailed {
-                            index: current_idx.unwrap(),
-                        },
-                    })
-                    .await
-                    .unwrap();
-            }
-        }
-    });
     Ok(())
 }
 

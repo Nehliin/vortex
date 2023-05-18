@@ -58,7 +58,7 @@ impl PieceSelector {
         available_pieces &= !tmp;
 
         if available_pieces.not_any() {
-            log::error!(
+            log::warn!(
                 "There are no available pieces, inflight_pieces: {}",
                 self.inflight_pieces.count_ones()
             );

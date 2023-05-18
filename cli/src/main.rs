@@ -30,7 +30,7 @@ fn main() {
     let mut log_builder = env_logger::builder();
     log_builder
         // .target(env_logger::Target::Pipe(Box::new(log_file)))
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Info)
         .init();
 
     tokio_uring::start(async move {
