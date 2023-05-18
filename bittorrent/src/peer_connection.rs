@@ -15,7 +15,7 @@ use crate::peer_events::{PeerEvent, PeerEventType};
 use crate::peer_message::{PeerMessage, PeerMessageDecoder};
 use crate::{PeerKey, Piece, SUBPIECE_SIZE};
 
-// Taken from 
+// Taken from
 // https://github.com/arvidn/moving_average/blob/master/moving_average.hpp
 #[derive(Debug)]
 pub struct MovingRttAverage {

@@ -232,7 +232,7 @@ impl TorrentState {
 
                 // Purge disconnected peers TODO move to tick instead
                 self.peer_list.connections.retain(|_, peer| {
-                    peer.have(index).is_ok() 
+                    peer.have(index).is_ok()
                 });
 
                 if self.piece_selector.completed_all() {
@@ -343,9 +343,10 @@ impl TorrentState {
         peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
         for (peer_key, mut bandwidth) in peer_bandwidth {
             let peer = &mut self.peer_list.connections[peer_key];
-            
+
             while {
-                let bandwitdth_available_for_new_piece = bandwidth > (self.piece_selector.pieces() / 2);
+                let bandwitdth_available_for_new_piece =
+                    bandwidth > (self.piece_selector.pieces() / 2);
                 let first_piece =
                     peer.state().currently_downloading.is_empty() && !peer.state().peer_choking;
                 bandwitdth_available_for_new_piece || first_piece
@@ -368,7 +369,6 @@ impl TorrentState {
                     // Remove all subpieces from available bandwidth
                     bandwidth -= self.piece_selector.pieces().min(bandwidth);
                     self.piece_selector.mark_inflight(next_piece as usize);
-                    
                 } else {
                     break;
                 }
@@ -568,7 +568,7 @@ impl TorrentState {
                         log::error!("[PeerKey: {peer_key:?}]: Subpiece handling failed: {err}");
                     }
                 }
-            } 
+            }
         }
         Ok(())
     }

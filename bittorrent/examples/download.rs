@@ -10,7 +10,7 @@ fn main() {
     let log_file = std::fs::File::create("log.txt").unwrap();
     env_logger::builder()
         .filter_level(log::LevelFilter::Debug)
-//        .target(env_logger::Target::Pipe(Box::new(log_file)))
+        //        .target(env_logger::Target::Pipe(Box::new(log_file)))
         .init();
 
     let torrent =
