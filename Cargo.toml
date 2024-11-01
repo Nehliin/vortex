@@ -5,7 +5,7 @@ members = [
     "utp-socket",
     "bittorrent",
     "dht"
-]
+, "bittorrent-io"]
 
 [workspace.dependencies]
 tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
