@@ -1,0 +1,9 @@
+[package]
+name = "bittorrent-io"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+io-uring = "0.7"
+libc = "0.2"
+slab = "0.4"
