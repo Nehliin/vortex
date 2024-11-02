@@ -12,5 +12,8 @@ fn main() {
     std::thread::sleep_ms(500);
     stream.write_all(b"HERE AGAIN!!").unwrap();
     stream.write_all(b"WOOOO").unwrap();
+    for _ in 0..300 {
+        stream.write_all(b"SOMETHING").unwrap();
+    }
     handle.join().unwrap();
 }

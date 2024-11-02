@@ -1,3 +1,4 @@
+use core::panic;
 use std::{
     fs::OpenOptions,
     net::{SocketAddr, TcpListener},
@@ -77,14 +78,9 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
     let write_fd = file.as_raw_fd();
     let (submitter, mut sq, mut cq) = ring.split();
 
-    let mut buf_ring = BufferRing::new(1, 8, 32).unwrap();
+    let mut buf_ring = BufferRing::new(1, 64, 32).unwrap();
     buf_ring.register(&submitter).unwrap();
 
-    /*let sigmask: libc::sigset_t = unsafe { std::mem::zeroed() };
-    let mut args = SubmitArgs::new();
-    let ts = Timespec::new().sec(1);
-    args = args.timespec(&ts);
-    args = args.sigmask(&sigmask);*/
     let mut offset = 0;
     loop {
         //println!("Submit and wait");
@@ -112,29 +108,33 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
 
         for cqe in &mut cq {
             let ret = cqe.result();
-            if ret < 0 {
-                println!("ERROR: {}", std::io::Error::from_raw_os_error(-ret));
-                continue;
-            }
             let token_idx = cqe.user_data();
             let token = &mut tokens[token_idx as usize];
+            if ret < 0 {
+                let err = std::io::Error::from_raw_os_error(-ret);
+                println!("ERROR: {err}");
+                if -ret == libc::ENOBUFS {
+                    // Ran out of buffers!
+                    if let Operation::Recv { fd } = token {
+                        let read_op = opcode::RecvMulti::new(types::Fd(*fd), buf_ring.bgid())
+                            .build()
+                            .user_data(token_idx as _)
+                            .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                        unsafe {
+                            sq.push(&read_op).unwrap();
+                        }
+                    } else {
+                        panic!("Not expected");
+                    }
+                }
+                continue;
+            }
             match token.clone() {
                 Operation::Accept => {
                     println!("Accepted connection!");
                     let fd = ret;
-                    let read_token = tokens.insert(Operation::Recv {
-                        fd,
-                        //buf_index: buf_idx,
-                    });
-                    /*let read_op =
-                        opcode::Recv::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as _)
-                            .build()
-                            .user_data(read_token as _);
-                    unsafe {
-                        sq.push(&read_op).unwrap();
-                    }*/
-                    let read_op = opcode::Recv::new(types::Fd(fd), ptr::null_mut(), 0)
-                        .buf_group(cur_bgid)
+                    let read_token = tokens.insert(Operation::Recv { fd });
+                    let read_op = opcode::RecvMulti::new(types::Fd(fd), buf_ring.bgid())
                         .build()
                         .user_data(read_token as _)
                         .flags(io_uring::squeue::Flags::BUFFER_SELECT);
@@ -145,6 +145,21 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
                 Operation::Recv { fd } => {
                     let len = ret;
                     let bid = io_uring::cqueue::buffer_select(cqe.flags()).unwrap();
+                    let is_more = io_uring::cqueue::more(cqe.flags());
+                    if !is_more {
+                        println!("No more, starting new recv");
+                        // TODO? Return bids and or read the current buffer?
+                        //buf_ring.return_bid(bid);
+                        let read_op = opcode::RecvMulti::new(types::Fd(fd), buf_ring.bgid())
+                            .build()
+                            .user_data(token_idx as _)
+                            .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                        unsafe {
+                            sq.push(&read_op).unwrap();
+                        }
+                    }
+
+                    dbg!(len);
                     if len == 0 {
                         println!("READ 0");
                         buf_ring.return_bid(bid);
@@ -154,7 +169,6 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
                             libc::close(fd);
                         }
                     } else {
-                        let bid = io_uring::cqueue::buffer_select(cqe.flags()).unwrap();
                         dbg!(bid);
                         let buffer = buf_ring.get(bid);
                         //let buffer = &mut buffer_pool.allocated_buffers[buf_index];
