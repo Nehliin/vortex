@@ -9,5 +9,8 @@ fn main() {
     std::thread::sleep_ms(500);
     let mut stream = TcpStream::connect("127.0.0.1:3456").unwrap();
     stream.write_all(b"Hello from stream!!").unwrap();
+    std::thread::sleep_ms(500);
+    stream.write_all(b"HERE AGAIN!!").unwrap();
+    stream.write_all(b"WOOOO").unwrap();
     handle.join().unwrap();
 }
