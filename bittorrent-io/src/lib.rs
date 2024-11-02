@@ -3,6 +3,7 @@ use std::{
     net::{SocketAddr, TcpListener},
     os::fd::{AsRawFd, RawFd},
     ptr,
+    sync::atomic::{AtomicI16, AtomicU16},
 };
 
 use io_uring::{
@@ -11,6 +12,7 @@ use io_uring::{
     types::{self, OpenHow, SubmitArgs, Timespec},
     IoUring,
 };
+use libc::{MAP_ANONYMOUS, MAP_POPULATE, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE};
 use slab::Slab;
 
 //const OPEN_HOW: OpenHow = OpenHow::new().flags((libc::O_CREAT | libc::O_RDWR) as u64);
@@ -51,6 +53,12 @@ impl BufferPool {
     fn return_buffer(&mut self, index: usize) {
         self.free.push(index);
     }
+}
+
+struct ConnBufRing {
+    nr_entries: u16,
+    buffer: *mut libc::c_void,
+    bgid: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +121,51 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>, buffer_pool: &mut
         .unwrap();
     let write_fd = file.as_raw_fd();
     let (submitter, mut sq, mut cq) = ring.split();
+
+    let nr_bufs = 256;
+    let buf_len = 32;
+    let cur_bgid = 1;
+    let len = nr_bufs * std::mem::size_of::<types::BufRingEntry>();
+    let mut con_buf = ConnBufRing {
+        nr_entries: nr_bufs as u16,
+        buffer: ptr::null_mut(),
+        bgid: cur_bgid,
+    };
+    unsafe {
+        libc::posix_memalign(&raw mut con_buf.buffer, 4096, buf_len * nr_bufs);
+        let br = libc::mmap(
+            ptr::null_mut(),
+            len,
+            PROT_WRITE | PROT_READ,
+            MAP_ANONYMOUS | MAP_PRIVATE | MAP_POPULATE,
+            -1,
+            0,
+        );
+        submitter
+            .register_buf_ring(br as u64, nr_bufs as u16, cur_bgid)
+            .unwrap();
+
+        //let tail = types::BufRingEntry::tail(br as *const types::BufRingEntry) as *mut u16;
+        //dbg!(*tail);
+        //tail.write(0);
+        //dbg!(*tail);
+        let mask = nr_bufs - 1;
+        for i in 0..nr_bufs {
+            let entry = br as *mut types::BufRingEntry;
+            let entry = entry.add(i & mask);
+            let entry = &mut *entry;
+            entry.set_addr(con_buf.buffer as u64 + (i * buf_len) as u64);
+            entry.set_len(buf_len as u32);
+            entry.set_bid(i as u16);
+        }
+
+        let tail = types::BufRingEntry::tail(br as *const types::BufRingEntry) as *const AtomicU16;
+        //let new_tail = *tail + nr_bufs as u16;
+        (*tail).store(nr_bufs as u16, std::sync::atomic::Ordering::Release);
+
+        //let tail = types::BufRingEntry::tail(br as *const types::BufRingEntry) as *mut u16;
+        //dbg!(*tail);
+    }
     /*let sigmask: libc::sigset_t = unsafe { std::mem::zeroed() };
     let mut args = SubmitArgs::new();
     let ts = Timespec::new().sec(1);
@@ -120,7 +173,7 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>, buffer_pool: &mut
     args = args.sigmask(&sigmask);*/
     let mut offset = 0;
     loop {
-        println!("Submit and wait");
+        //println!("Submit and wait");
         match submitter.submit_and_wait(1) {
             Ok(_) => (),
             Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => println!("busy"),
@@ -160,10 +213,18 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>, buffer_pool: &mut
                         fd,
                         buf_index: buf_idx,
                     });
-                    let read_op =
+                    /*let read_op =
                         opcode::Recv::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as _)
                             .build()
                             .user_data(read_token as _);
+                    unsafe {
+                        sq.push(&read_op).unwrap();
+                    }*/
+                    let read_op = opcode::Recv::new(types::Fd(fd), ptr::null_mut(), 0)
+                        .buf_group(cur_bgid)
+                        .build()
+                        .user_data(read_token as _)
+                        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                     unsafe {
                         sq.push(&read_op).unwrap();
                     }
@@ -179,11 +240,13 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>, buffer_pool: &mut
                             libc::close(fd);
                         }
                     } else {
-                        let buffer = &mut buffer_pool.allocated_buffers[buf_index];
-                        let string = String::from_utf8_lossy(&buffer[..len as usize]);
-                        println!("RECIEVED: {string}");
+                        let bid = io_uring::cqueue::buffer_select(cqe.flags()).unwrap();
+                        dbg!(bid);
+                        //let buffer = &mut buffer_pool.allocated_buffers[buf_index];
+                        //let string = String::from_utf8_lossy(&buffer[..len as usize]);
+                        println!("RECIEVED: ");
                         dbg!(offset);
-                        *token = Operation::Write {
+                        /**token = Operation::Write {
                             fd: write_fd,
                             buf_index,
                             offset,
@@ -200,20 +263,18 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>, buffer_pool: &mut
                         offset += len as usize;
                         unsafe {
                             sq.push(&write_op).unwrap();
-                        }
+                        }*/
                         // new read
                         let (buf_idx, buffer) = buffer_pool.get_buffer();
                         let read_token = tokens.insert(Operation::Recv {
                             fd,
                             buf_index: buf_idx,
                         });
-                        let read_op = opcode::Recv::new(
-                            types::Fd(fd),
-                            buffer.as_mut_ptr(),
-                            buffer.len() as _,
-                        )
-                        .build()
-                        .user_data(read_token as _);
+                        let read_op = opcode::Recv::new(types::Fd(fd), ptr::null_mut(), 0)
+                            .buf_group(cur_bgid)
+                            .build()
+                            .user_data(read_token as _)
+                            .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                         unsafe {
                             sq.push(&read_op).unwrap();
                         }
