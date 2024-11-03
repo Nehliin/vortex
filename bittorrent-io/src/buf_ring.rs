@@ -5,7 +5,7 @@ use io_uring::{types, Submitter};
 
 /// An anonymous region of memory mapped using `mmap(2)`, not backed by a file
 /// but that is guaranteed to be page-aligned and zero-filled.
-pub struct AnonymousMmap {
+struct AnonymousMmap {
     addr: ptr::NonNull<libc::c_void>,
     len: usize,
 }
@@ -135,7 +135,7 @@ impl BufferRing {
 
         let mask = (self.entries - 1) as u16;
         unsafe {
-            // Add the buffers after the registration. Really seems it could be done earlier too.
+            // Add the buffers after the registration
             for bid in 0..self.entries {
                 let entry = self.ring_memory.addr.as_ptr() as *mut types::BufRingEntry;
                 let entry = entry.add((bid as u16 & mask) as usize);
