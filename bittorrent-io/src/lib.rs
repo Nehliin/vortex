@@ -3,7 +3,7 @@ use std::{
     fs::OpenOptions,
     net::{SocketAddr, TcpListener},
     os::fd::{AsRawFd, RawFd},
-    ptr,
+    ptr, time::{Duration, Instant},
 };
 
 use buf_ring::BufferRing;
@@ -27,7 +27,6 @@ struct ConnBufRing {
 #[derive(Debug, Clone)]
 enum Operation {
     Accept,
-    Tick,
     Recv {
         fd: RawFd,
         //buf_index: usize,
@@ -60,8 +59,8 @@ pub fn setup_listener() {
     event_loop(ring, &mut tokens)
 }
 
-fn tick() {
-    println!("Tick!");
+fn tick(last_tick: &Duration) {
+    println!("Tick!: {}", last_tick.as_secs_f32());
 }
 
 fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
@@ -78,20 +77,15 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
     let mut buf_ring = BufferRing::new(1, 64, 32).unwrap();
     buf_ring.register(&submitter).unwrap();
 
-    let tick_token = tokens.insert(Operation::Tick);
-    let tick_op = opcode::Timeout::new(TIMESPEC)
-        .count(1)
-        .build()
-        .user_data(tick_token as _);
-    unsafe {
-        sq.push(&tick_op).unwrap();
-    }
 
+    let mut last_tick = Instant::now();
     loop {
+        let args = types::SubmitArgs::new().timespec(TIMESPEC);
         //println!("Submit and wait");
-        match submitter.submit_and_wait(1) {
+        match submitter.submit_with_args(1, &args) {
             Ok(_) => (),
             Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => println!("busy"),
+            Err(ref err) if err.raw_os_error() == Some(libc::ETIME) => println!("TIMEOUT"),
             Err(err) => panic!("failed: {err}"),
         }
         cq.sync();
@@ -110,6 +104,12 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
         sq.sync();
         //backlog
         //}
+        
+        if last_tick.elapsed() > Duration::from_secs(1) {
+            tick(&last_tick.elapsed());
+            last_tick = Instant::now();
+        }
+        
 
         for cqe in &mut cq {
             let ret = cqe.result();
@@ -135,15 +135,6 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
                 continue;
             }
             match token.clone() {
-                Operation::Tick => {
-                    println!("TICK");
-                    let tick_op = opcode::TimeoutUpdate::new(token_idx, TIMESPEC)
-                        .build()
-                        .user_data(token_idx as _);
-                    unsafe {
-                        sq.push(&tick_op).unwrap();
-                    }
-                }
                 Operation::Accept => {
                     println!("Accepted connection!");
                     let fd = ret;
