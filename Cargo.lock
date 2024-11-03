@@ -63,8 +63,10 @@ dependencies = [
  "arbitrary",
  "bitvec",
  "bytes",
+ "env_logger",
  "io-uring 0.7.1",
  "libc",
+ "log",
  "slab",
 ]
 
