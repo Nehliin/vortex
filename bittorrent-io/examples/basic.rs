@@ -12,6 +12,7 @@ fn main() {
     std::thread::sleep_ms(500);
     stream.write_all(b"HERE AGAIN!!").unwrap();
     stream.write_all(b"WOOOO").unwrap();
+    // 36 + 10 * 300
     for _ in 0..300 {
         stream.write_all(b"SOMETHING\n").unwrap();
    }

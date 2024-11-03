@@ -7,6 +7,7 @@ use std::{
 };
 
 use buf_ring::BufferRing;
+use file::MmapFile;
 use io_uring::{
     opcode,
     types::{self, Timespec},
@@ -15,14 +16,10 @@ use io_uring::{
 use slab::Slab;
 
 mod buf_ring;
+mod file;
 
 const TIMESPEC: &Timespec = &Timespec::new().sec(1);
 
-struct ConnBufRing {
-    nr_entries: u16,
-    buffer: *mut libc::c_void,
-    bgid: u16,
-}
 
 #[derive(Debug, Clone)]
 enum Operation {
@@ -59,24 +56,19 @@ pub fn setup_listener() {
     event_loop(ring, &mut tokens)
 }
 
+// Validate hashes in here and simply use one shot channels
 fn tick(last_tick: &Duration) {
     println!("Tick!: {}", last_tick.as_secs_f32());
 }
 
 fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .read(true)
-        .open("file_b.txt")
-        .unwrap();
-    let write_fd = file.as_raw_fd();
     let (submitter, mut sq, mut cq) = ring.split();
 
     let mut buf_ring = BufferRing::new(1, 64, 32).unwrap();
     buf_ring.register(&submitter).unwrap();
 
+    let mut offset = 0;
+    let mut file_b = MmapFile::create("file_b.txt", 3036).unwrap();
 
     let mut last_tick = Instant::now();
     loop {
@@ -175,9 +167,13 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
                         }
                     } else {
                         dbg!(bid);
+                        let len = len as usize;
                         let buffer = buf_ring.get(bid);
-                        let string = String::from_utf8_lossy(&buffer[..len as usize]);
+                        let string = String::from_utf8_lossy(&buffer[..len]);
                         println!("RECIEVED: {string}");
+                        let file_buf = file_b.get_mut();
+                        file_buf[offset..offset + len].copy_from_slice(&buffer[..len]);
+                        offset += len;
 
                         buf_ring.return_bid(bid);
                     }
