@@ -16,6 +16,7 @@ use io_uring::{
 use slab::Slab;
 
 mod buf_ring;
+pub mod decoder;
 mod file;
 
 const TIMESPEC: &Timespec = &Timespec::new().sec(1);
