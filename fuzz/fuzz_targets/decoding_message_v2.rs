@@ -1,7 +1,7 @@
 #![no_main]
 
-use bittorrent_io::decoder::PeerMessage;
-use bittorrent_io::decoder::PeerMessageDecoder;
+use bittorrent_io::peer_message::PeerMessage;
+use bittorrent_io::peer_message::PeerMessageDecoder;
 use bytes::Buf;
 use bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;

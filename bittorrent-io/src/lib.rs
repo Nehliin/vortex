@@ -1,9 +1,8 @@
 use core::panic;
 use std::{
-    fs::OpenOptions,
     net::{SocketAddr, TcpListener},
     os::fd::{AsRawFd, RawFd},
-    ptr, time::{Duration, Instant},
+    time::{Duration, Instant},
 };
 
 use buf_ring::BufferRing;
@@ -16,11 +15,10 @@ use io_uring::{
 use slab::Slab;
 
 mod buf_ring;
-pub mod decoder;
 mod file;
+pub mod peer_message;
 
 const TIMESPEC: &Timespec = &Timespec::new().sec(1);
-
 
 #[derive(Debug, Clone)]
 enum Operation {
@@ -97,12 +95,11 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
         sq.sync();
         //backlog
         //}
-        
+
         if last_tick.elapsed() > Duration::from_secs(1) {
             tick(&last_tick.elapsed());
             last_tick = Instant::now();
         }
-        
 
         for cqe in &mut cq {
             let ret = cqe.result();
