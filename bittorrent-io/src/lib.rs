@@ -9,12 +9,14 @@ use std::{
 use buf_ring::BufferRing;
 use io_uring::{
     opcode,
-    types::{self},
+    types::{self, Timespec},
     IoUring,
 };
 use slab::Slab;
 
 mod buf_ring;
+
+const TIMESPEC: &Timespec = &Timespec::new().sec(1);
 
 struct ConnBufRing {
     nr_entries: u16,
@@ -25,19 +27,10 @@ struct ConnBufRing {
 #[derive(Debug, Clone)]
 enum Operation {
     Accept,
+    Tick,
     Recv {
         fd: RawFd,
         //buf_index: usize,
-    },
-    Read {
-        fd: RawFd,
-        buf_index: usize,
-    },
-    Write {
-        fd: RawFd,
-        buf_index: usize,
-        offset: usize,
-        len: usize,
     },
 }
 
@@ -67,6 +60,10 @@ pub fn setup_listener() {
     event_loop(ring, &mut tokens)
 }
 
+fn tick() {
+    println!("Tick!");
+}
+
 fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
     let file = OpenOptions::new()
         .create(true)
@@ -81,7 +78,15 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
     let mut buf_ring = BufferRing::new(1, 64, 32).unwrap();
     buf_ring.register(&submitter).unwrap();
 
-    let mut offset = 0;
+    let tick_token = tokens.insert(Operation::Tick);
+    let tick_op = opcode::Timeout::new(TIMESPEC)
+        .count(1)
+        .build()
+        .user_data(tick_token as _);
+    unsafe {
+        sq.push(&tick_op).unwrap();
+    }
+
     loop {
         //println!("Submit and wait");
         match submitter.submit_and_wait(1) {
@@ -130,6 +135,15 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
                 continue;
             }
             match token.clone() {
+                Operation::Tick => {
+                    println!("TICK");
+                    let tick_op = opcode::TimeoutUpdate::new(token_idx, TIMESPEC)
+                        .build()
+                        .user_data(token_idx as _);
+                    unsafe {
+                        sq.push(&tick_op).unwrap();
+                    }
+                }
                 Operation::Accept => {
                     println!("Accepted connection!");
                     let fd = ret;
@@ -171,38 +185,11 @@ fn event_loop(mut ring: IoUring, tokens: &mut Slab<Operation>) {
                     } else {
                         dbg!(bid);
                         let buffer = buf_ring.get(bid);
-                        //let buffer = &mut buffer_pool.allocated_buffers[buf_index];
                         let string = String::from_utf8_lossy(&buffer[..len as usize]);
                         println!("RECIEVED: {string}");
+
                         buf_ring.return_bid(bid);
-                        //tokens.remove(token_idx as _);
-                        /*let read_token = tokens.insert(Operation::Recv {
-                            fd,
-                            //buf_index: buf_idx,
-                        });
-                        let read_op = opcode::Recv::new(types::Fd(fd), ptr::null_mut(), 0)
-                            .buf_group(buf_ring.bgid())
-                            .build()
-                            .user_data(read_token as _)
-                            .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                        unsafe {
-                            sq.push(&read_op).unwrap();
-                        }*/
                     }
-                }
-                Operation::Read { fd, buf_index } => {
-                    let fd = ret;
-                }
-                Operation::Write {
-                    fd,
-                    buf_index,
-                    offset,
-                    len,
-                } => {
-                    let written = ret;
-                    println!("Written: {written}");
-                    //buffer_pool.return_buffer(buf_index);
-                    tokens.remove(token_idx as _);
                 }
             }
         }
