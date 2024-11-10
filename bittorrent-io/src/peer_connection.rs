@@ -10,6 +10,7 @@ use crate::peer_protocol::{PeerMessage, PeerMessageDecoder};
 #[derive(Debug)]
 pub struct PeerConnection {
     pub fd: RawFd,
+    // TODO: Make this a type that impl display
     pub peer_id: [u8; 20],
     /// This side is choking the peer
     pub is_choking: bool,
@@ -39,15 +40,69 @@ impl PeerConnection {
             fd,
             peer_id,
             is_choking: true,
-            is_interested: false,
+            is_interested: true,
             peer_choking: true,
             peer_interested: false,
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
         }
     }
 
-    pub fn handle_message(&mut self, peer_message: PeerMessage) {
-
+    pub fn handle_message(&mut self, peer_message: PeerMessage) -> io::Result<()> {
+        log::debug!("Received: {peer_message:?}");
+        match peer_message {
+            PeerMessage::Choke => {
+                log::info!("[Peer: {:?}] Peer is choking us!", self.peer_id);
+                self.peer_choking = true;
+            }
+            PeerMessage::Unchoke => {
+                self.peer_choking = false;
+                if !self.is_interested {
+                    // Not interested so don't do anything
+                    return Ok(());
+                }
+                // TODO: Get rid of this, should be allowed to continue here
+                if !peer_connection.state().currently_downloading.is_empty() {
+                    return Ok(());
+                }
+                if let Some(piece_idx) = self.piece_selector.next_piece(peer_key) {
+                    if let Err(err) = peer_connection.unchoke() {
+                        log::error!("[PeerKey: {peer_key:?}] Peer disconnected: {err}");
+                        // TODO: cleaner fix here
+                        self.peer_list.connections.remove(peer_key);
+                        return Ok(());
+                    } else {
+                        self.num_unchoked += 1;
+                    }
+                    if let Err(err) = peer_connection
+                        .request_piece(piece_idx, self.piece_selector.piece_len(piece_idx))
+                    {
+                        log::error!("[PeerKey: {peer_key:?}] Peer disconnected: {err}");
+                        // TODO: cleaner fix here
+                        self.peer_list.connections.remove(peer_key);
+                        return Ok(());
+                    }
+                    self.piece_selector.mark_inflight(piece_idx as usize);
+                } else {
+                    log::warn!("[PeerKey: {peer_key:?}] No more pieces available");
+                }
+            }
+            PeerMessage::Interested => todo!(),
+            PeerMessage::NotInterested => todo!(),
+            PeerMessage::Have { index } => todo!(),
+            PeerMessage::Bitfield(_) => todo!(),
+            PeerMessage::Request {
+                index,
+                begin,
+                length,
+            } => todo!(),
+            PeerMessage::Cancel {
+                index,
+                begin,
+                length,
+            } => todo!(),
+            PeerMessage::Piece { index, begin, data } => todo!(),
+        }
+        Ok(())
     }
 }
 
