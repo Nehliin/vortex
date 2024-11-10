@@ -1,4 +1,5 @@
 use std::io;
+use std::io::ErrorKind;
 
 use arbitrary::Arbitrary;
 use bitvec::{order::Msb0, vec::BitVec};
@@ -53,6 +54,50 @@ impl<'a> Arbitrary<'a> for PeerMessage {
             _ => Err(arbitrary::Error::IncorrectFormat),
         }
     }
+}
+
+pub fn generate_peer_id() -> [u8; 20] {
+    // Based on http://www.bittorrent.org/beps/bep_0020.html
+    const PREFIX: [u8; 8] = *b"-VT0010-";
+    let generatated = rand::random::<[u8; 12]>();
+    let mut result: [u8; 20] = [0; 20];
+    result[0..8].copy_from_slice(&PREFIX);
+    result[8..].copy_from_slice(&generatated);
+    result
+}
+
+pub fn write_handshake(our_peer_id: [u8; 20], info_hash: [u8; 20], mut buffer: &mut [u8]) {
+    const PROTOCOL: &[u8] = b"BitTorrent protocol";
+    buffer.put_u8(PROTOCOL.len() as u8);
+    buffer.put_slice(PROTOCOL);
+    buffer.put_slice(&[0_u8; 8] as &[u8]);
+    buffer.put_slice(&info_hash as &[u8]);
+    buffer.put_slice(&our_peer_id as &[u8]);
+}
+
+pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<[u8; 20]> {
+    if buffer.len() < 68 {
+        // Meh?
+        return Err(ErrorKind::UnexpectedEof.into());
+    }
+    let str_len = buffer.get_u8() as usize;
+    if &buffer[..str_len] != b"BitTorrent protocol" as &[u8] {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    buffer.advance(str_len);
+    // Skip extensions for now
+    buffer.advance(8);
+    let peer_info_hash: [u8; 20] = buffer[..20]
+        .try_into()
+        .map_err(|_err| ErrorKind::InvalidData)?;
+    if peer_info_hash != info_hash {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    buffer.advance(20_usize);
+    let peer_id = buffer[..20]
+        .try_into()
+        .map_err(|_err| ErrorKind::InvalidData)?;
+    Ok(peer_id)
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -168,10 +213,9 @@ impl PeerMessageDecoder {
         }
     }
 
-    pub fn append_data(&mut self, incoming: &mut [u8]) {
+    pub fn append_data(&mut self, incoming: &[u8]) {
         self.data.extend_from_slice(incoming);
     }
-
 }
 
 impl Iterator for PeerMessageDecoder {
@@ -263,4 +307,3 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
 }
 
 // TODO: tests
-

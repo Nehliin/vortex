@@ -6,22 +6,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+use buf_pool::BufferPool;
 use buf_ring::{Bid, BufferRing};
-use file::MmapFile;
 use io_uring::{
     cqueue::Entry,
     opcode,
     types::{self, Timespec},
     IoUring, SubmissionQueue,
 };
-use peer_connection::{incoming_handshake, PeerConnection};
+use peer_connection::PeerConnection;
+use peer_protocol::{generate_peer_id, parse_handshake, write_handshake, PeerMessage};
 use slab::Slab;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
+mod buf_pool;
 mod buf_ring;
 mod file;
 mod peer_connection;
-pub mod peer_message;
+mod peer_protocol;
 
 const TIMESPEC: &Timespec = &Timespec::new().sec(1);
 
@@ -31,11 +33,24 @@ const TIMESPEC: &Timespec = &Timespec::new().sec(1);
 enum Event {
     Accept,
     // fd?
-    Connect { fd: RawFd, addr: SocketAddr },
-    Write { fd: RawFd },
-    Recv { fd: RawFd },
-    ConnectedWrite { connection_idx: usize },
-    ConnectedRecv { connection_idx: usize },
+    Connect {
+        fd: RawFd,
+        addr: SocketAddr,
+    },
+    Write {
+        fd: RawFd,
+        buffer_idx: usize,
+    },
+    Recv {
+        fd: RawFd,
+    },
+    ConnectedWrite {
+        connection_idx: usize,
+        buffer_idx: usize,
+    },
+    ConnectedRecv {
+        connection_idx: usize,
+    },
 }
 
 pub fn setup_listener(info_hash: [u8; 20]) {
@@ -75,25 +90,28 @@ pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
         .unwrap();
 
     let mut event = Slab::with_capacity(256);
-    let event_idx = event.insert(Event::Connect { addr });
-    let addr = SockAddr::from(addr);
     let stream = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
 
+    let event_idx = event.insert(Event::Connect {
+        addr,
+        fd: stream.as_raw_fd(),
+    });
+    let addr = SockAddr::from(addr);
     let connect_op = opcode::Connect::new(
         types::Fd(stream.as_raw_fd()),
         addr.as_ptr() as *const _,
         addr.len(),
     )
     .build()
-    .flags(io_uring::squeue::Flags::IO_LINK)
+    //    .flags(io_uring::squeue::Flags::IO_LINK)
     .user_data(event_idx as _);
     unsafe {
         ring.submission().push(&connect_op).unwrap();
     }
-    let timeout_op = opcode::LinkTimeout::new(TIMESPEC).build().user_data(0xdead);
-    unsafe {
-        ring.submission().push(&timeout_op).unwrap();
-    }
+    //   let timeout_op = opcode::LinkTimeout::new(TIMESPEC).build().user_data(0xdead);
+    //  unsafe {
+    //     ring.submission().push(&timeout_op).unwrap();
+    //}
 
     ring.submission().sync();
 
@@ -111,6 +129,7 @@ fn event_handler(
     cqe: Entry,
     events: &mut Slab<Event>,
     connections: &mut Slab<PeerConnection>,
+    write_pool: &mut BufferPool,
     read_ring: &mut BufferRing,
     info_hash: [u8; 20],
 ) -> io::Result<()> {
@@ -160,8 +179,22 @@ fn event_handler(
             }
         }
         Event::Connect { addr, fd } => {
-            let write_token = events.insert(Event::Write { fd });
-            let write_op = opcode::Write::new(types::Fd(fd), read_ring.bgid())
+            let our_id = generate_peer_id();
+            let (buffer_idx, buffer) = write_pool.get_buffer();
+            write_handshake(our_id, info_hash, buffer);
+            let write_token = events.insert(Event::Write { fd, buffer_idx });
+            let write_op =
+                opcode::Write::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
+                    .build()
+                    .user_data(write_token as _)
+                    // Link with read
+                    .flags(io_uring::squeue::Flags::IO_LINK);
+            unsafe {
+                sq.push(&write_op)
+                    .expect("SubmissionQueue should never be full");
+            }
+            let read_token = events.insert(Event::Recv { fd });
+            let read_op = opcode::RecvMulti::new(types::Fd(fd), read_ring.bgid())
                 .build()
                 .user_data(read_token as _)
                 .flags(io_uring::squeue::Flags::BUFFER_SELECT);
@@ -173,26 +206,35 @@ fn event_handler(
             // This only reports connect complete user data is needed to provide more info
             println!("CONNECT: {addr}");
         }
-        Event::Write { fd } => {
-            // todo clear buffer
+        Event::Write { fd, buffer_idx } => {
             log::debug!("Wrote to unestablsihed connection");
             events.remove(event_idx as _);
+            write_pool.return_buffer(buffer_idx);
         }
-        Event::ConnectedWrite { connection_idx } => {
-            // todo clear buffer
+        Event::ConnectedWrite {
+            connection_idx,
+            buffer_idx,
+        } => {
             log::debug!("Wrote to established connection");
             events.remove(event_idx as _);
+            write_pool.return_buffer(buffer_idx);
         }
         Event::Recv { fd } => {
+            log::info!("RECV");
             let len = ret as usize;
             let bid = io_uring::cqueue::buffer_select(cqe.flags()).unwrap();
             let buffer = read_ring.get(dbg!(bid));
             // Expect this to be the handshake response
-            let peer_connection = incoming_handshake(fd, info_hash, &buffer[..len]).unwrap();
+            let peer_id = parse_handshake(info_hash, &buffer[..len]).unwrap();
+            let peer_connection = PeerConnection::new(fd, peer_id);
             log::info!("Finished handshake!: {peer_connection:?}");
+            let connection_idx = connections.insert(peer_connection);
+            // We are now connected!
+            *token = Event::ConnectedRecv { connection_idx };
             read_ring.return_bid(bid);
         }
         Event::ConnectedRecv { connection_idx } => {
+            log::info!("CONNRECV");
             let connection = &mut connections[connection_idx];
             let is_more = io_uring::cqueue::more(cqe.flags());
             if !is_more {
@@ -217,7 +259,6 @@ fn event_handler(
                 println!("READ 0");
                 events.remove(event_idx as _);
                 let fd = connection.fd;
-                drop(connection);
                 connections.remove(connection_idx as _);
                 println!("shutting down connection");
                 // TODO graceful shutdown
@@ -225,7 +266,17 @@ fn event_handler(
                     libc::close(fd);
                 }
             } else {
-                recv_handler(buffer, connection)?;
+                connection.stateful_decoder.append_data(buffer);
+                while let Some(parse_result) = connection.stateful_decoder.next() {
+                    match parse_result {
+                        Ok(peer_message) => {
+                            recv_handler(peer_message, connection);
+                        }
+                        Err(err) => {
+                            log::error!("Failed decoding message: {err}");
+                        }
+                    }
+                }
             }
             // TODO: This is not safe, need to always return these
             // (DO THIS OUTSIDE THIS FUNC)
@@ -235,18 +286,16 @@ fn event_handler(
     Ok(())
 }
 
-fn recv_handler(data: &[u8], connection: &mut PeerConnection) -> io::Result<()> {
-    let string = String::from_utf8_lossy(data);
-    log::info!("RECIEVED: {string} from {:?}", connection.peer_id);
+fn recv_handler(message: PeerMessage, connection: &mut PeerConnection) -> io::Result<()> {
+    log::info!("RECIEVED: {message:?} from {:?}", connection.peer_id);
     Ok(())
 }
 
 fn event_loop(mut ring: IoUring, events: &mut Slab<Event>, info_hash: [u8; 20]) -> io::Result<()> {
     let (submitter, mut sq, mut cq) = ring.split();
-    let mut write_ring = BufferRing::new(1, 64, 32).unwrap();
-    write_ring.register(&submitter).unwrap();
+    let mut write_pool = BufferPool::new(64, 128);
 
-    let mut read_ring = BufferRing::new(1, 64, 32).unwrap();
+    let mut read_ring = BufferRing::new(1, 64, 512).unwrap();
     read_ring.register(&submitter).unwrap();
 
     let mut connections = Slab::with_capacity(64);
@@ -295,6 +344,7 @@ fn event_loop(mut ring: IoUring, events: &mut Slab<Event>, info_hash: [u8; 20]) 
                 cqe,
                 events,
                 &mut connections,
+                &mut write_pool,
                 &mut read_ring,
                 info_hash,
             ) {

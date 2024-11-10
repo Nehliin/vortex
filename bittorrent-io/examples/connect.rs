@@ -10,10 +10,17 @@ fn main() {
         .filter_level(log::LevelFilter::Debug)
         //        .target(env_logger::Target::Pipe(Box::new(log_file)))
         .init();
-    let handle = std::thread::spawn(|| {
-        let listener = TcpListener::bind("127.0.0.1:3456").unwrap();
-        let (stream, _) = listener.accept().unwrap();
-    });
-    connect_to("127.0.0.1:3456".parse().unwrap());
-    handle.join().unwrap();
+    let torrent =
+        lava_torrent::torrent::v1::Torrent::read_from_file("/home/popuser/vortex/bittorrent/assets/test-file-1.torrent").unwrap();
+    //let handle = std::thread::spawn(|| {
+     //   let listener = TcpListener::bind("127.0.0.1:3456").unwrap();
+      //  let (stream, _) = listener.accept().unwrap();
+    //});
+    //std::net::TcpStream::connect("172.17.0.2:51413").unwrap();
+
+    connect_to(
+        "172.17.0.2:51413".parse().unwrap(),
+        torrent.info_hash_bytes().try_into().unwrap(),
+    );
+    //handle.join().unwrap();
 }
