@@ -5,7 +5,7 @@ use std::{
 
 use bytes::{Buf, BufMut};
 
-use crate::peer_protocol::PeerMessageDecoder;
+use crate::peer_protocol::{PeerMessage, PeerMessageDecoder};
 
 #[derive(Debug)]
 pub struct PeerConnection {
@@ -45,8 +45,11 @@ impl PeerConnection {
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
         }
     }
+
+    pub fn handle_message(&mut self, peer_message: PeerMessage) {
+
+    }
 }
 
 // pub peer_id: [u8; 20],
 // pub peer_addr: SocketAddr,
-
