@@ -14,9 +14,9 @@ fn main() {
         .init();
 
     let torrent =
-        lava_torrent::torrent::v1::Torrent::read_from_file("assets/test-file-1.torrent").unwrap();
+        lava_torrent::torrent::v1::Torrent::read_from_file("/home/popuser/vortex/bittorrent/assets/test-file-1.torrent").unwrap();
     tokio_uring::start(async move {
-        let mut torrent_manager = TorrentManager::new("assets/test-file-1.torrent").await;
+        let mut torrent_manager = TorrentManager::new("/home/popuser/vortex/bittorrent/assets/test-file-1.torrent").await;
         let peer_list = torrent_manager.peer_list_handle();
         peer_list.insert("172.17.0.2:51413".parse().unwrap());
 
