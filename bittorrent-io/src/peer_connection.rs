@@ -49,7 +49,7 @@ impl PeerConnection {
 
     pub fn handle_message(&mut self, peer_message: PeerMessage) -> io::Result<()> {
         log::debug!("Received: {peer_message:?}");
-        match peer_message {
+        /*match peer_message {
             PeerMessage::Choke => {
                 log::info!("[Peer: {:?}] Peer is choking us!", self.peer_id);
                 self.peer_choking = true;
@@ -101,7 +101,7 @@ impl PeerConnection {
                 length,
             } => todo!(),
             PeerMessage::Piece { index, begin, data } => todo!(),
-        }
+        }*/
         Ok(())
     }
 }

@@ -3,6 +3,7 @@ use std::{
     net::SocketAddr,
     os::fd::RawFd,
     time::{Duration, Instant},
+    u32,
 };
 
 use io_uring::{
@@ -15,7 +16,7 @@ use slab::Slab;
 
 use crate::{
     buf_pool::BufferPool,
-    buf_ring::BufferRing,
+    buf_ring::{Bgid, BufferRing},
     peer_connection::PeerConnection,
     peer_protocol::{generate_peer_id, parse_handshake, write_handshake},
 };
@@ -26,24 +27,71 @@ use crate::{
 pub enum Event {
     Accept,
     // fd?
-    Connect {
-        fd: RawFd,
-        addr: SocketAddr,
-    },
-    Write {
-        fd: RawFd,
-        buffer_idx: usize,
-    },
-    Recv {
-        fd: RawFd,
-    },
-    ConnectedWrite {
-        connection_idx: usize,
-        buffer_idx: usize,
-    },
-    ConnectedRecv {
-        connection_idx: usize,
-    },
+    Connect { fd: RawFd, addr: SocketAddr },
+    Write { fd: RawFd },
+    Recv { fd: RawFd },
+    ConnectedWrite { connection_idx: usize },
+    ConnectedRecv { connection_idx: usize },
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct UserData {
+    buffer_idx: Option<u32>,
+    event_idx: u32,
+}
+
+impl UserData {
+    fn new(event_idx: usize, buffer_idx: Option<usize>) -> Self {
+        Self {
+            buffer_idx: buffer_idx.map(|idx| idx.try_into().unwrap()),
+            event_idx: event_idx.try_into().unwrap(),
+        }
+    }
+
+    fn as_u64(&self) -> u64 {
+        ((self.event_idx as u64) << 32) | self.buffer_idx.unwrap_or(u32::MAX) as u64
+    }
+
+    fn from_u64(val: u64) -> Self {
+        Self {
+            event_idx: (val >> 32) as u32,
+            buffer_idx: ((val as u32) != u32::MAX).then_some(val as u32),
+        }
+    }
+}
+
+fn event_error_handler(
+    sq: &mut SubmissionQueue<'_>,
+    error_code: u32,
+    user_data: UserData,
+    events: &mut Slab<Event>,
+    bgid: Bgid,
+) -> io::Result<()> {
+    if error_code as i32 == libc::ENOBUFS {
+        // TODO: statistics
+        log::warn!("Ran out of buffers!, resubmitting recv op");
+        let event = &events[user_data.event_idx as _];
+        // Ran out of buffers!
+        if let Event::Recv { fd } = event {
+            let read_op = opcode::RecvMulti::new(types::Fd(*fd), bgid)
+                .build()
+                // Reuse the user data
+                .user_data(user_data.as_u64())
+                .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+            unsafe {
+                sq.push(&read_op)
+                    .expect("SubmissionQueue should never be full");
+            }
+            Ok(())
+        } else {
+            panic!("Ran out of buffers on a non recv operation");
+        }
+    } else {
+        let event = events.remove(user_data.event_idx as _);
+        dbg!(event);
+        let err = std::io::Error::from_raw_os_error(error_code as i32);
+        return Err(err);
+    }
 }
 
 fn event_handler(
@@ -52,48 +100,27 @@ fn event_handler(
     events: &mut Slab<Event>,
     connections: &mut Slab<PeerConnection>,
     write_pool: &mut BufferPool,
-    read_ring: &mut BufferRing,
+    read_buffer: Option<&[u8]>,
+    bgid: Bgid,
     info_hash: [u8; 20],
 ) -> io::Result<()> {
     let ret = cqe.result();
-    let event_idx = cqe.user_data();
-    let token = &mut events[event_idx as usize];
+    let user_data = UserData::from_u64(cqe.user_data());
+    let event = &mut events[user_data.event_idx as usize];
     if ret < 0 {
-        if -ret == libc::ENOBUFS {
-            // TODO: statistics
-            log::warn!("Ran out of buffers!, resubmitting recv op");
-            // Ran out of buffers!
-            if let Event::Recv { fd } = token {
-                let read_op = opcode::RecvMulti::new(types::Fd(*fd), read_ring.bgid())
-                    .build()
-                    // Reuse the token
-                    .user_data(event_idx as _)
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                unsafe {
-                    sq.push(&read_op)
-                        .expect("SubmissionQueue should never be full");
-                }
-            } else {
-                panic!("Ran out of buffers on a non recv operation");
-            }
-        } else {
-            let event_idx = cqe.user_data();
-            let token = &mut events[event_idx as usize];
-            dbg!(token);
-            let err = std::io::Error::from_raw_os_error(-ret);
-            return Err(err);
-        }
+        return event_error_handler(sq, -ret as _, user_data, events, bgid);
     }
-    match token.clone() {
+    match event.clone() {
         Event::Accept => {
             log::info!("Accepted connection!");
             let fd = ret;
             // Construct new recv token on accept, after that it lives forever and or is reused
             // since this is a recvmulti operation
             let read_token = events.insert(Event::Recv { fd });
-            let read_op = opcode::RecvMulti::new(types::Fd(fd), read_ring.bgid())
+            let user_data = UserData::new(read_token, None);
+            let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
                 .build()
-                .user_data(read_token as _)
+                .user_data(user_data.as_u64())
                 .flags(io_uring::squeue::Flags::BUFFER_SELECT);
             unsafe {
                 sq.push(&read_op)
@@ -104,11 +131,12 @@ fn event_handler(
             let our_id = generate_peer_id();
             let (buffer_idx, buffer) = write_pool.get_buffer();
             write_handshake(our_id, info_hash, buffer);
-            let write_token = events.insert(Event::Write { fd, buffer_idx });
+            let write_token = events.insert(Event::Write { fd });
+            let user_data = UserData::new(write_token, Some(buffer_idx));
             let write_op =
                 opcode::Write::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
                     .build()
-                    .user_data(write_token as _)
+                    .user_data(user_data.as_u64())
                     // Link with read
                     .flags(io_uring::squeue::Flags::IO_LINK);
             unsafe {
@@ -116,9 +144,10 @@ fn event_handler(
                     .expect("SubmissionQueue should never be full");
             }
             let read_token = events.insert(Event::Recv { fd });
-            let read_op = opcode::RecvMulti::new(types::Fd(fd), read_ring.bgid())
+            let user_data = UserData::new(read_token, None);
+            let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
                 .build()
-                .user_data(read_token as _)
+                .user_data(user_data.as_u64())
                 .flags(io_uring::squeue::Flags::BUFFER_SELECT);
             unsafe {
                 sq.push(&read_op)
@@ -128,32 +157,26 @@ fn event_handler(
             // This only reports connect complete user data is needed to provide more info
             println!("CONNECT: {addr}");
         }
-        Event::Write { fd, buffer_idx } => {
+        Event::Write { fd } => {
             log::debug!("Wrote to unestablsihed connection");
-            events.remove(event_idx as _);
-            write_pool.return_buffer(buffer_idx);
+            events.remove(user_data.event_idx as _);
         }
-        Event::ConnectedWrite {
-            connection_idx,
-            buffer_idx,
-        } => {
+        Event::ConnectedWrite { connection_idx } => {
             log::debug!("Wrote to established connection");
-            events.remove(event_idx as _);
-            write_pool.return_buffer(buffer_idx);
+            events.remove(user_data.event_idx as _);
         }
         Event::Recv { fd } => {
             log::info!("RECV");
             let len = ret as usize;
-            let bid = io_uring::cqueue::buffer_select(cqe.flags()).unwrap();
-            let buffer = read_ring.get(dbg!(bid));
+            // We always have a buffer associated
+            let buffer = read_buffer.unwrap();
             // Expect this to be the handshake response
             let peer_id = parse_handshake(info_hash, &buffer[..len]).unwrap();
             let peer_connection = PeerConnection::new(fd, peer_id);
             log::info!("Finished handshake!: {peer_connection:?}");
             let connection_idx = connections.insert(peer_connection);
             // We are now connected!
-            *token = Event::ConnectedRecv { connection_idx };
-            read_ring.return_bid(bid);
+            *event = Event::ConnectedRecv { connection_idx };
         }
         Event::ConnectedRecv { connection_idx } => {
             log::info!("CONNRECV");
@@ -163,9 +186,9 @@ fn event_handler(
                 println!("No more, starting new recv");
                 // TODO? Return bids and or read the current buffer?
                 //buf_ring.return_bid(bid);
-                let read_op = opcode::RecvMulti::new(types::Fd(connection.fd), read_ring.bgid())
+                let read_op = opcode::RecvMulti::new(types::Fd(connection.fd), bgid)
                     .build()
-                    .user_data(event_idx as _)
+                    .user_data(user_data.as_u64())
                     .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                 unsafe {
                     sq.push(&read_op).unwrap();
@@ -174,12 +197,11 @@ fn event_handler(
 
             let len = ret as usize;
 
-            let bid = io_uring::cqueue::buffer_select(cqe.flags()).unwrap();
-            let buffer = read_ring.get(dbg!(bid));
+            let buffer = read_buffer.unwrap();
             let buffer = &buffer[..len];
             if buffer.is_empty() {
                 println!("READ 0");
-                events.remove(event_idx as _);
+                events.remove(user_data.event_idx as _);
                 let fd = connection.fd;
                 connections.remove(connection_idx as _);
                 println!("shutting down connection");
@@ -192,7 +214,7 @@ fn event_handler(
                 while let Some(parse_result) = connection.stateful_decoder.next() {
                     match parse_result {
                         Ok(peer_message) => {
-                            connection.handle_message(peer_message);
+                            connection.handle_message(peer_message)?;
                         }
                         Err(err) => {
                             log::error!("Failed decoding message: {err}");
@@ -200,9 +222,6 @@ fn event_handler(
                     }
                 }
             }
-            // TODO: This is not safe, need to always return these
-            // (DO THIS OUTSIDE THIS FUNC)
-            read_ring.return_bid(bid);
         }
     }
     Ok(())
@@ -262,18 +281,56 @@ pub fn event_loop(
             last_tick = Instant::now();
         }
 
+        let bgid = read_ring.bgid();
         for cqe in &mut cq {
+            let user_data = UserData::from_u64(cqe.user_data());
+            let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
+
+            let read_buffer = read_bid.map(|bid| read_ring.get(bid));
+
             if let Err(err) = event_handler(
                 &mut sq,
                 cqe,
                 events,
                 &mut connections,
                 &mut write_pool,
-                &mut read_ring,
+                read_buffer,
+                bgid,
                 info_hash,
             ) {
                 log::error!("Error handling event: {err}");
             }
+
+            // time to return any potential write buffers
+            if let Some(write_idx) = user_data.buffer_idx {
+                write_pool.return_buffer(write_idx as usize);
+            }
+
+            // Ensure bids are always returned
+            if let Some(bid) = read_bid {
+                read_ring.return_bid(bid);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn test_user_data_roundtrip() {
+        let data = UserData::new((u32::MAX as usize) - 1, None);
+        let serialized = data.as_u64();
+        assert_eq!(data, UserData::from_u64(serialized));
+
+        let data = UserData::new((u32::MAX as usize) - 1, Some(0));
+        let serialized = data.as_u64();
+        assert_eq!(data, UserData::from_u64(serialized));
+
+        let data = UserData::new(0, Some((u32::MAX as usize) - 1));
+        let serialized = data.as_u64();
+        assert_eq!(data, UserData::from_u64(serialized));
     }
 }
