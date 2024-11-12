@@ -8,7 +8,7 @@ use std::{
 
 use buf_pool::BufferPool;
 use buf_ring::{Bid, BufferRing};
-use event_loop::Event;
+use event_loop::{Event, EventLoop, UserData};
 use io_uring::{
     cqueue::Entry,
     opcode,
@@ -26,6 +26,7 @@ mod event_loop;
 mod file;
 mod peer_connection;
 mod peer_protocol;
+mod piece_selector;
 
 pub fn setup_listener(info_hash: [u8; 20]) {
     let mut ring: IoUring = IoUring::builder()
@@ -50,8 +51,9 @@ pub fn setup_listener(info_hash: [u8; 20]) {
     }
     ring.submission().sync();
 
-    // event loop
-    event_loop::event_loop(ring, &mut events, info_hash, tick).unwrap()
+    let our_id = generate_peer_id();
+    let mut event_loop = EventLoop::new(our_id, events);
+    event_loop.run(ring, info_hash, tick).unwrap()
 }
 
 pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
@@ -92,7 +94,9 @@ pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
     ring.submission().sync();
 
     // event loop
-    event_loop::event_loop(ring, &mut events, info_hash, tick).unwrap()
+    let our_id = generate_peer_id();
+    let mut event_loop = EventLoop::new(our_id, events);
+    event_loop.run(ring, info_hash, tick).unwrap()
 }
 
 // Validate hashes in here and simply use one shot channels

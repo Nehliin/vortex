@@ -16,9 +16,9 @@ use slab::Slab;
 
 use crate::{
     buf_pool::BufferPool,
-    buf_ring::{Bgid, BufferRing},
+    buf_ring::{Bgid, Bid, BufferRing},
     peer_connection::PeerConnection,
-    peer_protocol::{generate_peer_id, parse_handshake, write_handshake},
+    peer_protocol::{parse_handshake, write_handshake},
 };
 
 // Write fd Read fd
@@ -94,223 +94,235 @@ fn event_error_handler(
     }
 }
 
-fn event_handler(
-    sq: &mut SubmissionQueue<'_>,
-    cqe: Entry,
-    events: &mut Slab<Event>,
-    connections: &mut Slab<PeerConnection>,
-    write_pool: &mut BufferPool,
-    read_buffer: Option<&[u8]>,
-    bgid: Bgid,
-    info_hash: [u8; 20],
-) -> io::Result<()> {
-    let ret = cqe.result();
-    let user_data = UserData::from_u64(cqe.user_data());
-    let event = &mut events[user_data.event_idx as usize];
-    if ret < 0 {
-        return event_error_handler(sq, -ret as _, user_data, events, bgid);
-    }
-    match event.clone() {
-        Event::Accept => {
-            log::info!("Accepted connection!");
-            let fd = ret;
-            // Construct new recv token on accept, after that it lives forever and or is reused
-            // since this is a recvmulti operation
-            let read_token = events.insert(Event::Recv { fd });
-            let user_data = UserData::new(read_token, None);
-            let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
-                .build()
-                .user_data(user_data.as_u64())
-                .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-            unsafe {
-                sq.push(&read_op)
-                    .expect("SubmissionQueue should never be full");
-            }
-        }
-        Event::Connect { addr, fd } => {
-            let our_id = generate_peer_id();
-            let (buffer_idx, buffer) = write_pool.get_buffer();
-            write_handshake(our_id, info_hash, buffer);
-            let write_token = events.insert(Event::Write { fd });
-            let user_data = UserData::new(write_token, Some(buffer_idx));
-            let write_op =
-                opcode::Write::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
-                    .build()
-                    .user_data(user_data.as_u64())
-                    // Link with read
-                    .flags(io_uring::squeue::Flags::IO_LINK);
-            unsafe {
-                sq.push(&write_op)
-                    .expect("SubmissionQueue should never be full");
-            }
-            let read_token = events.insert(Event::Recv { fd });
-            let user_data = UserData::new(read_token, None);
-            let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
-                .build()
-                .user_data(user_data.as_u64())
-                .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-            unsafe {
-                sq.push(&read_op)
-                    .expect("SubmissionQueue should never be full");
-            }
-            // send write + read linked
-            // This only reports connect complete user data is needed to provide more info
-            println!("CONNECT: {addr}");
-        }
-        Event::Write { fd } => {
-            log::debug!("Wrote to unestablsihed connection");
-            events.remove(user_data.event_idx as _);
-        }
-        Event::ConnectedWrite { connection_idx } => {
-            log::debug!("Wrote to established connection");
-            events.remove(user_data.event_idx as _);
-        }
-        Event::Recv { fd } => {
-            log::info!("RECV");
-            let len = ret as usize;
-            // We always have a buffer associated
-            let buffer = read_buffer.unwrap();
-            // Expect this to be the handshake response
-            let peer_id = parse_handshake(info_hash, &buffer[..len]).unwrap();
-            let peer_connection = PeerConnection::new(fd, peer_id);
-            log::info!("Finished handshake!: {peer_connection:?}");
-            let connection_idx = connections.insert(peer_connection);
-            // We are now connected!
-            *event = Event::ConnectedRecv { connection_idx };
-        }
-        Event::ConnectedRecv { connection_idx } => {
-            log::info!("CONNRECV");
-            let connection = &mut connections[connection_idx];
-            let is_more = io_uring::cqueue::more(cqe.flags());
-            if !is_more {
-                println!("No more, starting new recv");
-                // TODO? Return bids and or read the current buffer?
-                //buf_ring.return_bid(bid);
-                let read_op = opcode::RecvMulti::new(types::Fd(connection.fd), bgid)
-                    .build()
-                    .user_data(user_data.as_u64())
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                unsafe {
-                    sq.push(&read_op).unwrap();
-                }
-            }
-
-            let len = ret as usize;
-
-            let buffer = read_buffer.unwrap();
-            let buffer = &buffer[..len];
-            if buffer.is_empty() {
-                println!("READ 0");
-                events.remove(user_data.event_idx as _);
-                let fd = connection.fd;
-                connections.remove(connection_idx as _);
-                println!("shutting down connection");
-                // TODO graceful shutdown
-                unsafe {
-                    libc::close(fd);
-                }
-            } else {
-                connection.stateful_decoder.append_data(buffer);
-                while let Some(parse_result) = connection.stateful_decoder.next() {
-                    match parse_result {
-                        Ok(peer_message) => {
-                            connection.handle_message(peer_message)?;
-                        }
-                        Err(err) => {
-                            log::error!("Failed decoding message: {err}");
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 const TIMESPEC: &Timespec = &Timespec::new().sec(1);
 
-pub fn event_loop(
-    mut ring: IoUring,
-    events: &mut Slab<Event>,
-    info_hash: [u8; 20],
-    mut tick: impl FnMut(&Duration),
-) -> io::Result<()> {
-    let (submitter, mut sq, mut cq) = ring.split();
-    let mut write_pool = BufferPool::new(64, 128);
+pub struct EventLoop {
+    events: Slab<Event>,
+    write_pool: BufferPool,
+    read_ring: BufferRing,
+    connections: Slab<PeerConnection>,
+    our_id: [u8; 20],
+}
 
-    let mut read_ring = BufferRing::new(1, 64, 512).unwrap();
-    read_ring.register(&submitter).unwrap();
-
-    let mut connections = Slab::with_capacity(64);
-
-    let mut last_tick = Instant::now();
-    loop {
-        let args = types::SubmitArgs::new().timespec(TIMESPEC);
-        match submitter.submit_with_args(1, &args) {
-            Ok(_) => (),
-            Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => log::warn!("Ring busy"),
-            Err(ref err) if err.raw_os_error() == Some(libc::ETIME) => {
-                log::debug!("Tick hit ETIME")
-            }
-            Err(err) => {
-                log::error!("Failed ring submission, aborting: {err}");
-                return Err(err);
-            }
+impl EventLoop {
+    pub fn new(our_id: [u8; 20], events: Slab<Event>) -> Self {
+        Self {
+            events,
+            write_pool: BufferPool::new(64, 128),
+            read_ring: BufferRing::new(1, 64, 512).unwrap(),
+            connections: Slab::with_capacity(64),
+            our_id,
         }
-        cq.sync();
-        if cq.overflow() > 0 {
-            log::error!("CQ overflow");
-        }
+    }
 
-        // TODO: Loop this and track backlog like the example if necessary
-        if sq.is_full() {
-            match submitter.submit() {
+    pub fn run(
+        &mut self,
+        mut ring: IoUring,
+        info_hash: [u8; 20],
+        mut tick: impl FnMut(&Duration),
+    ) -> io::Result<()> {
+        let (submitter, mut sq, mut cq) = ring.split();
+
+        self.read_ring.register(&submitter).unwrap();
+
+        let mut last_tick = Instant::now();
+        loop {
+            let args = types::SubmitArgs::new().timespec(TIMESPEC);
+            match submitter.submit_with_args(1, &args) {
                 Ok(_) => (),
                 Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => log::warn!("Ring busy"),
+                Err(ref err) if err.raw_os_error() == Some(libc::ETIME) => {
+                    log::debug!("Tick hit ETIME")
+                }
                 Err(err) => {
                     log::error!("Failed ring submission, aborting: {err}");
                     return Err(err);
                 }
             }
-        }
-        sq.sync();
-
-        let tick_delta = last_tick.elapsed();
-        if tick_delta > Duration::from_secs(1) {
-            tick(&tick_delta);
-            last_tick = Instant::now();
-        }
-
-        let bgid = read_ring.bgid();
-        for cqe in &mut cq {
-            let user_data = UserData::from_u64(cqe.user_data());
-            let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
-
-            let read_buffer = read_bid.map(|bid| read_ring.get(bid));
-
-            if let Err(err) = event_handler(
-                &mut sq,
-                cqe,
-                events,
-                &mut connections,
-                &mut write_pool,
-                read_buffer,
-                bgid,
-                info_hash,
-            ) {
-                log::error!("Error handling event: {err}");
+            cq.sync();
+            if cq.overflow() > 0 {
+                log::error!("CQ overflow");
             }
 
-            // time to return any potential write buffers
-            if let Some(write_idx) = user_data.buffer_idx {
-                write_pool.return_buffer(write_idx as usize);
+            // TODO: Loop this and track backlog like the example if necessary
+            if sq.is_full() {
+                match submitter.submit() {
+                    Ok(_) => (),
+                    Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
+                        log::warn!("Ring busy")
+                    }
+                    Err(err) => {
+                        log::error!("Failed ring submission, aborting: {err}");
+                        return Err(err);
+                    }
+                }
+            }
+            sq.sync();
+
+            let tick_delta = last_tick.elapsed();
+            if tick_delta > Duration::from_secs(1) {
+                tick(&tick_delta);
+                last_tick = Instant::now();
             }
 
-            // Ensure bids are always returned
-            if let Some(bid) = read_bid {
-                read_ring.return_bid(bid);
+            for cqe in &mut cq {
+                let user_data = UserData::from_u64(cqe.user_data());
+                let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
+
+                if let Err(err) = self.event_handler(&mut sq, cqe, read_bid, info_hash) {
+                    log::error!("Error handling event: {err}");
+                }
+
+                // time to return any potential write buffers
+                if let Some(write_idx) = user_data.buffer_idx {
+                    self.write_pool.return_buffer(write_idx as usize);
+                }
+
+                // Ensure bids are always returned
+                if let Some(bid) = read_bid {
+                    self.read_ring.return_bid(bid);
+                }
             }
         }
+    }
+
+    fn event_handler(
+        &mut self,
+        sq: &mut SubmissionQueue<'_>,
+        cqe: Entry,
+        read_bid: Option<Bid>,
+        info_hash: [u8; 20],
+    ) -> io::Result<()> {
+        let ret = cqe.result();
+        let user_data = UserData::from_u64(cqe.user_data());
+        let event = &mut self.events[user_data.event_idx as usize];
+        if ret < 0 {
+            return event_error_handler(
+                sq,
+                -ret as _,
+                user_data,
+                &mut self.events,
+                self.read_ring.bgid(),
+            );
+        }
+        match event.clone() {
+            Event::Accept => {
+                log::info!("Accepted connection!");
+                let fd = ret;
+                // Construct new recv token on accept, after that it lives forever and or is reused
+                // since this is a recvmulti operation
+                let read_token = self.events.insert(Event::Recv { fd });
+                let user_data = UserData::new(read_token, None);
+                let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
+                    .build()
+                    .user_data(user_data.as_u64())
+                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                unsafe {
+                    sq.push(&read_op)
+                        .expect("SubmissionQueue should never be full");
+                }
+            }
+            Event::Connect { addr, fd } => {
+                self.events.remove(user_data.event_idx as _);
+                // TODO: TIMEOUT
+                let (buffer_idx, buffer) = self.write_pool.get_buffer();
+                write_handshake(self.our_id, info_hash, buffer);
+                let write_token = self.events.insert(Event::Write { fd });
+                let user_data = UserData::new(write_token, Some(buffer_idx));
+                let write_op =
+                    opcode::Write::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
+                        .build()
+                        .user_data(user_data.as_u64())
+                        // Link with read
+                        .flags(io_uring::squeue::Flags::IO_LINK);
+                unsafe {
+                    sq.push(&write_op)
+                        .expect("SubmissionQueue should never be full");
+                }
+                let read_token = self.events.insert(Event::Recv { fd });
+                let user_data = UserData::new(read_token, None);
+                let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
+                    .build()
+                    .user_data(user_data.as_u64())
+                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                unsafe {
+                    sq.push(&read_op)
+                        .expect("SubmissionQueue should never be full");
+                }
+                // send write + read linked
+                // This only reports connect complete user data is needed to provide more info
+                println!("CONNECT: {addr}");
+            }
+            Event::Write { fd } => {
+                log::debug!("Wrote to unestablsihed connection");
+                self.events.remove(user_data.event_idx as _);
+            }
+            Event::ConnectedWrite { connection_idx } => {
+                log::debug!("Wrote to established connection");
+                self.events.remove(user_data.event_idx as _);
+            }
+            Event::Recv { fd } => {
+                log::info!("RECV");
+                let len = ret as usize;
+                // We always have a buffer associated
+                let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
+                // Expect this to be the handshake response
+                let peer_id = parse_handshake(info_hash, &buffer[..len]).unwrap();
+                let peer_connection = PeerConnection::new(fd, peer_id);
+                log::info!("Finished handshake!: {peer_connection:?}");
+                let connection_idx = self.connections.insert(peer_connection);
+                // We are now connected!
+                *event = Event::ConnectedRecv { connection_idx };
+            }
+            Event::ConnectedRecv { connection_idx } => {
+                log::info!("CONNRECV");
+                let connection = &mut self.connections[connection_idx];
+                let is_more = io_uring::cqueue::more(cqe.flags());
+                if !is_more {
+                    println!("No more, starting new recv");
+                    // TODO? Return bids and or read the current buffer?
+                    //buf_ring.return_bid(bid);
+                    let read_op =
+                        opcode::RecvMulti::new(types::Fd(connection.fd), self.read_ring.bgid())
+                            .build()
+                            .user_data(user_data.as_u64())
+                            .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                    unsafe {
+                        sq.push(&read_op).unwrap();
+                    }
+                }
+
+                let len = ret as usize;
+
+                // We always have a buffer associated
+                let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
+                let buffer = &buffer[..len];
+                if buffer.is_empty() {
+                    println!("READ 0");
+                    self.events.remove(user_data.event_idx as _);
+                    let fd = connection.fd;
+                    self.connections.remove(connection_idx as _);
+                    println!("shutting down connection");
+                    // TODO graceful shutdown
+                    unsafe {
+                        libc::close(fd);
+                    }
+                } else {
+                    connection.stateful_decoder.append_data(buffer);
+                    while let Some(parse_result) = connection.stateful_decoder.next() {
+                        match parse_result {
+                            Ok(peer_message) => {
+                                connection.handle_message(peer_message)?;
+                            }
+                            Err(err) => {
+                                log::error!("Failed decoding message: {err}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
