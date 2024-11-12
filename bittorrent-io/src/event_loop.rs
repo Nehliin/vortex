@@ -35,24 +35,24 @@ pub enum Event {
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-struct UserData {
+pub struct UserData {
     buffer_idx: Option<u32>,
     event_idx: u32,
 }
 
 impl UserData {
-    fn new(event_idx: usize, buffer_idx: Option<usize>) -> Self {
+    pub fn new(event_idx: usize, buffer_idx: Option<usize>) -> Self {
         Self {
             buffer_idx: buffer_idx.map(|idx| idx.try_into().unwrap()),
             event_idx: event_idx.try_into().unwrap(),
         }
     }
 
-    fn as_u64(&self) -> u64 {
+    pub fn as_u64(&self) -> u64 {
         ((self.event_idx as u64) << 32) | self.buffer_idx.unwrap_or(u32::MAX) as u64
     }
 
-    fn from_u64(val: u64) -> Self {
+    pub fn from_u64(val: u64) -> Self {
         Self {
             event_idx: (val >> 32) as u32,
             buffer_idx: ((val as u32) != u32::MAX).then_some(val as u32),
