@@ -38,11 +38,12 @@ pub fn setup_listener(info_hash: [u8; 20]) {
 
     let mut events = Slab::with_capacity(256);
     let event_idx = events.insert(Event::Accept);
+    let user_data = UserData::new(event_idx, None);
 
     let listener = TcpListener::bind(("127.0.0.1", 3456)).unwrap();
     let accept_op = opcode::AcceptMulti::new(types::Fd(listener.as_raw_fd()))
         .build()
-        .user_data(event_idx as _);
+        .user_data(user_data.as_u64());
 
     unsafe {
         ring.submission().push(&accept_op).unwrap();
@@ -70,6 +71,7 @@ pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
         addr,
         fd: stream.as_raw_fd(),
     });
+    let user_data = UserData::new(event_idx, None);
     let addr = SockAddr::from(addr);
     let connect_op = opcode::Connect::new(
         types::Fd(stream.as_raw_fd()),
@@ -78,7 +80,7 @@ pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
     )
     .build()
     //    .flags(io_uring::squeue::Flags::IO_LINK)
-    .user_data(event_idx as _);
+    .user_data(user_data.as_u64());
     unsafe {
         ring.submission().push(&connect_op).unwrap();
     }
