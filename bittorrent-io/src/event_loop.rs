@@ -19,6 +19,7 @@ use crate::{
     buf_ring::{Bgid, Bid, BufferRing},
     peer_connection::PeerConnection,
     peer_protocol::{parse_handshake, write_handshake},
+    TorrentState,
 };
 
 // Write fd Read fd
@@ -118,8 +119,8 @@ impl EventLoop {
     pub fn run(
         &mut self,
         mut ring: IoUring,
-        info_hash: [u8; 20],
-        mut tick: impl FnMut(&Duration),
+        mut torrent_state: TorrentState,
+        mut tick: impl FnMut(&Duration, &mut Slab<PeerConnection>),
     ) -> io::Result<()> {
         let (submitter, mut sq, mut cq) = ring.split();
 
@@ -169,7 +170,7 @@ impl EventLoop {
                 let user_data = UserData::from_u64(cqe.user_data());
                 let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
 
-                if let Err(err) = self.event_handler(&mut sq, cqe, read_bid, info_hash) {
+                if let Err(err) = self.event_handler(&mut sq, cqe, read_bid, &mut torrent_state) {
                     log::error!("Error handling event: {err}");
                 }
 
@@ -191,7 +192,7 @@ impl EventLoop {
         sq: &mut SubmissionQueue<'_>,
         cqe: Entry,
         read_bid: Option<Bid>,
-        info_hash: [u8; 20],
+        torrent_state: &mut TorrentState,
     ) -> io::Result<()> {
         let ret = cqe.result();
         let user_data = UserData::from_u64(cqe.user_data());
@@ -225,16 +226,19 @@ impl EventLoop {
             Event::Connect { addr, fd } => {
                 self.events.remove(user_data.event_idx as _);
                 // TODO: TIMEOUT
-                let (buffer_idx, buffer) = self.write_pool.get_buffer();
-                write_handshake(self.our_id, info_hash, buffer);
+                let buffer = self.write_pool.get_buffer();
+                write_handshake(self.our_id, torrent_state.info_hash, buffer.inner);
                 let write_token = self.events.insert(Event::Write { fd });
-                let user_data = UserData::new(write_token, Some(buffer_idx));
-                let write_op =
-                    opcode::Write::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
-                        .build()
-                        .user_data(user_data.as_u64())
-                        // Link with read
-                        .flags(io_uring::squeue::Flags::IO_LINK);
+                let user_data = UserData::new(write_token, Some(buffer.index));
+                let write_op = opcode::Write::new(
+                    types::Fd(fd),
+                    buffer.inner.as_ptr(),
+                    buffer.inner.len() as u32,
+                )
+                .build()
+                .user_data(user_data.as_u64())
+                // Link with read
+                .flags(io_uring::squeue::Flags::IO_LINK);
                 unsafe {
                     sq.push(&write_op)
                         .expect("SubmissionQueue should never be full");
@@ -267,7 +271,7 @@ impl EventLoop {
                 // We always have a buffer associated
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
                 // Expect this to be the handshake response
-                let peer_id = parse_handshake(info_hash, &buffer[..len]).unwrap();
+                let peer_id = parse_handshake(torrent_state.info_hash, &buffer[..len]).unwrap();
                 let peer_connection = PeerConnection::new(fd, peer_id);
                 log::info!("Finished handshake!: {peer_connection:?}");
                 let connection_idx = self.connections.insert(peer_connection);
