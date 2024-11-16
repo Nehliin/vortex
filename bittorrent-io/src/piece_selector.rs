@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
 
+use crate::peer_connection::PeerId;
+
 pub const SUBPIECE_SIZE: i32 = 16_384;
 
 // TODO
@@ -225,11 +227,11 @@ impl Piece {
         }
     }
 
-    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], peer_id: [u8;20]) {
+    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], peer_id: PeerId) {
         // This subpice is part of the currently downloading piece
         assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
-        log::trace!("[Peer: {:?}] Subpiece index received: {subpiece_index}", peer_id);
+        log::trace!("[Peer: {}] Subpiece index received: {subpiece_index}", peer_id);
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {
             assert_eq!(data.len() as i32, self.last_subpiece_length);

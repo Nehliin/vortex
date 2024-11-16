@@ -15,6 +15,7 @@ use io_uring::{
     types::{self, Timespec},
     IoUring, SubmissionQueue,
 };
+use lava_torrent::torrent::v1::Torrent;
 use peer_connection::PeerConnection;
 use peer_protocol::{generate_peer_id, parse_handshake, write_handshake, PeerMessage};
 use piece_selector::PieceSelector;
@@ -58,9 +59,17 @@ pub fn setup_listener(info_hash: [u8; 20]) {
 }
 
 struct TorrentState {
-    info_hash: [u8;20],
+    info_hash: [u8; 20],
     piece_selector: PieceSelector,
-    num_unchoked: usize,
+    torrent_info: Torrent,
+    num_unchoked: u32,
+    max_unchoked: u32,
+}
+
+impl TorrentState {
+    pub fn should_unchoke(&self) -> bool {
+        self.num_unchoked < self.max_unchoked
+    }
 }
 
 pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
@@ -109,5 +118,7 @@ pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
 // Validate hashes in here and simply use one shot channels
 fn tick(tick_delta: &Duration, connections: &mut Slab<PeerConnection>) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
+    // 1. Calculate bandwidth (deal with initial start up)
+    // 2. Go through them in order
+    // 3. select pieces
 }
-
