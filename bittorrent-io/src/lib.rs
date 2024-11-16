@@ -57,7 +57,7 @@ pub fn setup_listener(torrent_state: TorrentState) {
     event_loop.run(ring, torrent_state, tick).unwrap()
 }
 
-struct TorrentState {
+pub struct TorrentState {
     info_hash: [u8; 20],
     piece_selector: PieceSelector,
     torrent_info: Torrent,
@@ -66,6 +66,17 @@ struct TorrentState {
 }
 
 impl TorrentState {
+    pub fn new(torrent: Torrent) -> Self {
+        let info_hash = torrent.info_hash_bytes().try_into().unwrap();
+        Self {
+            info_hash,
+            piece_selector: PieceSelector::new(&torrent),
+            torrent_info: torrent,
+            num_unchoked: 0,
+            max_unchoked: 4,
+        }
+    }
+
     pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
     }
