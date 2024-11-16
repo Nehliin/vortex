@@ -14,6 +14,7 @@ log = "0.4"
 socket2 = "0.5"
 rand = "0.8"
 lava_torrent = "0.11"
+thiserror = "2"
 
 [dev-dependencies]
 env_logger = { workspace = true }
