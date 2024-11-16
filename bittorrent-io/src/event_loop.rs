@@ -15,9 +15,9 @@ use io_uring::{
 use slab::Slab;
 
 use crate::{
-    buf_pool::BufferPool,
+    buf_pool::{Buffer, BufferPool},
     buf_ring::{Bgid, Bid, BufferRing},
-    peer_connection::PeerConnection,
+    peer_connection::{Error, PeerConnection},
     peer_protocol::{parse_handshake, write_handshake},
     TorrentState,
 };
@@ -33,6 +33,36 @@ pub enum Event {
     Recv { fd: RawFd },
     ConnectedWrite { connection_idx: usize },
     ConnectedRecv { connection_idx: usize },
+}
+
+pub fn push_connected_write(
+    conn_id: usize,
+    fd: RawFd,
+    events: &mut Slab<Event>,
+    sq: &mut SubmissionQueue<'_>,
+    buffer: &Buffer,
+    flags: Option<io_uring::squeue::Flags>,
+) {
+    let event = events.insert(Event::ConnectedWrite {
+        connection_idx: conn_id,
+    });
+    let user_data = UserData::new(event, Some(buffer.index));
+    let write_op = opcode::Write::new(
+        types::Fd(fd),
+        buffer.inner.as_ptr(),
+        buffer.inner.len() as u32,
+    )
+    .build()
+    .user_data(user_data.as_u64());
+    let write_op = if let Some(flags) = flags {
+        write_op.flags(flags)
+    } else {
+        write_op
+    };
+    unsafe {
+        sq.push(&write_op)
+            .expect("SubmissionQueue should never be full");
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -162,7 +192,7 @@ impl EventLoop {
 
             let tick_delta = last_tick.elapsed();
             if tick_delta > Duration::from_secs(1) {
-                tick(&tick_delta);
+                tick(&tick_delta, &mut self.connections);
                 last_tick = Instant::now();
             }
 
@@ -313,10 +343,38 @@ impl EventLoop {
                     }
                 } else {
                     connection.stateful_decoder.append_data(buffer);
+                    let conn_fd = connection.fd;
                     while let Some(parse_result) = connection.stateful_decoder.next() {
                         match parse_result {
                             Ok(peer_message) => {
-                                connection.handle_message(peer_message)?;
+                                match connection.handle_message(
+                                    connection_idx,
+                                    peer_message,
+                                    torrent_state,
+                                ) {
+                                    Ok(outgoing_messages) => {
+                                        for msg in outgoing_messages {
+                                            // Buffers are returned in the event loop
+                                            let mut buffer = self.write_pool.get_buffer();
+                                            msg.encode(&mut buffer.inner);
+                                            push_connected_write(
+                                                connection_idx,
+                                                conn_fd,
+                                                &mut self.events,
+                                                sq,
+                                                &buffer,
+                                                None,
+                                            )
+                                        }
+                                    }
+                                    Err(Error::Disconnect) => {
+                                        log::warn!("[Peer {}] is being disconnected", connection.peer_id);
+                                        // TODO proper shutdown
+                                    }
+                                    Err(err) => {
+                                        log::error!("Failed handling message: {err}");
+                                    }
+                                }
                             }
                             Err(err) => {
                                 log::error!("Failed decoding message: {err}");
