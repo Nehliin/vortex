@@ -17,6 +17,7 @@ use io_uring::{
 };
 use peer_connection::PeerConnection;
 use peer_protocol::{generate_peer_id, parse_handshake, write_handshake, PeerMessage};
+use piece_selector::PieceSelector;
 use slab::Slab;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -54,6 +55,12 @@ pub fn setup_listener(info_hash: [u8; 20]) {
     let our_id = generate_peer_id();
     let mut event_loop = EventLoop::new(our_id, events);
     event_loop.run(ring, info_hash, tick).unwrap()
+}
+
+struct TorrentState {
+    info_hash: [u8;20],
+    piece_selector: PieceSelector,
+    num_unchoked: usize,
 }
 
 pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
@@ -100,11 +107,7 @@ pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
 }
 
 // Validate hashes in here and simply use one shot channels
-fn tick(tick_delta: &Duration) {
+fn tick(tick_delta: &Duration, connections: &mut Slab<PeerConnection>) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
 }
 
-fn recv_handler(message: PeerMessage, connection: &mut PeerConnection) -> io::Result<()> {
-    log::info!("RECIEVED: {message:?} from {:?}", connection.peer_id);
-    Ok(())
-}
