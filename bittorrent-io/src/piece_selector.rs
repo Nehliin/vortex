@@ -18,6 +18,13 @@ pub const SUBPIECE_SIZE: i32 = 16_384;
 
 pub struct RandomPiece;*/
 
+#[derive(Debug)]
+pub struct Subpiece {
+    pub index: i32,
+    pub offset: i32,
+    pub size: i32,
+}
+
 pub(crate) struct PieceSelector {
     //    strategy: T,
     completed_pieces: BitBox<u8, Msb0>,
@@ -182,5 +189,78 @@ impl PieceSelector {
         } else {
             self.piece_length / SUBPIECE_SIZE as u32
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct Piece {
+    pub index: i32,
+    // Contains only completed subpieces
+    pub completed_subpieces: BitBox,
+    // Contains both completed and inflight subpieces
+    pub inflight_subpieces: BitBox,
+    pub last_subpiece_length: i32,
+    // TODO used uninit memory here instead
+    memory: Vec<u8>,
+}
+
+impl Piece {
+    pub fn new(index: i32, lenght: u32) -> Self {
+        let memory = vec![0; lenght as usize];
+        let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
+            SUBPIECE_SIZE
+        } else {
+            lenght as i32 % SUBPIECE_SIZE
+        };
+        let subpieces =
+            (lenght / SUBPIECE_SIZE as u32) + u32::from(last_subpiece_length != SUBPIECE_SIZE);
+        let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
+        let inflight_subpieces = completed_subpieces.clone();
+        Self {
+            index,
+            completed_subpieces,
+            inflight_subpieces,
+            last_subpiece_length,
+            memory,
+        }
+    }
+
+    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], peer_id: [u8;20]) {
+        // This subpice is part of the currently downloading piece
+        assert_eq!(self.index, index);
+        let subpiece_index = begin / SUBPIECE_SIZE;
+        log::trace!("[Peer: {:?}] Subpiece index received: {subpiece_index}", peer_id);
+        let last_subpiece = subpiece_index == self.last_subpiece_index();
+        if last_subpiece {
+            assert_eq!(data.len() as i32, self.last_subpiece_length);
+        } else {
+            assert_eq!(data.len() as i32, SUBPIECE_SIZE);
+        }
+        self.completed_subpieces.set(subpiece_index as usize, true);
+        self.memory[begin as usize..begin as usize + data.len()].copy_from_slice(data);
+    }
+
+    #[inline]
+    pub fn on_subpiece_failed(&mut self, index: i32, begin: i32) {
+        // This subpice is part of the currently downloading piece
+        assert_eq!(self.index, index);
+        let subpiece_index = begin / SUBPIECE_SIZE;
+        self.inflight_subpieces.set(subpiece_index as usize, false);
+    }
+
+    // Perhaps this can return the subpice or a peer request directly?
+    #[inline]
+    pub fn next_unstarted_subpice(&self) -> Option<usize> {
+        self.inflight_subpieces.first_zero()
+    }
+
+    #[inline]
+    pub fn last_subpiece_index(&self) -> i32 {
+        self.completed_subpieces.len() as i32 - 1
+    }
+
+    #[inline]
+    pub fn is_complete(&self) -> bool {
+        self.completed_subpieces.all()
     }
 }
