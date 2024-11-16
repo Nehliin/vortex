@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::io;
 use std::io::ErrorKind;
 
@@ -75,7 +76,28 @@ pub fn write_handshake(our_peer_id: [u8; 20], info_hash: [u8; 20], mut buffer: &
     buffer.put_slice(&our_peer_id as &[u8]);
 }
 
-pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<[u8; 20]> {
+#[derive(Debug, Clone, Copy)]
+#[repr(transparent)]
+pub struct PeerId([u8; 20]);
+
+impl Display for PeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Ok(prefix) = core::str::from_utf8(&self.0[..8]) {
+            write!(f, "{prefix}")?;
+            for b in &self.0[8..] {
+                write!(f, "{:#x}", b)?;
+            }
+            Ok(())
+        } else {
+            for b in &self.0[..] {
+                write!(f, "{:#x}", b)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<PeerId> {
     if buffer.len() < 68 {
         // Meh?
         return Err(ErrorKind::UnexpectedEof.into());
@@ -97,7 +119,7 @@ pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<[u8
     let peer_id = buffer[..20]
         .try_into()
         .map_err(|_err| ErrorKind::InvalidData)?;
-    Ok(peer_id)
+    Ok(PeerId(peer_id))
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]

@@ -1,9 +1,7 @@
-use core::panic;
 use std::{
-    io,
     net::{SocketAddr, TcpListener},
-    os::fd::{AsRawFd, RawFd},
-    time::{Duration, Instant},
+    os::fd::AsRawFd,
+    time::Duration,
 };
 
 use buf_pool::BufferPool;
@@ -17,7 +15,7 @@ use io_uring::{
 };
 use lava_torrent::torrent::v1::Torrent;
 use peer_connection::PeerConnection;
-use peer_protocol::{generate_peer_id, parse_handshake, write_handshake, PeerMessage};
+use peer_protocol::generate_peer_id;
 use piece_selector::PieceSelector;
 use slab::Slab;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -30,7 +28,7 @@ mod peer_connection;
 mod peer_protocol;
 mod piece_selector;
 
-pub fn setup_listener(info_hash: [u8; 20]) {
+pub fn setup_listener(torrent_state: TorrentState) {
     let mut ring: IoUring = IoUring::builder()
         .setup_single_issuer()
         .setup_clamp()
@@ -55,7 +53,8 @@ pub fn setup_listener(info_hash: [u8; 20]) {
 
     let our_id = generate_peer_id();
     let mut event_loop = EventLoop::new(our_id, events);
-    event_loop.run(ring, info_hash, tick).unwrap()
+
+    event_loop.run(ring, torrent_state, tick).unwrap()
 }
 
 struct TorrentState {
@@ -72,7 +71,7 @@ impl TorrentState {
     }
 }
 
-pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
+pub fn connect_to(addr: SocketAddr, torrent_state: TorrentState) {
     let mut ring: IoUring = IoUring::builder()
         .setup_single_issuer()
         .setup_clamp()
@@ -112,7 +111,7 @@ pub fn connect_to(addr: SocketAddr, info_hash: [u8; 20]) {
     // event loop
     let our_id = generate_peer_id();
     let mut event_loop = EventLoop::new(our_id, events);
-    event_loop.run(ring, info_hash, tick).unwrap()
+    event_loop.run(ring, torrent_state, tick).unwrap()
 }
 
 // Validate hashes in here and simply use one shot channels
