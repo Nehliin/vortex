@@ -8,7 +8,7 @@ fn main() {
         //        .target(env_logger::Target::Pipe(Box::new(log_file)))
         .init();
     let handle = std::thread::spawn(|| {
-        setup_listener();
+        //setup_listener();
     });
     std::thread::sleep_ms(500);
     let mut stream = TcpStream::connect("127.0.0.1:3456").unwrap();
