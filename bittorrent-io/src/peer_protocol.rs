@@ -138,7 +138,7 @@ impl PeerMessage {
         }
     }
 
-    pub fn encode(self, mut buf: impl BufMut) {
+    pub fn encode(&self, buf: &mut impl BufMut) {
         match self {
             PeerMessage::Choke => {
                 buf.put_i32(1);
@@ -159,7 +159,7 @@ impl PeerMessage {
             PeerMessage::Have { index } => {
                 buf.put_i32(5);
                 buf.put_u8(Self::HAVE);
-                buf.put_i32(index);
+                buf.put_i32(*index);
             }
             PeerMessage::Bitfield(bitfield) => {
                 buf.put_i32(1 + bitfield.as_raw_slice().len() as i32);
@@ -173,9 +173,9 @@ impl PeerMessage {
             } => {
                 buf.put_i32(13);
                 buf.put_u8(Self::REQUEST);
-                buf.put_i32(index);
-                buf.put_i32(begin);
-                buf.put_i32(length);
+                buf.put_i32(*index);
+                buf.put_i32(*begin);
+                buf.put_i32(*length);
             }
             PeerMessage::Cancel {
                 index,
@@ -184,15 +184,15 @@ impl PeerMessage {
             } => {
                 buf.put_i32(13);
                 buf.put_u8(Self::CANCEL);
-                buf.put_i32(index);
-                buf.put_i32(begin);
-                buf.put_i32(length);
+                buf.put_i32(*index);
+                buf.put_i32(*begin);
+                buf.put_i32(*length);
             }
             PeerMessage::Piece { index, begin, data } => {
                 buf.put_i32(9 + data.len() as i32);
                 buf.put_u8(Self::PIECE);
-                buf.put_i32(index);
-                buf.put_i32(begin);
+                buf.put_i32(*index);
+                buf.put_i32(*begin);
                 buf.put_slice(&data);
             }
         }
