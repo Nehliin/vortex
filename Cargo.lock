@@ -490,7 +490,7 @@ dependencies = [
  "percent-encoding",
  "rayon",
  "sha1",
- "thiserror",
+ "thiserror 1.0.38",
 ]
 
 [[package]]
