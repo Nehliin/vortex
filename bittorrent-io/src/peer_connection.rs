@@ -1,6 +1,4 @@
-use core::str;
 use std::{
-    fmt::Display,
     io::{self},
     os::fd::RawFd,
 };
@@ -9,7 +7,7 @@ use bytes::Bytes;
 use thiserror::Error;
 
 use crate::{
-    peer_protocol::{PeerMessage, PeerMessageDecoder},
+    peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{Piece, Subpiece, SUBPIECE_SIZE},
     TorrentState,
 };
@@ -20,27 +18,6 @@ pub enum Error {
     Disconnect,
     #[error("Peer encountered IO issue")]
     Io(#[source] io::Error),
-}
-
-#[derive(Debug, Clone, Copy)]
-#[repr(transparent)]
-pub struct PeerId([u8; 20]);
-
-impl Display for PeerId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Ok(prefix) = str::from_utf8(&self.0[..8]) {
-            write!(f, "{prefix}")?;
-            for b in &self.0[8..] {
-                write!(f, "{:#x}", b)?;
-            }
-            Ok(())
-        } else {
-            for b in &self.0[..] {
-                write!(f, "{:#x}", b)?;
-            }
-            Ok(())
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -333,7 +310,9 @@ impl PeerConnection {
                         torrent_state.piece_selector.pieces()
                     );
                     //self.on_piece_completed(piece.index, piece.memory).await;
-                    torrent_state.piece_selector.mark_complete(piece.index as usize);
+                    torrent_state
+                        .piece_selector
+                        .mark_complete(piece.index as usize);
                     if torrent_state.piece_selector.completed_all() {
                         panic!("TOrrent complete!")
                     }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
 
-use crate::peer_connection::PeerId;
+use crate::peer_protocol::PeerId;
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
 
