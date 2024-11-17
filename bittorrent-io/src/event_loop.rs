@@ -41,24 +41,28 @@ pub fn push_connected_write(
     events: &mut Slab<Event>,
     sq: &mut SubmissionQueue<'_>,
     buffer: &Buffer,
-    flags: Option<io_uring::squeue::Flags>,
+    ordered: bool,
+    msg: PeerMessage,
 ) {
     let event = events.insert(Event::ConnectedWrite {
         connection_idx: conn_id,
+        msg,
     });
     let user_data = UserData::new(event, Some(buffer.index));
+    let flags = if ordered {
+        io_uring::squeue::Flags::IO_LINK
+    } else {
+        io_uring::squeue::Flags::empty()
+    };
     let write_op = opcode::Write::new(
         types::Fd(fd),
         buffer.inner.as_ptr(),
         buffer.inner.len() as u32,
     )
     .build()
-    .user_data(user_data.as_u64());
-    let write_op = if let Some(flags) = flags {
-        write_op.flags(flags)
-    } else {
-        write_op
-    };
+    .user_data(user_data.as_u64())
+    .flags(flags);
+
     unsafe {
         sq.push(&write_op)
             .expect("SubmissionQueue should never be full");
@@ -353,17 +357,17 @@ impl EventLoop {
                                     torrent_state,
                                 ) {
                                     Ok(outgoing_messages) => {
-                                        for msg in outgoing_messages {
+                                        for outgoing in outgoing_messages {
                                             // Buffers are returned in the event loop
                                             let mut buffer = self.write_pool.get_buffer();
-                                            msg.encode(&mut buffer.inner);
+                                            outgoing.message.encode(&mut buffer.inner);
                                             push_connected_write(
                                                 connection_idx,
                                                 conn_fd,
                                                 &mut self.events,
                                                 sq,
                                                 &buffer,
-                                                None,
+                                                outgoing.ordered,
                                             )
                                         }
                                     }

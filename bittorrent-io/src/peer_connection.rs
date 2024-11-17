@@ -21,6 +21,13 @@ pub enum Error {
 }
 
 #[derive(Debug)]
+pub struct OutgoingMsg {
+    pub message: PeerMessage,
+    pub ordered: bool,
+    //TODO: timeout
+}
+
+#[derive(Debug)]
 pub struct PeerConnection {
     pub fd: RawFd,
     // TODO: Make this a type that impl display
@@ -46,7 +53,7 @@ pub struct PeerConnection {
     //pub pending_disconnect: bool,
     pub stateful_decoder: PeerMessageDecoder,
     // Stored here to prevent reallocations
-    pub outgoing_msgs_buffer: Vec<PeerMessage>,
+    pub outgoing_msgs_buffer: Vec<OutgoingMsg>,
 }
 
 impl PeerConnection {
@@ -67,20 +74,34 @@ impl PeerConnection {
         }
     }
 
-    fn unchoke(&mut self, torrent_state: &mut TorrentState) {
+    fn unchoke(&mut self, torrent_state: &mut TorrentState, ordered: bool) {
         if self.is_choking {
             torrent_state.num_unchoked += 1;
         }
         self.is_choking = false;
-        self.outgoing_msgs_buffer.push(PeerMessage::Unchoke);
+        self.outgoing_msgs_buffer.push(OutgoingMsg {
+            message: PeerMessage::Unchoke,
+            ordered,
+        });
     }
 
-    fn choke(&mut self, torrent_state: &mut TorrentState) {
+    fn interested(&mut self, ordered: bool) {
+        self.is_interested = true;
+        self.outgoing_msgs_buffer.push(OutgoingMsg {
+            message: PeerMessage::Interested,
+            ordered,
+        });
+    }
+
+    fn choke(&mut self, torrent_state: &mut TorrentState, ordered: bool) {
         if !self.is_choking {
             torrent_state.num_unchoked -= 1;
         }
         self.is_choking = true;
-        self.outgoing_msgs_buffer.push(PeerMessage::Choke);
+        self.outgoing_msgs_buffer.push(OutgoingMsg {
+            message: PeerMessage::Choke,
+            ordered,
+        });
     }
 
     fn request_piece(&mut self, index: i32, length: u32) {
@@ -112,7 +133,10 @@ impl PeerConnection {
                         offset: subindex as i32 * SUBPIECE_SIZE,
                         size: length,
                     });
-                    self.outgoing_msgs_buffer.push(subpiece_request);
+                    self.outgoing_msgs_buffer.push(OutgoingMsg {
+                        message: subpiece_request,
+                        ordered: false,
+                    });
                 } else {
                     break 'outer;
                 }
@@ -148,7 +172,10 @@ impl PeerConnection {
                             index: piece.index,
                             offset: SUBPIECE_SIZE * next_subpice as i32,
                         });
-                        self.outgoing_msgs_buffer.push(subpiece_request);
+                        self.outgoing_msgs_buffer.push(OutgoingMsg {
+                            message: subpiece_request,
+                            ordered: false,
+                        });
                     } else {
                         break;
                     }
@@ -173,9 +200,9 @@ impl PeerConnection {
         conn_id: usize,
         peer_message: PeerMessage,
         torrent_state: &mut TorrentState,
-    ) -> Result<&[PeerMessage], Error> {
+    ) -> Result<&[OutgoingMsg], Error> {
         self.outgoing_msgs_buffer.clear();
-        log::debug!("Received: {peer_message:?}");
+        //log::debug!("Received: {peer_message:?}");
         match peer_message {
             PeerMessage::Choke => {
                 log::info!("[Peer: {}] Peer is choking us!", self.peer_id);
@@ -193,7 +220,8 @@ impl PeerConnection {
                     return Ok(&self.outgoing_msgs_buffer);
                 }
                 if let Some(piece_idx) = torrent_state.piece_selector.next_piece(conn_id) {
-                    self.unchoke(torrent_state);
+                    log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
+                    self.unchoke(torrent_state, true);
 
                     self.request_piece(
                         piece_idx,
@@ -214,10 +242,10 @@ impl PeerConnection {
                     // if we are not choking them we might need to send a
                     // unchoke to avoid some race conditions. Libtorrent
                     // uses the same type of logic
-                    self.unchoke(torrent_state);
+                    self.unchoke(torrent_state, true);
                 } else if should_unchoke {
                     log::debug!("[Peer: {}] Unchoking peer after intrest", self.peer_id);
-                    self.unchoke(torrent_state);
+                    self.unchoke(torrent_state, true);
                 }
             }
             PeerMessage::NotInterested => {
@@ -226,7 +254,7 @@ impl PeerConnection {
                     "[Peer: {}] Peer is no longer interested in us!",
                     self.peer_id
                 );
-                self.choke(torrent_state);
+                self.choke(torrent_state, false);
             }
             PeerMessage::Have { index } => {
                 log::info!(
@@ -257,10 +285,12 @@ impl PeerConnection {
                     );
                     field.truncate(torrent_state.torrent_info.pieces.len());
                 }
-                log::info!("[Peer: {}] Bifield received: {field}", self.peer_id);
+                log::info!("[Peer: {}] Bifield received", self.peer_id);
                 torrent_state
                     .piece_selector
                     .update_peer_pieces(conn_id, field.into_boxed_bitslice());
+                // Mark ourselves as interested
+                self.interested(true);
             }
             PeerMessage::Request {
                 index,
@@ -269,7 +299,7 @@ impl PeerConnection {
             } => {
                 let should_unchoke = torrent_state.should_unchoke();
                 if should_unchoke && self.is_choking {
-                    self.unchoke(torrent_state);
+                    self.unchoke(torrent_state, true);
                 }
                 if !self.is_choking {
                     unimplemented!();
@@ -295,7 +325,7 @@ impl PeerConnection {
                 length,
             } => todo!(),
             PeerMessage::Piece { index, begin, data } => {
-                log::debug!(
+                log::info!(
                     "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
                     self.peer_id,
                     data.len(),
