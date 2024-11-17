@@ -218,6 +218,7 @@ impl EventLoop {
                     self.read_ring.return_bid(bid);
                 }
             }
+            sq.sync();
         }
     }
 
@@ -328,6 +329,8 @@ impl EventLoop {
                     unsafe {
                         sq.push(&read_op).unwrap();
                     }
+                    // This event doesn't contain any data
+                    return Ok(());
                 }
 
                 let len = ret as usize;
