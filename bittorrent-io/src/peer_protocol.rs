@@ -67,6 +67,8 @@ pub fn generate_peer_id() -> [u8; 20] {
     result
 }
 
+pub const HANDSHAKE_SIZE: usize = 68;
+
 pub fn write_handshake(our_peer_id: [u8; 20], info_hash: [u8; 20], mut buffer: &mut [u8]) {
     const PROTOCOL: &[u8] = b"BitTorrent protocol";
     buffer.put_u8(PROTOCOL.len() as u8);
@@ -98,7 +100,7 @@ impl Display for PeerId {
 }
 
 pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<PeerId> {
-    if buffer.len() < 68 {
+    if buffer.len() < HANDSHAKE_SIZE {
         // Meh?
         return Err(ErrorKind::UnexpectedEof.into());
     }
@@ -148,7 +150,7 @@ impl PeerMessage {
 
     // TODO: make use of me outside fuzzing
     pub fn encoded_size(&self) -> usize {
-        match self {
+        let message_size = match self {
             PeerMessage::Choke
             | PeerMessage::Unchoke
             | PeerMessage::Interested
@@ -157,10 +159,12 @@ impl PeerMessage {
             PeerMessage::Bitfield(bitfield) => 1 + bitfield.as_raw_slice().len(),
             PeerMessage::Request { .. } | PeerMessage::Cancel { .. } => 13,
             PeerMessage::Piece { data, .. } => 13 + data.len(),
-        }
+        };
+        // Length prefix + message
+        std::mem::size_of::<i32>() + message_size
     }
 
-    pub fn encode(&self, buf: &mut impl BufMut) {
+    pub fn encode(&self, mut buf: &mut [u8]) {
         match self {
             PeerMessage::Choke => {
                 buf.put_i32(1);
@@ -215,7 +219,7 @@ impl PeerMessage {
                 buf.put_u8(Self::PIECE);
                 buf.put_i32(*index);
                 buf.put_i32(*begin);
-                buf.put_slice(&data);
+                buf.put_slice(data);
             }
         }
     }
