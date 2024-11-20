@@ -6,6 +6,7 @@ use std::{
     u32,
 };
 
+use bytes::BufMut;
 use io_uring::{
     cqueue::Entry,
     opcode,
@@ -18,7 +19,7 @@ use crate::{
     buf_pool::{Buffer, BufferPool},
     buf_ring::{Bgid, Bid, BufferRing},
     peer_connection::{Error, PeerConnection},
-    peer_protocol::{parse_handshake, write_handshake},
+    peer_protocol::{parse_handshake, write_handshake, PeerMessage, HANDSHAKE_SIZE},
     TorrentState,
 };
 
@@ -28,11 +29,23 @@ use crate::{
 pub enum Event {
     Accept,
     // fd?
-    Connect { fd: RawFd, addr: SocketAddr },
-    Write { fd: RawFd },
-    Recv { fd: RawFd },
-    ConnectedWrite { connection_idx: usize },
-    ConnectedRecv { connection_idx: usize },
+    Connect {
+        fd: RawFd,
+        addr: SocketAddr,
+    },
+    Write {
+        fd: RawFd,
+    },
+    Recv {
+        fd: RawFd,
+    },
+    ConnectedWrite {
+        connection_idx: usize,
+        msg: crate::peer_protocol::PeerMessage,
+    },
+    ConnectedRecv {
+        connection_idx: usize,
+    },
 }
 
 pub fn push_connected_write(
@@ -40,7 +53,8 @@ pub fn push_connected_write(
     fd: RawFd,
     events: &mut Slab<Event>,
     sq: &mut SubmissionQueue<'_>,
-    buffer: &Buffer,
+    buffer_index: usize,
+    buffer: &[u8],
     ordered: bool,
     msg: PeerMessage,
 ) {
@@ -48,7 +62,7 @@ pub fn push_connected_write(
         connection_idx: conn_id,
         msg,
     });
-    let user_data = UserData::new(event, Some(buffer.index));
+    let user_data = UserData::new(event, Some(buffer_index));
     let flags = if ordered {
         io_uring::squeue::Flags::IO_LINK
     } else {
@@ -56,8 +70,8 @@ pub fn push_connected_write(
     };
     let write_op = opcode::Write::new(
         types::Fd(fd),
-        buffer.inner.as_ptr(),
-        buffer.inner.len() as u32,
+        buffer.as_ptr(),
+        buffer.len() as u32,
     )
     .build()
     .user_data(user_data.as_u64())
@@ -268,7 +282,8 @@ impl EventLoop {
                 let write_op = opcode::Write::new(
                     types::Fd(fd),
                     buffer.inner.as_ptr(),
-                    buffer.inner.len() as u32,
+                    // TODO: Handle this better
+                    HANDSHAKE_SIZE as u32,
                 )
                 .build()
                 .user_data(user_data.as_u64())
@@ -296,7 +311,11 @@ impl EventLoop {
                 log::debug!("Wrote to unestablsihed connection");
                 self.events.remove(user_data.event_idx as _);
             }
-            Event::ConnectedWrite { connection_idx } => {
+            Event::ConnectedWrite {
+                connection_idx,
+                msg,
+            } => {
+                dbg!(msg);
                 log::debug!("Wrote to established connection");
                 self.events.remove(user_data.event_idx as _);
             }
@@ -314,11 +333,10 @@ impl EventLoop {
                 *event = Event::ConnectedRecv { connection_idx };
             }
             Event::ConnectedRecv { connection_idx } => {
-                log::info!("CONNRECV");
                 let connection = &mut self.connections[connection_idx];
                 let is_more = io_uring::cqueue::more(cqe.flags());
                 if !is_more {
-                    println!("No more, starting new recv");
+                    log::warn!("No more, starting new recv");
                     // TODO? Return bids and or read the current buffer?
                     //buf_ring.return_bid(bid);
                     let read_op =
@@ -330,9 +348,10 @@ impl EventLoop {
                         sq.push(&read_op).unwrap();
                     }
                     // This event doesn't contain any data
-                    return Ok(());
+                    //return Ok(());
                 }
 
+                log::info!("CONNRECV");
                 let len = ret as usize;
 
                 // We always have a buffer associated
@@ -362,20 +381,28 @@ impl EventLoop {
                                     Ok(outgoing_messages) => {
                                         for outgoing in outgoing_messages {
                                             // Buffers are returned in the event loop
-                                            let mut buffer = self.write_pool.get_buffer();
-                                            outgoing.message.encode(&mut buffer.inner);
+                                            let buffer = self.write_pool.get_buffer();
+                                            outgoing.message.encode(buffer.inner);
+                                            let size = outgoing.message.encoded_size();
+                                            let copy = outgoing.message.clone();
+                                            dbg!(buffer.index);
                                             push_connected_write(
                                                 connection_idx,
                                                 conn_fd,
                                                 &mut self.events,
                                                 sq,
-                                                &buffer,
+                                                buffer.index,
+                                                &buffer.inner[..size],
                                                 outgoing.ordered,
+                                                copy,
                                             )
                                         }
                                     }
                                     Err(Error::Disconnect) => {
-                                        log::warn!("[Peer {}] is being disconnected", connection.peer_id);
+                                        log::warn!(
+                                            "[Peer {}] is being disconnected",
+                                            connection.peer_id
+                                        );
                                         // TODO proper shutdown
                                     }
                                     Err(err) => {
