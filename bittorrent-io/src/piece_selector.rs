@@ -203,7 +203,7 @@ pub struct Piece {
     pub inflight_subpieces: BitBox,
     pub last_subpiece_length: i32,
     // TODO used uninit memory here instead
-    memory: Vec<u8>,
+    pub memory: Vec<u8>,
 }
 
 impl Piece {

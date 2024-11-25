@@ -339,7 +339,7 @@ impl PeerConnection {
                         torrent_state.piece_selector.total_completed(),
                         torrent_state.piece_selector.pieces()
                     );
-                    //self.on_piece_completed(piece.index, piece.memory).await;
+                    torrent_state.on_piece_completed(piece.index, piece.memory);
                     torrent_state
                         .piece_selector
                         .mark_complete(piece.index as usize);
