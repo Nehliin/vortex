@@ -1,6 +1,5 @@
 use std::{
-    io::{self},
-    os::fd::RawFd,
+     io::{self}, os::fd::RawFd, time::Duration
 };
 
 use bytes::Bytes;
@@ -11,6 +10,67 @@ use crate::{
     piece_selector::{Piece, Subpiece, SUBPIECE_SIZE},
     TorrentState,
 };
+
+// Taken from
+// https://github.com/arvidn/moving_average/blob/master/moving_average.hpp
+#[derive(Debug)]
+pub struct MovingRttAverage {
+    // u32?
+    mean: i32,
+    average_deviation: i32,
+    num_samples: i32,
+    inverted_gain: i32,
+}
+
+impl Default for MovingRttAverage {
+    fn default() -> Self {
+        Self {
+            mean: 0,
+            average_deviation: 0,
+            num_samples: 0,
+            inverted_gain: 10,
+        }
+    }
+}
+
+impl MovingRttAverage {
+    pub fn add_sample(&mut self, rtt_sample: &Duration) {
+        let mut sample = rtt_sample.as_millis() as i32;
+        sample *= 64;
+
+        let old_mean = self.mean;
+
+        if self.num_samples < self.inverted_gain {
+            self.num_samples += 1;
+        }
+
+        self.mean += (sample - self.mean) / self.num_samples;
+        if self.num_samples > 1 {
+            let deviation = (old_mean - sample).abs();
+            self.average_deviation += (deviation - self.average_deviation) / (self.num_samples - 1);
+        }
+    }
+
+    #[inline]
+    pub fn mean(&self) -> Duration {
+        if self.num_samples > 0 {
+            let mean = (self.mean + 32) / 64;
+            Duration::from_millis(mean as u64)
+        } else {
+            Duration::from_millis(0)
+        }
+    }
+
+    #[inline]
+    pub fn average_deviation(&self) -> Duration {
+        if self.num_samples > 1 {
+            let avg_mean = (self.average_deviation + 32) / 64;
+            Duration::from_millis(avg_mean as u64)
+        } else {
+            Duration::from_millis(0)
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -45,7 +105,7 @@ pub struct PeerConnection {
     pub queue_capacity: usize,
     pub queued: Vec<Subpiece>,
     pub slow_start: bool,
-    //pub moving_rtt: MovingRttAverage,
+    pub moving_rtt: MovingRttAverage,
     // TODO calculate this meaningfully
     //pub througput: u64,
     // If this connection is about to be disconnected
@@ -68,6 +128,7 @@ impl PeerConnection {
             queued: Vec::with_capacity(4),
             queue_capacity: 4,
             slow_start: true,
+            moving_rtt: Default::default(),
             currently_downloading: Default::default(),
             outgoing_msgs_buffer: Default::default(),
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
