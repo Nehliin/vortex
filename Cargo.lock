@@ -69,6 +69,7 @@ dependencies = [
  "libc",
  "log",
  "rand",
+ "sha1",
  "slab",
  "socket2 0.5.7",
  "thiserror 2.0.3",

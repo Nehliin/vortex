@@ -18,6 +18,7 @@ use lava_torrent::torrent::v1::Torrent;
 use peer_connection::PeerConnection;
 use peer_protocol::generate_peer_id;
 use piece_selector::PieceSelector;
+use sha1::Digest;
 use slab::Slab;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -77,6 +78,47 @@ impl TorrentState {
             num_unchoked: 0,
             max_unchoked: 4,
             file_store: Default::default(),
+        }
+    }
+
+    pub(crate) fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) {
+        let hash_time = Instant::now();
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(&data);
+        let data_hash = hasher.finalize();
+        let hash_time = hash_time.elapsed();
+        log::info!("Piece hashed in: {} microsec", hash_time.as_micros());
+        // The hash can be provided to the data storage or the peer connection
+        // when the piece is requested so it can be used for validation later on
+        let position = self
+            .torrent_info
+            .pieces
+            .iter()
+            .position(|piece_hash| data_hash.as_slice() == piece_hash);
+        match position {
+            Some(piece_index) if piece_index == index as usize => {
+                log::info!("Piece hash matched downloaded data");
+                self.piece_selector.mark_complete(piece_index);
+                self.file_store.write_piece(index, &data).unwrap();
+
+                // Purge disconnected peers TODO move to tick instead
+                //self.peer_list.connections.retain(|_, peer| {
+                 //   peer.have(index).is_ok()
+                //});
+
+                if self.piece_selector.completed_all() {
+                    log::info!("Torrent completed!");
+                    let file_store = std::mem::take(&mut self.file_store);
+                    file_store.close().unwrap();
+                    //self.download_complete_tx.take().unwrap().send(()).unwrap();
+                }
+            }
+            Some(piece_index) => log::error!(
+                    "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
+            ),
+            None => {
+                log::error!("Piece sha1 hash not found!");
+            }
         }
     }
 
