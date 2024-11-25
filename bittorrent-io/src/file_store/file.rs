@@ -5,6 +5,7 @@ use std::{
     ptr,
 };
 
+#[derive(Debug)]
 pub struct MmapFile {
     addr: ptr::NonNull<libc::c_void>,
     len: usize,
@@ -57,6 +58,19 @@ impl MmapFile {
     // Deref instead?
     pub fn get_mut(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.addr.as_ptr() as _, self.len) }
+    }
+
+    pub fn get(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.addr.as_ptr() as _, self.len) }
+    }
+
+    pub fn close(&self) -> io::Result<()> {
+        let ret = unsafe { libc::munmap(self.addr.as_ptr() as _, self.len) };
+        if ret != 0 {
+            Err(io::ErrorKind::Other.into())
+        } else {
+            Ok(())
+        }
     }
 }
 
