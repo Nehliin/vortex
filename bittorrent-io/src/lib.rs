@@ -7,6 +7,7 @@ use std::{
 use buf_pool::BufferPool;
 use buf_ring::{Bid, BufferRing};
 use event_loop::{Event, EventLoop, UserData};
+use file_store::FileStore;
 use io_uring::{
     cqueue::Entry,
     opcode,
@@ -23,7 +24,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 mod buf_pool;
 mod buf_ring;
 mod event_loop;
-mod file;
+mod file_store;
 mod peer_connection;
 mod peer_protocol;
 mod piece_selector;
@@ -63,6 +64,7 @@ pub struct TorrentState {
     torrent_info: Torrent,
     num_unchoked: u32,
     max_unchoked: u32,
+    file_store: FileStore,
 }
 
 impl TorrentState {
@@ -74,6 +76,7 @@ impl TorrentState {
             torrent_info: torrent,
             num_unchoked: 0,
             max_unchoked: 4,
+            file_store: Default::default(),
         }
     }
 
