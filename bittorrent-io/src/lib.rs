@@ -71,13 +71,14 @@ pub struct TorrentState {
 impl TorrentState {
     pub fn new(torrent: Torrent) -> Self {
         let info_hash = torrent.info_hash_bytes().try_into().unwrap();
+        let file_store = FileStore::new("/home/popuser/vortex/bittorrent/downloaded/", &torrent).unwrap();
         Self {
             info_hash,
             piece_selector: PieceSelector::new(&torrent),
             torrent_info: torrent,
             num_unchoked: 0,
             max_unchoked: 4,
-            file_store: Default::default(),
+            file_store,
         }
     }
 
@@ -108,7 +109,7 @@ impl TorrentState {
 
                 if self.piece_selector.completed_all() {
                     log::info!("Torrent completed!");
-                    let file_store = std::mem::take(&mut self.file_store);
+                    let file_store = std::mem::replace(&mut self.file_store, FileStore::dummy());
                     file_store.close().unwrap();
                     //self.download_complete_tx.take().unwrap().send(()).unwrap();
                 }

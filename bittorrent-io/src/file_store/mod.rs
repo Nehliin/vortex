@@ -41,13 +41,20 @@ impl TorrentFile {
 }
 
 // TODO: Consider getting rid of default impl
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FileStore {
     piece_length: u64,
     files: Vec<TorrentFile>,
 }
 
 impl FileStore {
+    pub fn dummy() -> Self {
+        Self {
+            piece_length: 0,
+            files: Default::default(),
+        }
+    }
+
     pub fn new(root: impl AsRef<Path>, torrent_info: &Torrent) -> io::Result<Self> {
         fn new_impl(root: &Path, torrent_info: &Torrent) -> io::Result<FileStore> {
             let mut result = Vec::new();
@@ -75,8 +82,7 @@ impl FileStore {
                     // TODO: consider caching already created directories
                     std::fs::create_dir_all(parent_dir)?;
                 }
-                let metadata = std::fs::metadata(&path_buf)?;
-                let file = MmapFile::create(&path_buf, metadata.size() as usize)?;
+                let file = MmapFile::create(&path_buf, torrent_file.length as usize)?;
 
                 let torrent_file = TorrentFile {
                     start_piece,
