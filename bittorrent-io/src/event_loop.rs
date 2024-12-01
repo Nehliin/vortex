@@ -41,7 +41,6 @@ pub enum Event {
     },
     ConnectedWrite {
         connection_idx: usize,
-        msg: crate::peer_protocol::PeerMessage,
     },
     ConnectedRecv {
         connection_idx: usize,
@@ -56,7 +55,7 @@ pub fn push_connected_write(
     buffer_index: usize,
     buffer: &[u8],
     ordered: bool,
-    msg: PeerMessage,
+    timeout: Option<(Subpiece, Duration)>,
 ) {
     let event = events.insert(Event::ConnectedWrite {
         connection_idx: conn_id,

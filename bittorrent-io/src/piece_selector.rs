@@ -20,7 +20,7 @@ pub const SUBPIECE_SIZE: i32 = 16_384;
 
 pub struct RandomPiece;*/
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Subpiece {
     pub index: i32,
     pub offset: i32,
@@ -30,6 +30,7 @@ pub struct Subpiece {
 pub(crate) struct PieceSelector {
     //    strategy: T,
     completed_pieces: BitBox<u8, Msb0>,
+    // TODO: rename to assinged pieces instead
     inflight_pieces: BitBox<u8, Msb0>,
     // TODO: ability to remove
     peer_pieces: HashMap<usize, BitBox<u8, Msb0>>,

@@ -84,7 +84,7 @@ pub enum Error {
 pub struct OutgoingMsg {
     pub message: PeerMessage,
     pub ordered: bool,
-    //TODO: timeout
+    pub timeout: Option<(Subpiece, Duration)>,
 }
 
 #[derive(Debug)]
@@ -143,6 +143,7 @@ impl PeerConnection {
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Unchoke,
             ordered,
+            timeout: None,
         });
     }
 
@@ -151,6 +152,7 @@ impl PeerConnection {
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Interested,
             ordered,
+            timeout: None,
         });
     }
 
@@ -162,11 +164,14 @@ impl PeerConnection {
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Choke,
             ordered,
+            timeout: None,
         });
     }
 
-    fn request_piece(&mut self, index: i32, length: u32) {
+    fn request_piece(&mut self, index: i32, piece_selector: &mut PieceSelector) {
+        let length = piece_selector.piece_len(index);
         self.currently_downloading.push(Piece::new(index, length));
+        piece_selector.mark_inflight(index as usize);
         self.fill_request_queue()
     }
 
@@ -176,28 +181,15 @@ impl PeerConnection {
             available_pieces |= &piece.inflight_subpieces;
             while let Some(subindex) = available_pieces.first_zero() {
                 if self.queued.len() < self.queue_capacity {
-                    piece.inflight_subpieces.set(subindex, true);
                     // must update to prevent re-requesting same piece
                     available_pieces.set(subindex, true);
-                    let length = if subindex as i32 == piece.last_subpiece_index() {
-                        piece.last_subpiece_length
-                    } else {
-                        SUBPIECE_SIZE
-                    };
-                    let subpiece_request = PeerMessage::Request {
-                        index: piece.index,
-                        begin: subindex as i32 * SUBPIECE_SIZE,
-                        length,
-                    };
-                    self.queued.push(Subpiece {
-                        index: piece.index,
-                        offset: subindex as i32 * SUBPIECE_SIZE,
-                        size: length,
-                    });
-                    self.outgoing_msgs_buffer.push(OutgoingMsg {
-                        message: subpiece_request,
-                        ordered: false,
-                    });
+                    Self::push_subpiece_request(
+                        &mut self.outgoing_msgs_buffer,
+                        &mut self.queued,
+                        piece,
+                        subindex,
+                        &self.moving_rtt,
+                    );
                 } else {
                     break 'outer;
                 }
@@ -205,6 +197,42 @@ impl PeerConnection {
         }
     }
 
+    fn push_subpiece_request(
+        outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
+        queued: &mut Vec<(Instant, Subpiece)>,
+        piece: &mut Piece,
+        subindex: usize,
+        moving_rtt: &MovingRttAverage,
+    ) {
+        piece.inflight_subpieces.set(subindex, true);
+        let length = if subindex as i32 == piece.last_subpiece_index() {
+            piece.last_subpiece_length
+        } else {
+            SUBPIECE_SIZE
+        };
+        let subpiece_request = PeerMessage::Request {
+            index: piece.index,
+            begin: SUBPIECE_SIZE * subindex as i32,
+            length,
+        };
+        let subpiece = Subpiece {
+            size: length,
+            index: piece.index,
+            offset: SUBPIECE_SIZE * subindex as i32,
+        };
+        queued.push((Instant::now(), subpiece));
+        let timeout_threshold = moving_rtt.mean() + (moving_rtt.average_deviation() * 4);
+        let timeout_threshold = if timeout_threshold == Duration::from_millis(0) {
+            Duration::from_millis(2500)
+        } else {
+            timeout_threshold
+        };
+        outgoing_msgs_buffer.push(OutgoingMsg {
+            message: subpiece_request,
+            ordered: false,
+            timeout: Some((subpiece, timeout_threshold.min(Duration::from_millis(2500)))),
+        });
+    }
     fn on_subpiece(&mut self, m_index: i32, m_begin: i32, data: Bytes) -> Option<Piece> {
         let position = self
             .currently_downloading
@@ -215,28 +243,15 @@ impl PeerConnection {
             piece.on_subpiece(m_index, m_begin, &data[..], self.peer_id);
             if !piece.is_complete() {
                 // Next subpice to download (that isn't already inflight)
-                while let Some(next_subpice) = piece.next_unstarted_subpice() {
+                while let Some(next_subpiece) = piece.next_unstarted_subpice() {
                     if self.queued.len() < self.queue_capacity {
-                        piece.inflight_subpieces.set(next_subpice, true);
-                        let length = if next_subpice as i32 == piece.last_subpiece_index() {
-                            piece.last_subpiece_length
-                        } else {
-                            SUBPIECE_SIZE
-                        };
-                        let subpiece_request = PeerMessage::Request {
-                            index: piece.index,
-                            begin: SUBPIECE_SIZE * next_subpice as i32,
-                            length,
-                        };
-                        self.queued.push(Subpiece {
-                            size: length,
-                            index: piece.index,
-                            offset: SUBPIECE_SIZE * next_subpice as i32,
-                        });
-                        self.outgoing_msgs_buffer.push(OutgoingMsg {
-                            message: subpiece_request,
-                            ordered: false,
-                        });
+                        Self::push_subpiece_request(
+                            &mut self.outgoing_msgs_buffer,
+                            &mut self.queued,
+                            &mut piece,
+                            next_subpiece,
+                            &self.moving_rtt,
+                        );
                     } else {
                         break;
                     }
@@ -284,13 +299,7 @@ impl PeerConnection {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
 
-                    self.request_piece(
-                        piece_idx,
-                        torrent_state.piece_selector.piece_len(piece_idx),
-                    );
-                    torrent_state
-                        .piece_selector
-                        .mark_inflight(piece_idx as usize);
+                    self.request_piece(piece_idx, &mut torrent_state.piece_selector);
                 } else {
                     log::warn!("[Peer: {}] No more pieces available", self.peer_id);
                 }
