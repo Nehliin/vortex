@@ -16,10 +16,11 @@ use io_uring::{
 use slab::Slab;
 
 use crate::{
-    buf_pool::{Buffer, BufferPool},
+    buf_pool::BufferPool,
     buf_ring::{Bgid, Bid, BufferRing},
     peer_connection::{Error, PeerConnection},
-    peer_protocol::{parse_handshake, write_handshake, PeerMessage, HANDSHAKE_SIZE},
+    peer_protocol::{parse_handshake, write_handshake, HANDSHAKE_SIZE},
+    piece_selector::{PieceSelector, Subpiece, SUBPIECE_SIZE},
     TorrentState,
 };
 
@@ -215,7 +216,7 @@ impl EventLoop {
         &mut self,
         mut ring: IoUring,
         mut torrent_state: TorrentState,
-        mut tick: impl FnMut(&Duration, &mut Slab<PeerConnection>),
+        mut tick: impl FnMut(&Duration, &mut Slab<PeerConnection>, &mut PieceSelector),
     ) -> io::Result<()> {
         let (submitter, mut sq, mut cq) = ring.split();
 
@@ -257,8 +258,32 @@ impl EventLoop {
 
             let tick_delta = last_tick.elapsed();
             if tick_delta > Duration::from_secs(1) {
-                tick(&tick_delta, &mut self.connections);
+                tick(
+                    &tick_delta,
+                    &mut self.connections,
+                    &mut torrent_state.piece_selector,
+                );
                 last_tick = Instant::now();
+                for (conn_id, connection) in self.connections.iter_mut() {
+                    for msg in connection.outgoing_msgs_buffer.iter_mut() {
+                        let conn_fd = connection.fd;
+                        let buffer = self.write_pool.get_buffer();
+                        msg.message.encode(buffer.inner);
+                        let size = msg.message.encoded_size();
+                        push_connected_write(
+                            conn_id,
+                            conn_fd,
+                            &mut self.events,
+                            &mut sq,
+                            buffer.index,
+                            &buffer.inner[..size],
+                            msg.ordered,
+                            msg.timeout,
+                        );
+                    }
+                    connection.outgoing_msgs_buffer.clear();
+                }
+                sq.sync();
             }
 
             for cqe in &mut cq {
