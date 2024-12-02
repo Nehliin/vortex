@@ -1,5 +1,7 @@
 use std::{
-     io::{self}, os::fd::RawFd, time::Duration
+    io::{self},
+    os::fd::RawFd,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -7,7 +9,7 @@ use thiserror::Error;
 
 use crate::{
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
-    piece_selector::{Piece, Subpiece, SUBPIECE_SIZE},
+    piece_selector::{Piece, PieceSelector, Subpiece, SUBPIECE_SIZE},
     TorrentState,
 };
 
@@ -107,10 +109,10 @@ pub struct PeerConnection {
     pub slow_start: bool,
     pub moving_rtt: MovingRttAverage,
     // TODO calculate this meaningfully
-    //pub througput: u64,
+    pub througput: u64,
     // If this connection is about to be disconnected
     // because of low througput. (Choke instead?)
-    //pub pending_disconnect: bool,
+    pub pending_disconnect: bool,
     pub stateful_decoder: PeerMessageDecoder,
     // Stored here to prevent reallocations
     pub outgoing_msgs_buffer: Vec<OutgoingMsg>,
@@ -130,6 +132,8 @@ impl PeerConnection {
             slow_start: true,
             moving_rtt: Default::default(),
             currently_downloading: Default::default(),
+            pending_disconnect: false,
+            througput: 0,
             outgoing_msgs_buffer: Default::default(),
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
         }
@@ -233,6 +237,17 @@ impl PeerConnection {
             timeout: Some((subpiece, timeout_threshold.min(Duration::from_millis(2500)))),
         });
     }
+
+    pub fn remaining_request_queue_spots(&self) -> usize {
+        if self.peer_choking {
+            return 0;
+        }
+        // This will work even if we are in a slow start since
+        // the window will continue to increase until a timeout is hit
+        // TODO: Should we really return 0 here?
+        self.queue_capacity - self.queued.len().min(self.queue_capacity)
+    }
+
     fn on_subpiece(&mut self, m_index: i32, m_begin: i32, data: Bytes) -> Option<Piece> {
         let position = self
             .currently_downloading
@@ -269,6 +284,40 @@ impl PeerConnection {
             );
         }
         None
+    }
+
+    pub fn update_stats(&mut self, m_index: i32, m_begin: i32, length: u32) {
+        // horribly inefficient
+        let Some(pos) = self
+            .queued
+            .iter()
+            .map(|(_, sub)| sub)
+            .position(|sub| sub.index == m_index && m_begin == sub.offset)
+        else {
+            // If this supiece was already considered timed out but then arrived slightly later 
+            // we may up here. This means the timeout (based off RTT) is too strict so should be
+            // updated.
+            log::error!(
+                "Received pieced i: {} begin: {} was not found in queue",
+                m_index,
+                m_begin
+            );
+            // TODO: This not how to do this
+            self.moving_rtt.add_sample(&Duration::from_secs(3));
+            return;
+        };
+        if self.slow_start {
+            self.queue_capacity += 1;
+        }
+        if self.pending_disconnect {
+            // Restart slow_start here? Or clear rrt?
+            self.pending_disconnect = false;
+        }
+        self.througput += length as u64;
+        let (started, request) = self.queued.swap_remove(pos);
+        log::debug!("Subpiece completed: {}, {}", request.index, request.offset);
+        let rtt = started.elapsed();
+        self.moving_rtt.add_sample(&rtt);
     }
 
     pub fn on_request_timeout(&mut self, subpiece: Subpiece) {
@@ -347,7 +396,6 @@ impl PeerConnection {
                 if let Some(piece_idx) = torrent_state.piece_selector.next_piece(conn_id) {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
-
                     self.request_piece(piece_idx, &mut torrent_state.piece_selector);
                 } else {
                     log::warn!("[Peer: {}] No more pieces available", self.peer_id);
@@ -450,7 +498,7 @@ impl PeerConnection {
                     data.len(),
                 );
                 //let connection_state = peer_connection.state_mut();
-                //connection_state.update_stats(index, begin, data.len() as u32);
+                self.update_stats(index, begin, data.len() as u32);
                 if let Some(piece) = self.on_subpiece(index, begin, data) {
                     torrent_state.on_piece_completed(piece.index, piece.memory);
                     log::info!(
