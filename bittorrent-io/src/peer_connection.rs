@@ -452,19 +452,13 @@ impl PeerConnection {
                 //let connection_state = peer_connection.state_mut();
                 //connection_state.update_stats(index, begin, data.len() as u32);
                 if let Some(piece) = self.on_subpiece(index, begin, data) {
+                    torrent_state.on_piece_completed(piece.index, piece.memory);
                     log::info!(
                         "[Peer: {}] Piece {}/{} completed!",
                         self.peer_id,
                         torrent_state.piece_selector.total_completed(),
                         torrent_state.piece_selector.pieces()
                     );
-                    torrent_state.on_piece_completed(piece.index, piece.memory);
-                    torrent_state
-                        .piece_selector
-                        .mark_complete(piece.index as usize);
-                    if torrent_state.piece_selector.completed_all() {
-                        panic!("TOrrent complete!")
-                    }
                 }
             }
         }
