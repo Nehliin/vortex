@@ -42,9 +42,20 @@ pub enum Event {
     ConnectedWrite {
         connection_idx: usize,
     },
+    Timeout {
+        connection_idx: usize,
+        timespec: Timespec,
+        subpiece: Subpiece,
+    },
     ConnectedRecv {
         connection_idx: usize,
     },
+}
+
+impl Event {
+    fn is_timeout(&self) -> bool {
+        matches!(self, Event::Timeout { .. })
+    }
 }
 
 pub fn push_connected_write(
@@ -59,26 +70,46 @@ pub fn push_connected_write(
 ) {
     let event = events.insert(Event::ConnectedWrite {
         connection_idx: conn_id,
-        msg,
     });
     let user_data = UserData::new(event, Some(buffer_index));
-    let flags = if ordered {
+    let flags = if ordered || timeout.is_some() {
         io_uring::squeue::Flags::IO_LINK
     } else {
         io_uring::squeue::Flags::empty()
     };
-    let write_op = opcode::Write::new(
-        types::Fd(fd),
-        buffer.as_ptr(),
-        buffer.len() as u32,
-    )
-    .build()
-    .user_data(user_data.as_u64())
-    .flags(flags);
-
+    let write_op = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
+        .build()
+        .user_data(user_data.as_u64())
+        .flags(flags);
     unsafe {
         sq.push(&write_op)
             .expect("SubmissionQueue should never be full");
+    }
+    if let Some((subpiece, timeout)) = timeout {
+        let timespec = Timespec::new()
+            .sec(timeout.as_secs())
+            .nsec(timeout.subsec_nanos());
+        let event = events.insert(Event::Timeout {
+            connection_idx: conn_id,
+            subpiece,
+            timespec,
+        });
+        let user_data = UserData::new(event, None);
+        let Some(Event::Timeout {
+            connection_idx: _,
+            timespec,
+            subpiece: _,
+        }) = &events.get(event)
+        else {
+            unreachable!();
+        };
+        let timeout_op = opcode::Timeout::new(timespec as *const _)
+            .build()
+            .user_data(user_data.as_u64());
+        unsafe {
+            sq.push(&timeout_op)
+                .expect("SubmissionQueue should never be full");
+        }
     }
 }
 
@@ -262,7 +293,7 @@ impl EventLoop {
         let ret = cqe.result();
         let user_data = UserData::from_u64(cqe.user_data());
         let event = &mut self.events[user_data.event_idx as usize];
-        if ret < 0 {
+        if ret < 0 && !event.is_timeout() {
             return event_error_handler(
                 sq,
                 -ret as _,
@@ -328,13 +359,20 @@ impl EventLoop {
                 log::debug!("Wrote to unestablsihed connection");
                 self.events.remove(user_data.event_idx as _);
             }
-            Event::ConnectedWrite {
-                connection_idx,
-                msg,
-            } => {
-                dbg!(msg);
-                log::debug!("Wrote to established connection");
+            Event::ConnectedWrite { connection_idx } => {
                 self.events.remove(user_data.event_idx as _);
+            }
+            Event::Timeout {
+                connection_idx,
+                subpiece,
+                timespec: _,
+            } => {
+                self.events.remove(user_data.event_idx as _);
+                if let Some(connection) = self.connections.get_mut(connection_idx) {
+                    connection.on_request_timeout(subpiece);
+                } else {
+                    log::warn!("Received timeout event for non-existing connection");
+                }
             }
             Event::Recv { fd } => {
                 log::info!("RECV");
@@ -368,7 +406,7 @@ impl EventLoop {
                     //return Ok(());
                 }
 
-                log::info!("CONNRECV");
+                //log::info!("CONNRECV");
                 let len = ret as usize;
 
                 // We always have a buffer associated
@@ -401,8 +439,6 @@ impl EventLoop {
                                             let buffer = self.write_pool.get_buffer();
                                             outgoing.message.encode(buffer.inner);
                                             let size = outgoing.message.encoded_size();
-                                            let copy = outgoing.message.clone();
-                                            dbg!(buffer.index);
                                             push_connected_write(
                                                 connection_idx,
                                                 conn_fd,
@@ -411,7 +447,7 @@ impl EventLoop {
                                                 buffer.index,
                                                 &buffer.inner[..size],
                                                 outgoing.ordered,
-                                                copy,
+                                                outgoing.timeout,
                                             )
                                         }
                                     }
