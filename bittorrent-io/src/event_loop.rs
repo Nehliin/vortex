@@ -113,6 +113,7 @@ fn event_error_handler(
     error_code: u32,
     user_data: UserData,
     events: &mut Slab<Event>,
+    connections: &mut Slab<PeerConnection>,
     bgid: Bgid,
 ) -> io::Result<()> {
     if error_code as i32 == libc::ENOBUFS {
@@ -120,25 +121,41 @@ fn event_error_handler(
         log::warn!("Ran out of buffers!, resubmitting recv op");
         let event = &events[user_data.event_idx as _];
         // Ran out of buffers!
-        if let Event::Recv { fd } = event {
-            let read_op = opcode::RecvMulti::new(types::Fd(*fd), bgid)
-                .build()
-                // Reuse the user data
-                .user_data(user_data.as_u64())
-                .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-            unsafe {
-                sq.push(&read_op)
-                    .expect("SubmissionQueue should never be full");
+        match event {
+            Event::Recv { fd } => {
+                let read_op = opcode::RecvMulti::new(types::Fd(*fd), bgid)
+                    .build()
+                    // Reuse the user data
+                    .user_data(user_data.as_u64())
+                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                unsafe {
+                    sq.push(&read_op)
+                        .expect("SubmissionQueue should never be full");
+                }
+                Ok(())
             }
-            Ok(())
-        } else {
-            panic!("Ran out of buffers on a non recv operation");
+            Event::ConnectedRecv { connection_idx } => {
+                let fd = connections[*connection_idx].fd;
+                let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
+                    .build()
+                    // Reuse the user data
+                    .user_data(user_data.as_u64())
+                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                unsafe {
+                    sq.push(&read_op)
+                        .expect("SubmissionQueue should never be full");
+                }
+                Ok(())
+            }
+            _ => {
+                panic!("Ran out of buffers on a non recv operation: {event:?}");
+            }
         }
     } else {
         let event = events.remove(user_data.event_idx as _);
         dbg!(event);
         let err = std::io::Error::from_raw_os_error(error_code as i32);
-        return Err(err);
+        Err(err)
     }
 }
 
@@ -251,6 +268,7 @@ impl EventLoop {
                 -ret as _,
                 user_data,
                 &mut self.events,
+                &mut self.connections,
                 self.read_ring.bgid(),
             );
         }
