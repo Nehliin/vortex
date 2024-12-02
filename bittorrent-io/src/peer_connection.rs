@@ -103,7 +103,7 @@ pub struct PeerConnection {
     // TODO: do we need this both with queued?
     pub currently_downloading: Vec<Piece>,
     pub queue_capacity: usize,
-    pub queued: Vec<Subpiece>,
+    pub queued: Vec<(Instant, Subpiece)>,
     pub slow_start: bool,
     pub moving_rtt: MovingRttAverage,
     // TODO calculate this meaningfully
@@ -269,6 +269,55 @@ impl PeerConnection {
             );
         }
         None
+    }
+
+    pub fn on_request_timeout(&mut self, subpiece: Subpiece) {
+        if let Some(piece) = self
+            .currently_downloading
+            .iter_mut()
+            .find(|piece| piece.index == subpiece.index)
+        {
+            let subpiece_index = subpiece.offset / SUBPIECE_SIZE;
+            // TODO HANDLE THIS BETTER
+            if piece.completed_subpieces[subpiece_index as usize] {
+                log::debug!(
+                    "[PeerId {}]: Subpiece NOT timed out: {}, {}",
+                    self.peer_id,
+                    subpiece.index,
+                    subpiece.offset
+                );
+                return;
+            }
+            log::warn!(
+                "[PeerId {}]: Subpiece timeout: {}, {}",
+                self.peer_id,
+                subpiece.index,
+                subpiece.offset
+            );
+            // This is too harsh and should not be determined by individual
+            // timeouts?
+            self.slow_start = false;
+            // TODO: time out recovery
+            self.queue_capacity = 1;
+            piece.on_subpiece_failed(subpiece.index, subpiece.offset);
+            let position = self
+                .queued
+                .iter()
+                .map(|(_, sub)| sub)
+                .position(|queued| {
+                    queued.index == subpiece.index && queued.offset == subpiece.offset
+                })
+                .unwrap();
+            self.queued.swap_remove(position);
+            self.pending_disconnect = true;
+        } else {
+            // This might race with it completing so this isn't really an error
+            //log::error!(
+            //   "[PeerId {}]: Peer wasn't dowloading parent piece: {}",
+            //  self.peer_id,
+            // subpiece.index
+            //);
+        }
     }
 
     pub fn handle_message(
