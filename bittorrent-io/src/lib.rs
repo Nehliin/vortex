@@ -36,6 +36,7 @@ pub fn setup_listener(torrent_state: TorrentState) {
         .setup_clamp()
         .setup_cqsize(4096)
         .setup_defer_taskrun()
+        .setup_coop_taskrun()
         .build(4096)
         .unwrap();
 
