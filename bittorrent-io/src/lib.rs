@@ -1,23 +1,20 @@
 use std::{
     net::{SocketAddr, TcpListener},
     os::fd::AsRawFd,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use buf_pool::BufferPool;
-use buf_ring::{Bid, BufferRing};
 use event_loop::{Event, EventLoop, UserData};
 use file_store::FileStore;
 use io_uring::{
-    cqueue::Entry,
     opcode,
-    types::{self, Timespec},
-    IoUring, SubmissionQueue,
+    types::{self},
+    IoUring,
 };
 use lava_torrent::torrent::v1::Torrent;
 use peer_connection::PeerConnection;
 use peer_protocol::generate_peer_id;
-use piece_selector::PieceSelector;
+use piece_selector::{Piece, PieceSelector};
 use sha1::Digest;
 use slab::Slab;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -72,7 +69,8 @@ pub struct TorrentState {
 impl TorrentState {
     pub fn new(torrent: Torrent) -> Self {
         let info_hash = torrent.info_hash_bytes().try_into().unwrap();
-        let file_store = FileStore::new("/home/popuser/vortex/bittorrent/downloaded/", &torrent).unwrap();
+        let file_store =
+            FileStore::new("/home/popuser/vortex/bittorrent/downloaded/", &torrent).unwrap();
         Self {
             info_hash,
             piece_selector: PieceSelector::new(&torrent),
@@ -139,7 +137,7 @@ pub fn connect_to(addr: SocketAddr, torrent_state: TorrentState) {
         .build(1024)
         .unwrap();
 
-    let mut events = Slab::with_capacity(256);
+    let mut events = Slab::with_capacity(1024);
     let stream = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
 
     let event_idx = events.insert(Event::Connect {

@@ -287,6 +287,7 @@ impl EventLoop {
                     &mut torrent_state.piece_selector,
                 );
                 last_tick = Instant::now();
+                // TODO deal with this in the tick itself
                 for (conn_id, connection) in self.connections.iter_mut() {
                     for msg in connection.outgoing_msgs_buffer.iter_mut() {
                         let conn_fd = connection.fd;
