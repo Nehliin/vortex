@@ -182,7 +182,6 @@ fn tick(
     // 1. Calculate bandwidth (deal with initial start up)
     // 2. Go through them in order
     // 3. select pieces
-    let now = Instant::now();
     // TODO use retain instead of iter mut in the loop below and get rid of this
     //let mut disconnects = Vec::new();
     for (id, connection) in connections.iter_mut() {
@@ -260,5 +259,4 @@ fn tick(
         }
         peer.fill_request_queue();
     }
-    
 }
