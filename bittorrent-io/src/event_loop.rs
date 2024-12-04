@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     io,
     net::SocketAddr,
     os::fd::RawFd,
@@ -6,7 +7,6 @@ use std::{
     u32,
 };
 
-use bytes::BufMut;
 use io_uring::{
     cqueue::Entry,
     opcode,
@@ -68,6 +68,7 @@ pub fn push_connected_write(
     buffer: &[u8],
     ordered: bool,
     timeout: Option<(Subpiece, Duration)>,
+    backlog: &mut VecDeque<io_uring::squeue::Entry>,
 ) {
     let event = events.insert(Event::ConnectedWrite {
         connection_idx: conn_id,
@@ -83,8 +84,10 @@ pub fn push_connected_write(
         .user_data(user_data.as_u64())
         .flags(flags);
     unsafe {
-        sq.push(&write_op)
-            .expect("SubmissionQueue should never be full");
+        if sq.push(&write_op).is_err() {
+            log::warn!("SQ buffer full, pushing to backlog");
+            backlog.push_back(write_op);
+        }
     }
     if let Some((subpiece, timeout)) = timeout {
         let timespec = Timespec::new()
@@ -108,8 +111,10 @@ pub fn push_connected_write(
             .build()
             .user_data(user_data.as_u64());
         unsafe {
-            sq.push(&timeout_op)
-                .expect("SubmissionQueue should never be full");
+            if sq.push(&timeout_op).is_err() {
+                log::warn!("SQ buffer full, pushing to backlog");
+                backlog.push_back(timeout_op);
+            }
         }
     }
 }
@@ -147,6 +152,7 @@ fn event_error_handler(
     events: &mut Slab<Event>,
     connections: &mut Slab<PeerConnection>,
     bgid: Bgid,
+    backlog: &mut VecDeque<io_uring::squeue::Entry>,
 ) -> io::Result<()> {
     if error_code as i32 == libc::ENOBUFS {
         // TODO: statistics
@@ -161,8 +167,10 @@ fn event_error_handler(
                     .user_data(user_data.as_u64())
                     .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                 unsafe {
-                    sq.push(&read_op)
-                        .expect("SubmissionQueue should never be full");
+                    if sq.push(&read_op).is_err() {
+                        log::warn!("SQ buffer full, pushing to backlog");
+                        backlog.push_back(read_op);
+                    }
                 }
                 Ok(())
             }
@@ -174,8 +182,10 @@ fn event_error_handler(
                     .user_data(user_data.as_u64())
                     .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                 unsafe {
-                    sq.push(&read_op)
-                        .expect("SubmissionQueue should never be full");
+                    if sq.push(&read_op).is_err() {
+                        log::warn!("SQ buffer full, pushing to backlog");
+                        backlog.push_back(read_op);
+                    }
                 }
                 Ok(())
             }
@@ -205,8 +215,8 @@ impl EventLoop {
     pub fn new(our_id: [u8; 20], events: Slab<Event>) -> Self {
         Self {
             events,
-            write_pool: BufferPool::new(64, 128),
-            read_ring: BufferRing::new(1, 64, 512).unwrap(),
+            write_pool: BufferPool::new(128, 4096),
+            read_ring: BufferRing::new(1, 128, (SUBPIECE_SIZE * 2) as _).unwrap(),
             connections: Slab::with_capacity(64),
             our_id,
         }
@@ -222,6 +232,7 @@ impl EventLoop {
 
         self.read_ring.register(&submitter).unwrap();
 
+        let mut backlog: VecDeque<io_uring::squeue::Entry> = VecDeque::new();
         let mut last_tick = Instant::now();
         loop {
             let args = types::SubmitArgs::new().timespec(TIMESPEC);
@@ -241,20 +252,32 @@ impl EventLoop {
                 log::error!("CQ overflow");
             }
 
-            // TODO: Loop this and track backlog like the example if necessary
-            if sq.is_full() {
-                match submitter.submit() {
-                    Ok(_) => (),
-                    Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
-                        log::warn!("Ring busy")
+            loop {
+                if sq.is_full() {
+                    match submitter.submit() {
+                        Ok(_) => (),
+                        Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
+                            log::warn!("Ring busy")
+                        }
+                        Err(err) => {
+                            log::error!("Failed ring submission, aborting: {err}");
+                            return Err(err);
+                        }
                     }
-                    Err(err) => {
-                        log::error!("Failed ring submission, aborting: {err}");
-                        return Err(err);
+                }
+                sq.sync();
+                if backlog.is_empty() {
+                    break;
+                }
+                let sq_remaining_capacity = sq.capacity() - sq.len();
+                let num_to_drain = backlog.len().min(sq_remaining_capacity);
+                for sqe in backlog.drain(..num_to_drain) {
+                    unsafe {
+                        sq.push(&sqe)
+                            .expect("SQE should never be full when clearing backlog")
                     }
                 }
             }
-            sq.sync();
 
             let tick_delta = last_tick.elapsed();
             if tick_delta > Duration::from_secs(1) {
@@ -279,6 +302,7 @@ impl EventLoop {
                             &buffer.inner[..size],
                             msg.ordered,
                             msg.timeout,
+                            &mut backlog,
                         );
                     }
                     connection.outgoing_msgs_buffer.clear();
@@ -290,7 +314,9 @@ impl EventLoop {
                 let user_data = UserData::from_u64(cqe.user_data());
                 let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
 
-                if let Err(err) = self.event_handler(&mut sq, cqe, read_bid, &mut torrent_state) {
+                if let Err(err) =
+                    self.event_handler(&mut sq, cqe, read_bid, &mut torrent_state, &mut backlog)
+                {
                     log::error!("Error handling event: {err}");
                 }
 
@@ -314,6 +340,7 @@ impl EventLoop {
         cqe: Entry,
         read_bid: Option<Bid>,
         torrent_state: &mut TorrentState,
+        backlog: &mut VecDeque<io_uring::squeue::Entry>,
     ) -> io::Result<()> {
         let ret = cqe.result();
         let user_data = UserData::from_u64(cqe.user_data());
@@ -326,6 +353,7 @@ impl EventLoop {
                 &mut self.events,
                 &mut self.connections,
                 self.read_ring.bgid(),
+                backlog,
             );
         }
         match event.clone() {
@@ -341,8 +369,10 @@ impl EventLoop {
                     .user_data(user_data.as_u64())
                     .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                 unsafe {
-                    sq.push(&read_op)
-                        .expect("SubmissionQueue should never be full");
+                    if sq.push(&read_op).is_err() {
+                        log::warn!("SQ buffer full, pushing to backlog");
+                        backlog.push_back(read_op);
+                    }
                 }
             }
             Event::Connect { addr, fd } => {
@@ -363,8 +393,10 @@ impl EventLoop {
                 // Link with read
                 .flags(io_uring::squeue::Flags::IO_LINK);
                 unsafe {
-                    sq.push(&write_op)
-                        .expect("SubmissionQueue should never be full");
+                    if sq.push(&write_op).is_err() {
+                        log::warn!("SQ buffer full, pushing to backlog");
+                        backlog.push_back(write_op);
+                    }
                 }
                 let read_token = self.events.insert(Event::Recv { fd });
                 let user_data = UserData::new(read_token, None);
@@ -373,8 +405,10 @@ impl EventLoop {
                     .user_data(user_data.as_u64())
                     .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                 unsafe {
-                    sq.push(&read_op)
-                        .expect("SubmissionQueue should never be full");
+                    if sq.push(&read_op).is_err() {
+                        log::warn!("SQ buffer full, pushing to backlog");
+                        backlog.push_back(read_op);
+                    }
                 }
                 // send write + read linked
                 // This only reports connect complete user data is needed to provide more info
@@ -425,7 +459,10 @@ impl EventLoop {
                             .user_data(user_data.as_u64())
                             .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                     unsafe {
-                        sq.push(&read_op).unwrap();
+                        if sq.push(&read_op).is_err() {
+                            log::warn!("SQ buffer full, pushing to backlog");
+                            backlog.push_back(read_op);
+                        }
                     }
                     // This event doesn't contain any data
                     //return Ok(());
@@ -473,6 +510,7 @@ impl EventLoop {
                                                 &buffer.inner[..size],
                                                 outgoing.ordered,
                                                 outgoing.timeout,
+                                                backlog,
                                             )
                                         }
                                     }
