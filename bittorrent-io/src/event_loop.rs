@@ -311,10 +311,16 @@ impl EventLoop {
                 let user_data = UserData::from_u64(cqe.user_data());
                 let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
 
-                if let Err(err) =
-                    self.event_handler(&mut sq, cqe, read_bid, &mut torrent_state, &mut backlog)
-                {
-                    log::error!("Error handling event: {err}");
+                match self.event_handler(&mut sq, cqe, read_bid, &mut torrent_state, &mut backlog) {
+                    Ok(torrent_complete) => {
+                        if torrent_complete {
+                            log::info!("Torrent complete!");
+                            return Ok(());
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("Error handling event: {err}");
+                    }
                 }
 
                 // time to return any potential write buffers
@@ -331,6 +337,7 @@ impl EventLoop {
         }
     }
 
+    // Returs a boolean indicating if the torrent is complete
     fn event_handler(
         &mut self,
         sq: &mut SubmissionQueue<'_>,
@@ -338,12 +345,12 @@ impl EventLoop {
         read_bid: Option<Bid>,
         torrent_state: &mut TorrentState,
         backlog: &mut VecDeque<io_uring::squeue::Entry>,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         let ret = cqe.result();
         let user_data = UserData::from_u64(cqe.user_data());
         let event = &mut self.events[user_data.event_idx as usize];
         if ret < 0 && !event.is_timeout() {
-            return event_error_handler(
+            event_error_handler(
                 sq,
                 -ret as _,
                 user_data,
@@ -351,7 +358,9 @@ impl EventLoop {
                 &mut self.connections,
                 self.read_ring.bgid(),
                 backlog,
-            );
+            )?;
+            // No error to propagate
+            return Ok(false);
         }
         match event.clone() {
             Event::Accept => {
@@ -448,8 +457,6 @@ impl EventLoop {
                 let is_more = io_uring::cqueue::more(cqe.flags());
                 if !is_more {
                     log::warn!("No more, starting new recv");
-                    // TODO? Return bids and or read the current buffer?
-                    //buf_ring.return_bid(bid);
                     let read_op =
                         opcode::RecvMulti::new(types::Fd(connection.fd), self.read_ring.bgid())
                             .build()
@@ -462,10 +469,9 @@ impl EventLoop {
                         }
                     }
                     // This event doesn't contain any data
-                    //return Ok(());
+                    return Ok(torrent_state.is_complete);
                 }
 
-                //log::info!("CONNRECV");
                 let len = ret as usize;
 
                 // We always have a buffer associated
@@ -522,6 +528,9 @@ impl EventLoop {
                                         log::error!("Failed handling message: {err}");
                                     }
                                 }
+                                if torrent_state.is_complete {
+                                    return Ok(true);
+                                }
                             }
                             Err(err) => {
                                 log::error!("Failed decoding message: {err}");
@@ -531,7 +540,8 @@ impl EventLoop {
                 }
             }
         }
-        Ok(())
+        // Torrent is not complete
+        Ok(false)
     }
 }
 
