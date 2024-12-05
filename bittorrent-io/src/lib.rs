@@ -64,6 +64,7 @@ pub struct TorrentState {
     num_unchoked: u32,
     max_unchoked: u32,
     file_store: FileStore,
+    is_complete: bool,
 }
 
 impl TorrentState {
@@ -78,6 +79,7 @@ impl TorrentState {
             num_unchoked: 0,
             max_unchoked: 4,
             file_store,
+            is_complete: false,
         }
     }
 
@@ -110,7 +112,7 @@ impl TorrentState {
                     log::info!("Torrent completed!");
                     let file_store = std::mem::replace(&mut self.file_store, FileStore::dummy());
                     file_store.close().unwrap();
-                    //self.download_complete_tx.take().unwrap().send(()).unwrap();
+                    self.is_complete = true;
                 }
             }
             Some(piece_index) => log::error!(
@@ -170,11 +172,10 @@ pub fn connect_to(addr: SocketAddr, torrent_state: TorrentState) {
     event_loop.run(ring, torrent_state, tick).unwrap()
 }
 
-// Validate hashes in here and simply use one shot channels
 fn tick(
     tick_delta: &Duration,
     connections: &mut Slab<PeerConnection>,
-    piece_selector: &mut PieceSelector,
+    torrent_state: &mut TorrentState,
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
     // 1. Calculate bandwidth (deal with initial start up)
@@ -230,11 +231,11 @@ fn tick(
 
         while {
             let bandwitdth_available_for_new_piece =
-                bandwidth > (piece_selector.avg_num_subpieces() as usize / 2);
+                bandwidth > (torrent_state.piece_selector.avg_num_subpieces() as usize / 2);
             let first_piece = peer.currently_downloading.is_empty() && !peer.peer_choking;
             bandwitdth_available_for_new_piece || first_piece
         } {
-            if let Some(next_piece) = piece_selector.next_piece(peer_key) {
+            if let Some(next_piece) = torrent_state.piece_selector.next_piece(peer_key) {
                 if peer.is_choking {
                     // TODO highly unclear if unchoke is desired here
                     //if let Err(err) = peer.unchoke() {
@@ -245,12 +246,17 @@ fn tick(
                     //   self.num_unchoked += 1;
                     //}
                 }
-                peer.currently_downloading
-                    .push(Piece::new(next_piece, piece_selector.piece_len(next_piece)));
+                peer.currently_downloading.push(Piece::new(
+                    next_piece,
+                    torrent_state.piece_selector.piece_len(next_piece),
+                ));
                 // Remove all subpieces from available bandwidth
-                bandwidth -= (piece_selector.num_subpieces(next_piece) as usize).min(bandwidth);
+                bandwidth -= (torrent_state.piece_selector.num_subpieces(next_piece) as usize)
+                    .min(bandwidth);
                 dbg!(bandwidth);
-                piece_selector.mark_inflight(next_piece as usize);
+                torrent_state
+                    .piece_selector
+                    .mark_inflight(next_piece as usize);
             } else {
                 break;
             }

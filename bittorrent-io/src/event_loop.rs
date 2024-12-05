@@ -226,7 +226,7 @@ impl EventLoop {
         &mut self,
         mut ring: IoUring,
         mut torrent_state: TorrentState,
-        mut tick: impl FnMut(&Duration, &mut Slab<PeerConnection>, &mut PieceSelector),
+        mut tick: impl FnMut(&Duration, &mut Slab<PeerConnection>, &mut TorrentState),
     ) -> io::Result<()> {
         let (submitter, mut sq, mut cq) = ring.split();
 
@@ -281,11 +281,7 @@ impl EventLoop {
 
             let tick_delta = last_tick.elapsed();
             if tick_delta > Duration::from_secs(1) {
-                tick(
-                    &tick_delta,
-                    &mut self.connections,
-                    &mut torrent_state.piece_selector,
-                );
+                tick(&tick_delta, &mut self.connections, &mut torrent_state);
                 last_tick = Instant::now();
                 // TODO deal with this in the tick itself
                 for (conn_id, connection) in self.connections.iter_mut() {
