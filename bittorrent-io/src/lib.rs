@@ -187,6 +187,12 @@ fn tick(
         // disconnect it and clear all pieces it was currently downloading
         // this is not very granular and will need tweaking
 
+        if let Some(time) = connection.timeout_point {
+            if time.elapsed() > connection.request_timeout() {
+                connection.on_request_timeout();
+            }
+        }
+
         if connection.pending_disconnect && !connection.peer_choking && connection.queued.is_empty()
         {
             log::error!("Disconnect");
@@ -199,22 +205,31 @@ fn tick(
             if !connection.slow_start && !connection.pending_disconnect {
                 // calculate new bandwitdth_delay product and set request queues
                 let bandwitdth_delay =
-                    connection.moving_rtt.mean().as_millis() as u64 * connection.througput;
+                    connection.moving_rtt.mean().as_millis() as u64 * connection.throughput;
                 let new_queue_capacity = bandwitdth_delay / piece_selector::SUBPIECE_SIZE as u64;
                 connection.queue_capacity = new_queue_capacity as usize;
             }
             connection.queue_capacity = connection.queue_capacity.max(1);
         }
         log::info!(
-                        "[Peer {}]: throughput: {} bit/s, queue: {}/{}, rtt_mean: {}ms, currently_downloading: {}",
-                        connection.peer_id,
-                        connection.througput,
-                        connection.queued.len(),
-                        connection.queue_capacity,
-                        connection.moving_rtt.mean().as_millis(),
-                        connection.currently_downloading.len()
-                    );
-        connection.througput = 0;
+            "[Peer {}]: throughput: {} bytes/s, queue: {}/{}, rtt_mean: {}ms, currently_downloading: {}",
+            connection.peer_id,
+            connection.throughput,
+            connection.queued.len(),
+            connection.queue_capacity,
+            connection.moving_rtt.mean().as_millis(),
+            connection.currently_downloading.len()
+        );
+        if !connection.peer_choking
+            && connection.slow_start
+            && connection.throughput > 0
+            && connection.throughput + 5000 > connection.prev_throughput
+        {
+            log::info!("Exiting slow start");
+            connection.slow_start = false;
+        }
+        connection.prev_throughput = connection.throughput;
+        connection.throughput = 0;
         // TODO: add to throughput total stats
     }
 
