@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     io::{self},
     os::fd::RawFd,
     time::{Duration, Instant},
@@ -86,7 +87,7 @@ pub enum Error {
 pub struct OutgoingMsg {
     pub message: PeerMessage,
     pub ordered: bool,
-    pub timeout: Option<(Subpiece, Duration)>,
+    //pub timeout: Option<(Subpiece, Duration)>,
 }
 
 #[derive(Debug)]
@@ -105,11 +106,12 @@ pub struct PeerConnection {
     // TODO: do we need this both with queued?
     pub currently_downloading: Vec<Piece>,
     pub queue_capacity: usize,
-    pub queued: Vec<(Instant, Subpiece)>,
+    pub queued: VecDeque<Subpiece>,
+    pub timeout_point: Option<Instant>,
     pub slow_start: bool,
     pub moving_rtt: MovingRttAverage,
-    // TODO calculate this meaningfully
-    pub througput: u64,
+    pub throughput: u64,
+    pub prev_throughput: u64,
     // If this connection is about to be disconnected
     // because of low througput. (Choke instead?)
     pub pending_disconnect: bool,
@@ -127,13 +129,15 @@ impl PeerConnection {
             is_interested: true,
             peer_choking: true,
             peer_interested: false,
-            queued: Vec::with_capacity(4),
+            timeout_point: None,
+            queued: VecDeque::with_capacity(64),
             queue_capacity: 4,
             slow_start: true,
             moving_rtt: Default::default(),
             currently_downloading: Default::default(),
             pending_disconnect: false,
-            througput: 0,
+            throughput: 0,
+            prev_throughput: 0,
             outgoing_msgs_buffer: Default::default(),
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
         }
@@ -147,7 +151,6 @@ impl PeerConnection {
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Unchoke,
             ordered,
-            timeout: None,
         });
     }
 
@@ -156,7 +159,6 @@ impl PeerConnection {
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Interested,
             ordered,
-            timeout: None,
         });
     }
 
@@ -168,7 +170,6 @@ impl PeerConnection {
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Choke,
             ordered,
-            timeout: None,
         });
     }
 
@@ -190,6 +191,7 @@ impl PeerConnection {
                     Self::push_subpiece_request(
                         &mut self.outgoing_msgs_buffer,
                         &mut self.queued,
+                        &mut self.timeout_point,
                         piece,
                         subindex,
                         &self.moving_rtt,
@@ -201,9 +203,51 @@ impl PeerConnection {
         }
     }
 
+    pub fn request_timeout(&mut self) -> Duration {
+        /*
+        *const int deviation = m_request_time.avg_deviation();
+        const int avg = m_request_time.mean();
+
+        int ret;
+        if (m_request_time.num_samples() < 2)
+        {
+            if (m_request_time.num_samples() == 0)
+                return m_settings.get_int(settings_pack::request_timeout);
+
+            ret = avg + avg / 5;
+        }
+        else
+        {
+            ret = avg + deviation * 4;
+        }
+
+        // ret is milliseconds, the return value is seconds. Convert to
+        // seconds and round up
+        ret = std::min((ret + 999) / 1000
+            , m_settings.get_int(settings_pack::request_timeout));
+
+        // timeouts should never be less than 2 seconds. The granularity is whole
+        // seconds, and only checked once per second. 2 is the minimum to avoid
+        // being considered timed out instantly
+        return std::max(2, ret);
+        * */
+        let timeout_threshold = if self.moving_rtt.num_samples < 2 {
+            if self.moving_rtt.num_samples == 0 {
+                Duration::from_secs(2)
+            } else {
+                self.moving_rtt.mean() + self.moving_rtt.mean() / 5
+            }
+        } else {
+            self.moving_rtt.mean() + (self.moving_rtt.average_deviation() * 4)
+        };
+        let timeout_threshold = timeout_threshold.max(Duration::from_secs(2));
+        timeout_threshold
+    }
+
     fn push_subpiece_request(
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
-        queued: &mut Vec<(Instant, Subpiece)>,
+        queued: &mut VecDeque<Subpiece>,
+        timeout_timer: &mut Option<Instant>,
         piece: &mut Piece,
         subindex: usize,
         moving_rtt: &MovingRttAverage,
@@ -224,17 +268,16 @@ impl PeerConnection {
             index: piece.index,
             offset: SUBPIECE_SIZE * subindex as i32,
         };
-        queued.push((Instant::now(), subpiece));
-        let timeout_threshold = moving_rtt.mean() + (moving_rtt.average_deviation() * 4);
-        let timeout_threshold = if timeout_threshold == Duration::from_millis(0) {
-            Duration::from_millis(2500)
-        } else {
-            timeout_threshold
-        };
+        queued.push_back(subpiece);
+        // only if we didnt previously have
+        if timeout_timer.is_none() {
+            *timeout_timer = Some(Instant::now());
+        }
+
         outgoing_msgs_buffer.push(OutgoingMsg {
             message: subpiece_request,
             ordered: false,
-            timeout: Some((subpiece, timeout_threshold.min(Duration::from_millis(2500)))),
+            //timeout: Some((subpiece, timeout_threshold.max(Duration::from_secs(2)))),
         });
     }
 
@@ -256,6 +299,7 @@ impl PeerConnection {
         if let Some(position) = position {
             let mut piece = self.currently_downloading.swap_remove(position);
             piece.on_subpiece(m_index, m_begin, &data[..], self.peer_id);
+            self.timeout_point = Some(Instant::now());
             if !piece.is_complete() {
                 // Next subpice to download (that isn't already inflight)
                 while let Some(next_subpiece) = piece.next_unstarted_subpice() {
@@ -263,6 +307,7 @@ impl PeerConnection {
                         Self::push_subpiece_request(
                             &mut self.outgoing_msgs_buffer,
                             &mut self.queued,
+                            &mut self.timeout_point,
                             &mut piece,
                             next_subpiece,
                             &self.moving_rtt,
@@ -291,10 +336,9 @@ impl PeerConnection {
         let Some(pos) = self
             .queued
             .iter()
-            .map(|(_, sub)| sub)
             .position(|sub| sub.index == m_index && m_begin == sub.offset)
         else {
-            // If this supiece was already considered timed out but then arrived slightly later 
+            // If this supiece was already considered timed out but then arrived slightly later
             // we may up here. This means the timeout (based off RTT) is too strict so should be
             // updated.
             log::error!(
@@ -313,14 +357,19 @@ impl PeerConnection {
             // Restart slow_start here? Or clear rrt?
             self.pending_disconnect = false;
         }
-        self.througput += length as u64;
-        let (started, request) = self.queued.swap_remove(pos);
+        self.throughput += length as u64;
+        let request = self.queued.remove(pos).unwrap();
         log::debug!("Subpiece completed: {}, {}", request.index, request.offset);
-        let rtt = started.elapsed();
+        let rtt = self.timeout_point.unwrap().elapsed();
         self.moving_rtt.add_sample(&rtt);
     }
 
-    pub fn on_request_timeout(&mut self, subpiece: Subpiece) {
+    pub fn on_request_timeout(&mut self) {
+        let Some(subpiece) = self.queued.pop_back() else {
+            // might have been received later?
+            log::warn!("Piece timed out but not found in queue");
+            return;
+        };
         if let Some(piece) = self
             .currently_downloading
             .iter_mut()
@@ -343,21 +392,10 @@ impl PeerConnection {
                 subpiece.index,
                 subpiece.offset
             );
-            // This is too harsh and should not be determined by individual
-            // timeouts?
             self.slow_start = false;
             // TODO: time out recovery
             self.queue_capacity = 1;
             piece.on_subpiece_failed(subpiece.index, subpiece.offset);
-            let position = self
-                .queued
-                .iter()
-                .map(|(_, sub)| sub)
-                .position(|queued| {
-                    queued.index == subpiece.index && queued.offset == subpiece.offset
-                })
-                .unwrap();
-            self.queued.swap_remove(position);
             self.pending_disconnect = true;
         } else {
             // This might race with it completing so this isn't really an error

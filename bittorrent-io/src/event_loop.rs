@@ -67,14 +67,13 @@ pub fn push_connected_write(
     buffer_index: usize,
     buffer: &[u8],
     ordered: bool,
-    timeout: Option<(Subpiece, Duration)>,
     backlog: &mut VecDeque<io_uring::squeue::Entry>,
 ) {
     let event = events.insert(Event::ConnectedWrite {
         connection_idx: conn_id,
     });
     let user_data = UserData::new(event, Some(buffer_index));
-    let flags = if ordered || timeout.is_some() {
+    let flags = if ordered {
         io_uring::squeue::Flags::IO_LINK
     } else {
         io_uring::squeue::Flags::empty()
@@ -89,7 +88,7 @@ pub fn push_connected_write(
             backlog.push_back(write_op);
         }
     }
-    if let Some((subpiece, timeout)) = timeout {
+    /*if let Some((subpiece, timeout)) = timeout {
         let timespec = Timespec::new()
             .sec(timeout.as_secs())
             .nsec(timeout.subsec_nanos());
@@ -116,7 +115,7 @@ pub fn push_connected_write(
                 backlog.push_back(timeout_op);
             }
         }
-    }
+    }*/
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -298,7 +297,6 @@ impl EventLoop {
                             buffer.index,
                             &buffer.inner[..size],
                             msg.ordered,
-                            msg.timeout,
                             &mut backlog,
                         );
                     }
@@ -434,7 +432,7 @@ impl EventLoop {
             } => {
                 self.events.remove(user_data.event_idx as _);
                 if let Some(connection) = self.connections.get_mut(connection_idx) {
-                    connection.on_request_timeout(subpiece);
+                    connection.on_request_timeout();
                 } else {
                     log::warn!("Received timeout event for non-existing connection");
                 }
@@ -512,7 +510,6 @@ impl EventLoop {
                                                 buffer.index,
                                                 &buffer.inner[..size],
                                                 outgoing.ordered,
-                                                outgoing.timeout,
                                                 backlog,
                                             )
                                         }
