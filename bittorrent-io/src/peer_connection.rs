@@ -87,7 +87,6 @@ pub enum Error {
 pub struct OutgoingMsg {
     pub message: PeerMessage,
     pub ordered: bool,
-    //pub timeout: Option<(Subpiece, Duration)>,
 }
 
 #[derive(Debug)]
