@@ -82,7 +82,7 @@ impl PieceSelector {
         if procentage_left > 0.95 {
             for _ in 0..5 {
                 let index = (rand::random::<f32>() * self.completed_pieces.len() as f32) as usize;
-                log::debug!("Picking random piece to download, index: {index}");
+                //log::debug!("Picking random piece to download, index: {index}");
                 if available_pieces[index] {
                     return Some(index as i32);
                 }

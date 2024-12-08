@@ -105,7 +105,7 @@ pub struct PeerConnection {
     pub peer_interested: bool,
     // TODO: do we need this both with queued?
     pub currently_downloading: Vec<Piece>,
-    pub queue_capacity: usize,
+    pub desired_queue_size: usize,
     pub queued: VecDeque<Subpiece>,
     pub timeout_point: Option<Instant>,
     pub slow_start: bool,
@@ -131,7 +131,7 @@ impl PeerConnection {
             peer_interested: false,
             timeout_point: None,
             queued: VecDeque::with_capacity(64),
-            queue_capacity: 4,
+            desired_queue_size: 4,
             slow_start: true,
             moving_rtt: Default::default(),
             currently_downloading: Default::default(),
@@ -185,7 +185,7 @@ impl PeerConnection {
             let mut available_pieces = piece.completed_subpieces.clone();
             available_pieces |= &piece.inflight_subpieces;
             while let Some(subindex) = available_pieces.first_zero() {
-                if self.queued.len() < self.queue_capacity {
+                if self.queued.len() < self.desired_queue_size {
                     // must update to prevent re-requesting same piece
                     available_pieces.set(subindex, true);
                     Self::push_subpiece_request(
@@ -288,7 +288,7 @@ impl PeerConnection {
         // This will work even if we are in a slow start since
         // the window will continue to increase until a timeout is hit
         // TODO: Should we really return 0 here?
-        self.queue_capacity - self.queued.len().min(self.queue_capacity)
+        self.desired_queue_size - self.queued.len().min(self.desired_queue_size)
     }
 
     fn on_subpiece(&mut self, m_index: i32, m_begin: i32, data: Bytes) -> Option<Piece> {
@@ -303,7 +303,7 @@ impl PeerConnection {
             if !piece.is_complete() {
                 // Next subpice to download (that isn't already inflight)
                 while let Some(next_subpiece) = piece.next_unstarted_subpice() {
-                    if self.queued.len() < self.queue_capacity {
+                    if self.queued.len() < self.desired_queue_size {
                         Self::push_subpiece_request(
                             &mut self.outgoing_msgs_buffer,
                             &mut self.queued,
@@ -347,11 +347,12 @@ impl PeerConnection {
                 m_begin
             );
             // TODO: This not how to do this
-            self.moving_rtt.add_sample(&Duration::from_secs(3));
+            //  self.moving_rtt.add_sample(&Duration::from_secs(3));
             return;
         };
         if self.slow_start {
-            self.queue_capacity += 1;
+            self.desired_queue_size += 1;
+            self.desired_queue_size = self.desired_queue_size.clamp(0, 400);
         }
         if self.pending_disconnect {
             // Restart slow_start here? Or clear rrt?
@@ -360,7 +361,10 @@ impl PeerConnection {
         self.throughput += length as u64;
         let request = self.queued.remove(pos).unwrap();
         log::debug!("Subpiece completed: {}, {}", request.index, request.offset);
-        let rtt = self.timeout_point.unwrap().elapsed();
+        let rtt = self.timeout_point.take().unwrap().elapsed();
+        if !self.queued.is_empty() {
+            self.timeout_point = Some(Instant::now());
+        }
         self.moving_rtt.add_sample(&rtt);
     }
 
@@ -394,9 +398,9 @@ impl PeerConnection {
             );
             self.slow_start = false;
             // TODO: time out recovery
-            self.queue_capacity = 1;
+            self.desired_queue_size = 1;
             piece.on_subpiece_failed(subpiece.index, subpiece.offset);
-            self.pending_disconnect = true;
+            // self.pending_disconnect = true;
         } else {
             // This might race with it completing so this isn't really an error
             //log::error!(
@@ -417,7 +421,7 @@ impl PeerConnection {
         //log::debug!("Received: {peer_message:?}");
         match peer_message {
             PeerMessage::Choke => {
-                log::info!("[Peer: {}] Peer is choking us!", self.peer_id);
+                log::error!("[Peer: {}] Peer is choking us!", self.peer_id);
                 self.peer_choking = true;
             }
             PeerMessage::Unchoke => {
