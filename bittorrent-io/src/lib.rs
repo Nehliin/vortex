@@ -27,7 +27,54 @@ mod peer_connection;
 mod peer_protocol;
 mod piece_selector;
 
+pub fn connect_to(addr: SocketAddr, torrent_state: TorrentState) {
+    // check ulimit
+    let mut ring: IoUring = IoUring::builder()
+        .setup_single_issuer()
+        .setup_clamp()
+        .setup_cqsize(1024)
+        .setup_defer_taskrun()
+        .setup_coop_taskrun()
+        .build(1024)
+        .unwrap();
+
+    let mut events = Slab::with_capacity(1024);
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+    socket.set_recv_buffer_size(1 << 19).unwrap();
+    //dbg!(socket.recv_buffer_size());
+
+    let event_idx = events.insert(Event::Connect {
+        addr,
+        fd: socket.as_raw_fd(),
+    });
+    let user_data = UserData::new(event_idx, None);
+    let addr = SockAddr::from(addr);
+    let connect_op = opcode::Connect::new(
+        types::Fd(socket.as_raw_fd()),
+        addr.as_ptr() as *const _,
+        addr.len(),
+    )
+    .build()
+    //    .flags(io_uring::squeue::Flags::IO_LINK)
+    .user_data(user_data.as_u64());
+    unsafe {
+        ring.submission().push(&connect_op).unwrap();
+    }
+    //   let timeout_op = opcode::LinkTimeout::new(TIMESPEC).build().user_data(0xdead);
+    //  unsafe {
+    //     ring.submission().push(&timeout_op).unwrap();
+    //}
+
+    ring.submission().sync();
+
+    // event loop
+    let our_id = generate_peer_id();
+    let mut event_loop = EventLoop::new(our_id, events);
+    event_loop.run(ring, torrent_state, tick).unwrap()
+}
+
 pub fn setup_listener(torrent_state: TorrentState) {
+    // check ulimit
     let mut ring: IoUring = IoUring::builder()
         .setup_single_issuer()
         .setup_clamp()
@@ -126,51 +173,6 @@ impl TorrentState {
     pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
     }
-}
-
-pub fn connect_to(addr: SocketAddr, torrent_state: TorrentState) {
-    let mut ring: IoUring = IoUring::builder()
-        .setup_single_issuer()
-        .setup_clamp()
-        .setup_cqsize(1024)
-        .setup_defer_taskrun()
-        .setup_coop_taskrun()
-        .build(1024)
-        .unwrap();
-
-    let mut events = Slab::with_capacity(1024);
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-    socket.set_recv_buffer_size(1 << 19).unwrap();
-    //dbg!(socket.recv_buffer_size());
-
-    let event_idx = events.insert(Event::Connect {
-        addr,
-        fd: socket.as_raw_fd(),
-    });
-    let user_data = UserData::new(event_idx, None);
-    let addr = SockAddr::from(addr);
-    let connect_op = opcode::Connect::new(
-        types::Fd(socket.as_raw_fd()),
-        addr.as_ptr() as *const _,
-        addr.len(),
-    )
-    .build()
-    //    .flags(io_uring::squeue::Flags::IO_LINK)
-    .user_data(user_data.as_u64());
-    unsafe {
-        ring.submission().push(&connect_op).unwrap();
-    }
-    //   let timeout_op = opcode::LinkTimeout::new(TIMESPEC).build().user_data(0xdead);
-    //  unsafe {
-    //     ring.submission().push(&timeout_op).unwrap();
-    //}
-
-    ring.submission().sync();
-
-    // event loop
-    let our_id = generate_peer_id();
-    let mut event_loop = EventLoop::new(our_id, events);
-    event_loop.run(ring, torrent_state, tick).unwrap()
 }
 
 fn tick(
