@@ -227,7 +227,7 @@ fn tick(
         if !connection.peer_choking
             && connection.slow_start
             && connection.throughput > 0
-            && connection.throughput + 5000 < connection.prev_throughput
+            && connection.throughput < connection.prev_throughput + 5000
         {
             log::error!("Exiting slow start");
             connection.slow_start = false;
