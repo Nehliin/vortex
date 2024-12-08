@@ -211,12 +211,12 @@ fn tick(
                 let new_queue_capacity = bandwitdth_delay / piece_selector::SUBPIECE_SIZE as u64;
                 connection.desired_queue_size = new_queue_capacity as usize;
 
-                connection.desired_queue_size = connection.desired_queue_size.clamp(0, 400);
+                connection.desired_queue_size = connection.desired_queue_size.clamp(0, 500);
             }
             connection.desired_queue_size = connection.desired_queue_size.max(1);
         }
         log::info!(
-            "[Peer {}]: throughput: {} bytes/s, queue: {}/{}, rtt_mean: {}ms, currently_downloading: {}",
+            "[Peer {}]: throughput: {} bytes/s, queue: {}/{}, time between subpieces: {}ms, currently_downloading: {}",
             connection.peer_id,
             connection.throughput,
             connection.queued.len(),
@@ -272,7 +272,6 @@ fn tick(
                 // Remove all subpieces from available bandwidth
                 bandwidth -= (torrent_state.piece_selector.num_subpieces(next_piece) as usize)
                     .min(bandwidth);
-         //       dbg!(bandwidth);
                 torrent_state
                     .piece_selector
                     .mark_inflight(next_piece as usize);
