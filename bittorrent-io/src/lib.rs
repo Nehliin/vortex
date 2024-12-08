@@ -139,16 +139,18 @@ pub fn connect_to(addr: SocketAddr, torrent_state: TorrentState) {
         .unwrap();
 
     let mut events = Slab::with_capacity(1024);
-    let stream = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+    socket.set_recv_buffer_size(1 << 19).unwrap();
+    //dbg!(socket.recv_buffer_size());
 
     let event_idx = events.insert(Event::Connect {
         addr,
-        fd: stream.as_raw_fd(),
+        fd: socket.as_raw_fd(),
     });
     let user_data = UserData::new(event_idx, None);
     let addr = SockAddr::from(addr);
     let connect_op = opcode::Connect::new(
-        types::Fd(stream.as_raw_fd()),
+        types::Fd(socket.as_raw_fd()),
         addr.as_ptr() as *const _,
         addr.len(),
     )
@@ -207,25 +209,27 @@ fn tick(
                 let bandwitdth_delay =
                     connection.moving_rtt.mean().as_millis() as u64 * connection.throughput;
                 let new_queue_capacity = bandwitdth_delay / piece_selector::SUBPIECE_SIZE as u64;
-                connection.queue_capacity = new_queue_capacity as usize;
+                connection.desired_queue_size = new_queue_capacity as usize;
+
+                connection.desired_queue_size = connection.desired_queue_size.clamp(0, 400);
             }
-            connection.queue_capacity = connection.queue_capacity.max(1);
+            connection.desired_queue_size = connection.desired_queue_size.max(1);
         }
         log::info!(
             "[Peer {}]: throughput: {} bytes/s, queue: {}/{}, rtt_mean: {}ms, currently_downloading: {}",
             connection.peer_id,
             connection.throughput,
             connection.queued.len(),
-            connection.queue_capacity,
+            connection.desired_queue_size,
             connection.moving_rtt.mean().as_millis(),
             connection.currently_downloading.len()
         );
         if !connection.peer_choking
             && connection.slow_start
             && connection.throughput > 0
-            && connection.throughput + 5000 > connection.prev_throughput
+            && connection.throughput + 5000 < connection.prev_throughput
         {
-            log::info!("Exiting slow start");
+            log::error!("Exiting slow start");
             connection.slow_start = false;
         }
         connection.prev_throughput = connection.throughput;
@@ -241,13 +245,14 @@ fn tick(
 
     peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
     for (peer_key, mut bandwidth) in peer_bandwidth {
+        //dbg!(bandwidth);
         let peer = &mut connections[peer_key];
 
         while {
             let bandwitdth_available_for_new_piece =
                 bandwidth > (torrent_state.piece_selector.avg_num_subpieces() as usize / 2);
-            let first_piece = peer.currently_downloading.is_empty() && !peer.peer_choking;
-            bandwitdth_available_for_new_piece || first_piece
+            let first_piece = peer.currently_downloading.is_empty();
+            (bandwitdth_available_for_new_piece || first_piece) && !peer.peer_choking
         } {
             if let Some(next_piece) = torrent_state.piece_selector.next_piece(peer_key) {
                 if peer.is_choking {
@@ -267,7 +272,7 @@ fn tick(
                 // Remove all subpieces from available bandwidth
                 bandwidth -= (torrent_state.piece_selector.num_subpieces(next_piece) as usize)
                     .min(bandwidth);
-                dbg!(bandwidth);
+         //       dbg!(bandwidth);
                 torrent_state
                     .piece_selector
                     .mark_inflight(next_piece as usize);

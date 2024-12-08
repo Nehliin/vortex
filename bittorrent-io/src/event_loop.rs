@@ -20,7 +20,7 @@ use crate::{
     buf_ring::{Bgid, Bid, BufferRing},
     peer_connection::{Error, PeerConnection},
     peer_protocol::{parse_handshake, write_handshake, HANDSHAKE_SIZE},
-    piece_selector::{PieceSelector, Subpiece, SUBPIECE_SIZE},
+    piece_selector::SUBPIECE_SIZE,
     TorrentState,
 };
 
@@ -30,33 +30,11 @@ use crate::{
 pub enum Event {
     Accept,
     // fd?
-    Connect {
-        fd: RawFd,
-        addr: SocketAddr,
-    },
-    Write {
-        fd: RawFd,
-    },
-    Recv {
-        fd: RawFd,
-    },
-    ConnectedWrite {
-        connection_idx: usize,
-    },
-    Timeout {
-        connection_idx: usize,
-        timespec: Timespec,
-        subpiece: Subpiece,
-    },
-    ConnectedRecv {
-        connection_idx: usize,
-    },
-}
-
-impl Event {
-    fn is_timeout(&self) -> bool {
-        matches!(self, Event::Timeout { .. })
-    }
+    Connect { fd: RawFd, addr: SocketAddr },
+    Write { fd: RawFd },
+    Recv { fd: RawFd },
+    ConnectedWrite { connection_idx: usize },
+    ConnectedRecv { connection_idx: usize },
 }
 
 pub fn push_connected_write(
@@ -347,7 +325,7 @@ impl EventLoop {
         let ret = cqe.result();
         let user_data = UserData::from_u64(cqe.user_data());
         let event = &mut self.events[user_data.event_idx as usize];
-        if ret < 0 && !event.is_timeout() {
+        if ret < 0 {
             event_error_handler(
                 sq,
                 -ret as _,
@@ -425,7 +403,7 @@ impl EventLoop {
             Event::ConnectedWrite { connection_idx } => {
                 self.events.remove(user_data.event_idx as _);
             }
-            Event::Timeout {
+            /*Event::Timeout {
                 connection_idx,
                 subpiece,
                 timespec: _,
@@ -436,7 +414,7 @@ impl EventLoop {
                 } else {
                     log::warn!("Received timeout event for non-existing connection");
                 }
-            }
+            }*/
             Event::Recv { fd } => {
                 log::info!("RECV");
                 let len = ret as usize;
