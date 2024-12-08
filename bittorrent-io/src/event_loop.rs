@@ -205,112 +205,124 @@ impl EventLoop {
         mut torrent_state: TorrentState,
         mut tick: impl FnMut(&Duration, &mut Slab<PeerConnection>, &mut TorrentState),
     ) -> io::Result<()> {
-        let (submitter, mut sq, mut cq) = ring.split();
-
-        self.read_ring.register(&submitter).unwrap();
-
-        let mut backlog: VecDeque<io_uring::squeue::Entry> = VecDeque::new();
-        let mut last_tick = Instant::now();
-        loop {
-            let args = types::SubmitArgs::new().timespec(TIMESPEC);
-            match submitter.submit_with_args(1, &args) {
-                Ok(_) => (),
-                Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => log::warn!("Ring busy"),
-                Err(ref err) if err.raw_os_error() == Some(libc::ETIME) => {
-                    log::debug!("Tick hit ETIME")
-                }
-                Err(err) => {
-                    log::error!("Failed ring submission, aborting: {err}");
-                    return Err(err);
-                }
-            }
-            cq.sync();
-            if cq.overflow() > 0 {
-                log::error!("CQ overflow");
-            }
-
+        self.read_ring.register(&ring.submitter())?;
+        // lambda to be able to catch errors an always unregistering the read ring
+        let mut actual_loop = || {
+            let (submitter, mut sq, mut cq) = ring.split();
+            let mut backlog: VecDeque<io_uring::squeue::Entry> = VecDeque::new();
+            let mut last_tick = Instant::now();
             loop {
-                if sq.is_full() {
-                    match submitter.submit() {
-                        Ok(_) => (),
-                        Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
-                            log::warn!("Ring busy")
-                        }
-                        Err(err) => {
-                            log::error!("Failed ring submission, aborting: {err}");
-                            return Err(err);
-                        }
+                let args = types::SubmitArgs::new().timespec(TIMESPEC);
+                match submitter.submit_with_args(1, &args) {
+                    Ok(_) => (),
+                    Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
+                        log::warn!("Ring busy")
                     }
-                }
-                sq.sync();
-                if backlog.is_empty() {
-                    break;
-                }
-                let sq_remaining_capacity = sq.capacity() - sq.len();
-                let num_to_drain = backlog.len().min(sq_remaining_capacity);
-                for sqe in backlog.drain(..num_to_drain) {
-                    unsafe {
-                        sq.push(&sqe)
-                            .expect("SQE should never be full when clearing backlog")
-                    }
-                }
-            }
-
-            let tick_delta = last_tick.elapsed();
-            if tick_delta > Duration::from_secs(1) {
-                tick(&tick_delta, &mut self.connections, &mut torrent_state);
-                last_tick = Instant::now();
-                // TODO deal with this in the tick itself
-                for (conn_id, connection) in self.connections.iter_mut() {
-                    for msg in connection.outgoing_msgs_buffer.iter_mut() {
-                        let conn_fd = connection.fd;
-                        let buffer = self.write_pool.get_buffer();
-                        msg.message.encode(buffer.inner);
-                        let size = msg.message.encoded_size();
-                        push_connected_write(
-                            conn_id,
-                            conn_fd,
-                            &mut self.events,
-                            &mut sq,
-                            buffer.index,
-                            &buffer.inner[..size],
-                            msg.ordered,
-                            &mut backlog,
-                        );
-                    }
-                    connection.outgoing_msgs_buffer.clear();
-                }
-                sq.sync();
-            }
-
-            for cqe in &mut cq {
-                let user_data = UserData::from_u64(cqe.user_data());
-                let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
-
-                match self.event_handler(&mut sq, cqe, read_bid, &mut torrent_state, &mut backlog) {
-                    Ok(torrent_complete) => {
-                        if torrent_complete {
-                            log::info!("Torrent complete!");
-                            return Ok(());
-                        }
+                    Err(ref err) if err.raw_os_error() == Some(libc::ETIME) => {
+                        log::debug!("Tick hit ETIME")
                     }
                     Err(err) => {
-                        log::error!("Error handling event: {err}");
+                        log::error!("Failed ring submission, aborting: {err}");
+                        return Err(err);
+                    }
+                }
+                cq.sync();
+                if cq.overflow() > 0 {
+                    log::error!("CQ overflow");
+                }
+
+                loop {
+                    if sq.is_full() {
+                        match submitter.submit() {
+                            Ok(_) => (),
+                            Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
+                                log::warn!("Ring busy")
+                            }
+                            Err(err) => {
+                                log::error!("Failed ring submission, aborting: {err}");
+                                return Err(err);
+                            }
+                        }
+                    }
+                    sq.sync();
+                    if backlog.is_empty() {
+                        break;
+                    }
+                    let sq_remaining_capacity = sq.capacity() - sq.len();
+                    let num_to_drain = backlog.len().min(sq_remaining_capacity);
+                    for sqe in backlog.drain(..num_to_drain) {
+                        unsafe {
+                            sq.push(&sqe)
+                                .expect("SQE should never be full when clearing backlog")
+                        }
                     }
                 }
 
-                // time to return any potential write buffers
-                if let Some(write_idx) = user_data.buffer_idx {
-                    self.write_pool.return_buffer(write_idx as usize);
+                let tick_delta = last_tick.elapsed();
+                if tick_delta > Duration::from_secs(1) {
+                    tick(&tick_delta, &mut self.connections, &mut torrent_state);
+                    last_tick = Instant::now();
+                    // TODO deal with this in the tick itself
+                    for (conn_id, connection) in self.connections.iter_mut() {
+                        for msg in connection.outgoing_msgs_buffer.iter_mut() {
+                            let conn_fd = connection.fd;
+                            let buffer = self.write_pool.get_buffer();
+                            msg.message.encode(buffer.inner);
+                            let size = msg.message.encoded_size();
+                            push_connected_write(
+                                conn_id,
+                                conn_fd,
+                                &mut self.events,
+                                &mut sq,
+                                buffer.index,
+                                &buffer.inner[..size],
+                                msg.ordered,
+                                &mut backlog,
+                            );
+                        }
+                        connection.outgoing_msgs_buffer.clear();
+                    }
+                    sq.sync();
                 }
 
-                // Ensure bids are always returned
-                if let Some(bid) = read_bid {
-                    self.read_ring.return_bid(bid);
+                for cqe in &mut cq {
+                    let user_data = UserData::from_u64(cqe.user_data());
+                    let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
+
+                    match self.event_handler(
+                        &mut sq,
+                        cqe,
+                        read_bid,
+                        &mut torrent_state,
+                        &mut backlog,
+                    ) {
+                        Ok(torrent_complete) => {
+                            if torrent_complete {
+                                log::info!("Torrent complete!");
+                                return Ok(());
+                            }
+                        }
+                        Err(err) => {
+                            log::error!("Error handling event: {err}");
+                        }
+                    }
+
+                    // time to return any potential write buffers
+                    if let Some(write_idx) = user_data.buffer_idx {
+                        self.write_pool.return_buffer(write_idx as usize);
+                    }
+
+                    // Ensure bids are always returned
+                    if let Some(bid) = read_bid {
+                        self.read_ring.return_bid(bid);
+                    }
                 }
+                sq.sync();
             }
-            sq.sync();
-        }
+        };
+        let result = actual_loop();
+        self.read_ring.unregister(&ring.submitter())?;
+        result
     }
 
     // Returs a boolean indicating if the torrent is complete
