@@ -205,12 +205,11 @@ fn tick(
         if !connection.peer_choking {
             // slow start win size increase is handled in update_stats
             if !connection.slow_start && !connection.pending_disconnect {
-                // calculate new bandwitdth_delay product and set request queues
-                let bandwitdth_delay =
-                    connection.moving_rtt.mean().as_millis() as u64 * connection.throughput;
-                let new_queue_capacity = bandwitdth_delay / piece_selector::SUBPIECE_SIZE as u64;
+                // From the libtorrent impl, request queue time = 3
+                let new_queue_capacity =
+                    3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
                 connection.desired_queue_size = new_queue_capacity as usize;
-
+                log::debug!("Updated desired queue size: {new_queue_capacity}");
                 connection.desired_queue_size = connection.desired_queue_size.clamp(0, 500);
             }
             connection.desired_queue_size = connection.desired_queue_size.max(1);
