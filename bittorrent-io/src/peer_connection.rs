@@ -109,6 +109,7 @@ pub struct PeerConnection {
     pub queued: VecDeque<Subpiece>,
     pub timeout_point: Option<Instant>,
     pub slow_start: bool,
+    // The averge time between pieces being received
     pub moving_rtt: MovingRttAverage,
     pub throughput: u64,
     pub prev_throughput: u64,
@@ -194,7 +195,6 @@ impl PeerConnection {
                         &mut self.timeout_point,
                         piece,
                         subindex,
-                        &self.moving_rtt,
                     );
                 } else {
                     break 'outer;
@@ -204,33 +204,6 @@ impl PeerConnection {
     }
 
     pub fn request_timeout(&mut self) -> Duration {
-        /*
-        *const int deviation = m_request_time.avg_deviation();
-        const int avg = m_request_time.mean();
-
-        int ret;
-        if (m_request_time.num_samples() < 2)
-        {
-            if (m_request_time.num_samples() == 0)
-                return m_settings.get_int(settings_pack::request_timeout);
-
-            ret = avg + avg / 5;
-        }
-        else
-        {
-            ret = avg + deviation * 4;
-        }
-
-        // ret is milliseconds, the return value is seconds. Convert to
-        // seconds and round up
-        ret = std::min((ret + 999) / 1000
-            , m_settings.get_int(settings_pack::request_timeout));
-
-        // timeouts should never be less than 2 seconds. The granularity is whole
-        // seconds, and only checked once per second. 2 is the minimum to avoid
-        // being considered timed out instantly
-        return std::max(2, ret);
-        * */
         let timeout_threshold = if self.moving_rtt.num_samples < 2 {
             if self.moving_rtt.num_samples == 0 {
                 Duration::from_secs(2)
@@ -240,8 +213,7 @@ impl PeerConnection {
         } else {
             self.moving_rtt.mean() + (self.moving_rtt.average_deviation() * 4)
         };
-        let timeout_threshold = timeout_threshold.max(Duration::from_secs(2));
-        timeout_threshold
+        timeout_threshold.max(Duration::from_secs(2))
     }
 
     fn push_subpiece_request(
@@ -250,7 +222,6 @@ impl PeerConnection {
         timeout_timer: &mut Option<Instant>,
         piece: &mut Piece,
         subindex: usize,
-        moving_rtt: &MovingRttAverage,
     ) {
         piece.inflight_subpieces.set(subindex, true);
         let length = if subindex as i32 == piece.last_subpiece_index() {
@@ -277,7 +248,6 @@ impl PeerConnection {
         outgoing_msgs_buffer.push(OutgoingMsg {
             message: subpiece_request,
             ordered: false,
-            //timeout: Some((subpiece, timeout_threshold.max(Duration::from_secs(2)))),
         });
     }
 
@@ -310,7 +280,6 @@ impl PeerConnection {
                             &mut self.timeout_point,
                             &mut piece,
                             next_subpiece,
-                            &self.moving_rtt,
                         );
                     } else {
                         break;
@@ -352,7 +321,7 @@ impl PeerConnection {
         };
         if self.slow_start {
             self.desired_queue_size += 1;
-            self.desired_queue_size = self.desired_queue_size.clamp(0, 400);
+            self.desired_queue_size = self.desired_queue_size.clamp(0, 500);
         }
         if self.pending_disconnect {
             // Restart slow_start here? Or clear rrt?
@@ -534,12 +503,11 @@ impl PeerConnection {
                 length,
             } => todo!(),
             PeerMessage::Piece { index, begin, data } => {
-                log::info!(
+                log::trace!(
                     "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
                     self.peer_id,
                     data.len(),
                 );
-                //let connection_state = peer_connection.state_mut();
                 self.update_stats(index, begin, data.len() as u32);
                 if let Some(piece) = self.on_subpiece(index, begin, data) {
                     torrent_state.on_piece_completed(piece.index, piece.memory);
