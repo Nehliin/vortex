@@ -410,8 +410,10 @@ impl EventLoop {
                 // We always have a buffer associated
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
                 // Expect this to be the handshake response
-                let peer_id = parse_handshake(torrent_state.info_hash, &buffer[..len]).unwrap();
-                let peer_connection = PeerConnection::new(fd, peer_id);
+                let parsed_handshake =
+                    parse_handshake(torrent_state.info_hash, &buffer[..len]).unwrap();
+                let peer_connection =
+                    PeerConnection::new(fd, parsed_handshake.peer_id, parsed_handshake.fast_ext);
                 log::info!("Finished handshake!: {peer_connection:?}");
                 let connection_idx = self.connections.insert(peer_connection);
                 // We are now connected!

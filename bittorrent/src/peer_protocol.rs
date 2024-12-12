@@ -73,7 +73,9 @@ pub fn write_handshake(our_peer_id: [u8; 20], info_hash: [u8; 20], mut buffer: &
     const PROTOCOL: &[u8] = b"BitTorrent protocol";
     buffer.put_u8(PROTOCOL.len() as u8);
     buffer.put_slice(PROTOCOL);
-    buffer.put_slice(&[0_u8; 8] as &[u8]);
+    let mut extension = [0_u8; 8];
+    extension[7] |= 0x04;
+    buffer.put_slice(&extension as &[u8]);
     buffer.put_slice(&info_hash as &[u8]);
     buffer.put_slice(&our_peer_id as &[u8]);
 }
@@ -99,7 +101,12 @@ impl Display for PeerId {
     }
 }
 
-pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<PeerId> {
+pub struct ParsedHandshake {
+    pub peer_id: PeerId,
+    pub fast_ext: bool,
+}
+
+pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<ParsedHandshake> {
     if buffer.len() < HANDSHAKE_SIZE {
         // Meh?
         return Err(ErrorKind::UnexpectedEof.into());
@@ -109,7 +116,9 @@ pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<Pee
         return Err(ErrorKind::InvalidData.into());
     }
     buffer.advance(str_len);
-    // Skip extensions for now
+    println!("buffer: {:?}", &buffer[..8]);
+    // Extensions, only fast for now
+    let fast_ext = buffer[7] & 0x04 != 0;
     buffer.advance(8);
     let peer_info_hash: [u8; 20] = buffer[..20]
         .try_into()
@@ -121,7 +130,10 @@ pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<Pee
     let peer_id = buffer[..20]
         .try_into()
         .map_err(|_err| ErrorKind::InvalidData)?;
-    Ok(PeerId(peer_id))
+    Ok(ParsedHandshake {
+        peer_id: PeerId(peer_id),
+        fast_ext,
+    })
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]

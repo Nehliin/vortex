@@ -98,6 +98,7 @@ pub struct PeerConnection {
     pub is_choking: bool,
     /// This side is interested what the peer has to offer
     pub is_interested: bool,
+    pub fast_ext: bool,
     /// The peer have informed us that it is choking us.
     pub peer_choking: bool,
     /// The peer is interested what we have to offer
@@ -130,6 +131,7 @@ impl PeerConnection {
             peer_choking: true,
             peer_interested: false,
             timeout_point: None,
+            fast_ext,
             queued: VecDeque::with_capacity(64),
             desired_queue_size: 4,
             slow_start: true,
