@@ -110,6 +110,11 @@ impl PieceSelector {
         }
     }
 
+    #[inline]
+    pub fn bitfield_received(&self, connection_id: usize) -> bool {
+        self.peer_pieces.contains_key(&connection_id)
+    }
+
     pub fn update_peer_pieces(&mut self, connection_id: usize, peer_pieces: BitBox<u8, Msb0>) {
         let entry = self.peer_pieces.entry(connection_id);
         entry
@@ -149,6 +154,11 @@ impl PieceSelector {
     #[inline]
     pub fn completed_all(&self) -> bool {
         self.completed_pieces.all()
+    }
+
+    #[inline]
+    pub fn completed_clone(&self) -> BitBox<u8, Msb0> {
+        self.completed_pieces.clone()
     }
 
     #[inline]
@@ -232,7 +242,10 @@ impl Piece {
         // This subpice is part of the currently downloading piece
         assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
-        log::trace!("[Peer: {}] Subpiece index received: {subpiece_index}", peer_id);
+        log::trace!(
+            "[Peer: {}] Subpiece index received: {subpiece_index}",
+            peer_id
+        );
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {
             assert_eq!(data.len() as i32, self.last_subpiece_length);

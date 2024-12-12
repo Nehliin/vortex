@@ -144,6 +144,8 @@ pub enum PeerMessage {
     NotInterested,
     Have { index: i32 },
     Bitfield(BitVec<u8, Msb0>),
+    HaveAll,
+    HaveNone,
     Request { index: i32, begin: i32, length: i32 },
     Cancel { index: i32, begin: i32, length: i32 },
     Piece { index: i32, begin: i32, data: Bytes },
@@ -159,12 +161,16 @@ impl PeerMessage {
     pub const REQUEST: u8 = 6;
     pub const PIECE: u8 = 7;
     pub const CANCEL: u8 = 8;
+    pub const HAVE_ALL: u8 = 0x0E;
+    pub const HAVE_NONE: u8 = 0x0F;
 
     // TODO: make use of me outside fuzzing
     pub fn encoded_size(&self) -> usize {
         let message_size = match self {
             PeerMessage::Choke
             | PeerMessage::Unchoke
+            | PeerMessage::HaveAll
+            | PeerMessage::HaveNone
             | PeerMessage::Interested
             | PeerMessage::NotInterested => 1,
             PeerMessage::Have { index: _ } => 5,
@@ -198,6 +204,14 @@ impl PeerMessage {
                 buf.put_i32(5);
                 buf.put_u8(Self::HAVE);
                 buf.put_i32(*index);
+            }
+            PeerMessage::HaveAll => {
+                buf.put_i32(1);
+                buf.put_u8(Self::HAVE_ALL);
+            }
+            PeerMessage::HaveNone => {
+                buf.put_i32(1);
+                buf.put_u8(Self::HAVE_NONE);
             }
             PeerMessage::Bitfield(bitfield) => {
                 buf.put_i32(1 + bitfield.as_raw_slice().len() as i32);
@@ -295,6 +309,8 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
         PeerMessage::UNCHOKE => Ok(PeerMessage::Unchoke),
         PeerMessage::INTERESTED => Ok(PeerMessage::Interested),
         PeerMessage::NOT_INTERESTED => Ok(PeerMessage::NotInterested),
+        PeerMessage::HAVE_ALL => Ok(PeerMessage::HaveAll),
+        PeerMessage::HAVE_NONE => Ok(PeerMessage::HaveNone),
         PeerMessage::HAVE => {
             if data.remaining() < 4 {
                 return Err(io::ErrorKind::InvalidData.into());
@@ -303,6 +319,7 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
                 index: data.get_i32(),
             })
         }
+
         PeerMessage::BITFIELD => {
             let bits = BitVec::<_, Msb0>::from_slice(&data[..]);
             Ok(PeerMessage::Bitfield(bits))

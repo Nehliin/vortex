@@ -77,8 +77,8 @@ impl MovingRttAverage {
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Peer should be disconnected")]
-    Disconnect,
+    #[error("Peer is being disconnected, Reason {0}")]
+    Disconnect(&'static str),
     #[error("Peer encountered IO issue")]
     Io(#[source] io::Error),
 }
@@ -122,7 +122,7 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
-    pub fn new(fd: RawFd, peer_id: PeerId) -> Self {
+    pub fn new(fd: RawFd, peer_id: PeerId, fast_ext: bool) -> Self {
         PeerConnection {
             fd,
             peer_id,
@@ -444,7 +444,48 @@ impl PeerConnection {
                     .piece_selector
                     .set_peer_piece(conn_id, index as usize);
             }
+            PeerMessage::HaveAll => {
+                if !self.fast_ext {
+                    return Err(Error::Disconnect(
+                        "Have all received when fast_ext wasn't enabled",
+                    ));
+                }
+                if torrent_state.piece_selector.bitfield_received(conn_id) {
+                    log::error!(
+                        "[PeerId: {}] (HaveAll) Bitfield already received",
+                        self.peer_id
+                    );
+                }
+                let num_pieces = torrent_state.torrent_info.pieces.len();
+                log::info!("[Peer: {}] Have all received", self.peer_id);
+                let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
+                torrent_state
+                    .piece_selector
+                    .update_peer_pieces(conn_id, bitfield.into_boxed_bitslice());
+            }
+            PeerMessage::HaveNone => {
+                if !self.fast_ext {
+                    return Err(Error::Disconnect(
+                        "Have none received when fast_ext wasn't enabled",
+                    ));
+                }
+                if torrent_state.piece_selector.bitfield_received(conn_id) {
+                    log::error!(
+                        "[PeerId: {}] (HaveNone) Bitfield already received",
+                        self.peer_id
+                    );
+                }
+                let num_pieces = torrent_state.torrent_info.pieces.len();
+                log::info!("[Peer: {}] Have None received", self.peer_id);
+                let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
+                torrent_state
+                    .piece_selector
+                    .update_peer_pieces(conn_id, bitfield.into_boxed_bitslice());
+            }
             PeerMessage::Bitfield(mut field) => {
+                if torrent_state.piece_selector.bitfield_received(conn_id) && self.fast_ext {
+                    log::error!("[PeerId: {}] Bitfield already received", self.peer_id);
+                }
                 if torrent_state.torrent_info.pieces.len() != field.len() {
                     if field.len() < torrent_state.torrent_info.pieces.len() {
                         log::error!(
@@ -453,7 +494,7 @@ impl PeerConnection {
                             torrent_state.torrent_info.pieces.len(),
                             field.len()
                         );
-                        return Err(Error::Disconnect);
+                        return Err(Error::Disconnect("Invalid bitfield"));
                     }
                     // The bitfield might be padded with zeros, remove them first
                     log::debug!(
@@ -504,6 +545,7 @@ impl PeerConnection {
                 length,
             } => todo!(),
             PeerMessage::Piece { index, begin, data } => {
+                // TODO: disconnect on recv piece never requested if fast_ext is enabled
                 log::trace!(
                     "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
                     self.peer_id,
