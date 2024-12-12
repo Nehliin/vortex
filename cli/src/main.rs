@@ -1,14 +1,14 @@
 use std::{path::Path, time::Instant};
 
 use parking_lot::Mutex;
-use vortex_bittorrent::{PeerListHandle, TorrentManager};
+//use vortex_bittorrent::{PeerListHandle, TorrentManager};
 use vortex_dht::PeerProvider;
 
 // TODO: This will become the layer of indirection
 // so that incoming peers will be sent to the right torrent manager
-struct PeerListProvider(Mutex<ahash::AHashMap<[u8; 20], PeerListHandle>>);
+//struct PeerListProvider(Mutex<ahash::AHashMap<[u8; 20], PeerListHandle>>);
 
-impl PeerProvider for PeerListProvider {
+/*impl PeerProvider for PeerListProvider {
     fn get_peers(&self, info_hash: [u8; 20]) -> Option<Vec<std::net::SocketAddr>> {
         log::info!("Fetching peers");
         self.0
@@ -23,7 +23,7 @@ impl PeerProvider for PeerListProvider {
             peer_list_handle.insert(peer);
         }
     }
-}
+}*/
 
 fn main() {
     //    let log_file = std::fs::File::create("log.txt").unwrap();
@@ -37,7 +37,7 @@ fn main() {
         // TODO Should start dht first
         let torrent_info =
             lava_torrent::torrent::v1::Torrent::read_from_file("slackware.torrent").unwrap();
-        let mut torrent_manager = TorrentManager::new("slackware.torrent").await;
+ /*       let mut torrent_manager = TorrentManager::new("slackware.torrent").await;
         let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
         let peer_list_map = Mutex::new(
             [(info_hash, torrent_manager.peer_list_handle())]
@@ -71,7 +71,7 @@ fn main() {
             }
         });
 
-        torrent_manager.download_complete().await;
+        torrent_manager.download_complete().await;*/
         log::info!("Download complete!");
     });
 }
