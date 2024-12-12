@@ -289,24 +289,11 @@ impl EventLoop {
                     let user_data = UserData::from_u64(cqe.user_data());
                     let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
 
-                    match self.event_handler(
-                        &mut sq,
-                        cqe,
-                        read_bid,
-                        &mut torrent_state,
-                        &mut backlog,
-                    ) {
-                        Ok(torrent_complete) => {
-                            if torrent_complete {
-                                log::info!("Torrent complete!");
-                                return Ok(());
-                            }
-                        }
-                        Err(err) => {
-                            log::error!("Error handling event: {err}");
-                        }
+                    if let Err(err) =
+                        self.event_handler(&mut sq, cqe, read_bid, &mut torrent_state, &mut backlog)
+                    {
+                        log::error!("Error handling event: {err}");
                     }
-
                     // time to return any potential write buffers
                     if let Some(write_idx) = user_data.buffer_idx {
                         self.write_pool.return_buffer(write_idx as usize);
@@ -318,6 +305,10 @@ impl EventLoop {
                     }
                 }
                 sq.sync();
+                if torrent_state.is_complete {
+                    log::info!("Torrent complete!");
+                    return Ok(());
+                }
             }
         };
         let result = actual_loop();
@@ -333,12 +324,12 @@ impl EventLoop {
         read_bid: Option<Bid>,
         torrent_state: &mut TorrentState,
         backlog: &mut VecDeque<io_uring::squeue::Entry>,
-    ) -> io::Result<bool> {
+    ) -> io::Result<()> {
         let ret = cqe.result();
         let user_data = UserData::from_u64(cqe.user_data());
         let event = &mut self.events[user_data.event_idx as usize];
         if ret < 0 {
-            event_error_handler(
+            return event_error_handler(
                 sq,
                 -ret as _,
                 user_data,
@@ -346,9 +337,7 @@ impl EventLoop {
                 &mut self.connections,
                 self.read_ring.bgid(),
                 backlog,
-            )?;
-            // No error to propagate
-            return Ok(false);
+            );
         }
         match event.clone() {
             Event::Accept => {
@@ -415,18 +404,6 @@ impl EventLoop {
             Event::ConnectedWrite { connection_idx } => {
                 self.events.remove(user_data.event_idx as _);
             }
-            /*Event::Timeout {
-                connection_idx,
-                subpiece,
-                timespec: _,
-            } => {
-                self.events.remove(user_data.event_idx as _);
-                if let Some(connection) = self.connections.get_mut(connection_idx) {
-                    connection.on_request_timeout();
-                } else {
-                    log::warn!("Received timeout event for non-existing connection");
-                }
-            }*/
             Event::Recv { fd } => {
                 log::info!("RECV");
                 let len = ret as usize;
@@ -457,7 +434,7 @@ impl EventLoop {
                         }
                     }
                     // This event doesn't contain any data
-                    return Ok(torrent_state.is_complete);
+                    return Ok(());
                 }
 
                 let len = ret as usize;
@@ -515,9 +492,6 @@ impl EventLoop {
                                         log::error!("Failed handling message: {err}");
                                     }
                                 }
-                                if torrent_state.is_complete {
-                                    return Ok(true);
-                                }
                             }
                             Err(err) => {
                                 log::error!("Failed decoding message: {err}");
@@ -527,8 +501,7 @@ impl EventLoop {
                 }
             }
         }
-        // Torrent is not complete
-        Ok(false)
+        Ok(())
     }
 }
 
