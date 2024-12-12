@@ -4,7 +4,7 @@ use std::{
     time::Instant,
 };
 
-use bittorrent_io::{connect_to, TorrentState};
+use vortex_bittorrent::{connect_to, TorrentState};
 
 fn main() {
     env_logger::builder()
@@ -12,7 +12,7 @@ fn main() {
         //        .target(env_logger::Target::Pipe(Box::new(log_file)))
         .init();
     let torrent = lava_torrent::torrent::v1::Torrent::read_from_file(
-        "/home/popuser/vortex/bittorrent/assets/test-file-1.torrent",
+        "bittorrent/assets/test-file-1.torrent",
     )
     .unwrap();
     let torrent = TorrentState::new(torrent);
@@ -26,8 +26,8 @@ fn main() {
     connect_to("172.17.0.2:51413".parse().unwrap(), torrent);
     let elapsed = download_time.elapsed();
     log::info!("Download complete in: {}s", elapsed.as_secs());
-    let expected = std::fs::read("../bittorrent/assets/test-file-1").unwrap();
-    let actual = std::fs::read("../bittorrent/downloaded/test-file-1").unwrap();
+    let expected = std::fs::read("bittorrent/assets/test-file-1").unwrap();
+    let actual = std::fs::read("bittorrent/downloaded/test-file-1").unwrap();
     assert_eq!(actual, expected);
     //handle.join().unwrap();
 }
