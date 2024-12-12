@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
-use slotmap::SecondaryMap;
 
-use crate::{PeerKey, SUBPIECE_SIZE};
+use crate::peer_protocol::PeerId;
+
+pub const SUBPIECE_SIZE: i32 = 16_384;
 
 // TODO
 /*pub trait PieceSelectionStrategy {
@@ -17,11 +20,20 @@ use crate::{PeerKey, SUBPIECE_SIZE};
 
 pub struct RandomPiece;*/
 
+#[derive(Debug, Clone, Copy)]
+pub struct Subpiece {
+    pub index: i32,
+    pub offset: i32,
+    pub size: i32,
+}
+
 pub(crate) struct PieceSelector {
     //    strategy: T,
     completed_pieces: BitBox<u8, Msb0>,
+    // TODO: rename to assinged pieces instead
     inflight_pieces: BitBox<u8, Msb0>,
-    peer_pieces: SecondaryMap<PeerKey, BitBox<u8, Msb0>>,
+    // TODO: ability to remove
+    peer_pieces: HashMap<usize, BitBox<u8, Msb0>>,
     last_piece_length: u32,
     piece_length: u32,
 }
@@ -43,7 +55,7 @@ impl PieceSelector {
         }
     }
 
-    pub fn next_piece(&self, peer_key: PeerKey) -> Option<i32> {
+    pub fn next_piece(&self, connection_id: usize) -> Option<i32> {
         let pieces_left = self.completed_pieces.count_zeros();
         if pieces_left == 0 {
             log::info!("Torrent is completed, no next piece found");
@@ -51,7 +63,7 @@ impl PieceSelector {
         }
 
         // TODO: avoid clone
-        let mut available_pieces = self.peer_pieces.get(peer_key)?.clone();
+        let mut available_pieces = self.peer_pieces.get(&connection_id)?.clone();
         // Discount completed or inflight pieces
         let mut tmp = self.completed_pieces.clone();
         tmp |= &self.inflight_pieces;
@@ -70,7 +82,7 @@ impl PieceSelector {
         if procentage_left > 0.95 {
             for _ in 0..5 {
                 let index = (rand::random::<f32>() * self.completed_pieces.len() as f32) as usize;
-                log::debug!("Picking random piece to download, index: {index}");
+                //log::debug!("Picking random piece to download, index: {index}");
                 if available_pieces[index] {
                     return Some(index as i32);
                 }
@@ -98,26 +110,18 @@ impl PieceSelector {
         }
     }
 
-    pub fn update_peer_pieces(&mut self, peer_key: PeerKey, peer_pieces: BitBox<u8, Msb0>) {
-        if let Some(entry) = self.peer_pieces.entry(peer_key) {
-            entry
-                .and_modify(|pieces| *pieces |= &peer_pieces)
-                .or_insert(peer_pieces);
-        } else {
-            // TODO: this really isn't an error but want to make it visible for now
-            log::error!("Attempted to update piece for peer that was removed");
-        }
+    pub fn update_peer_pieces(&mut self, connection_id: usize, peer_pieces: BitBox<u8, Msb0>) {
+        let entry = self.peer_pieces.entry(connection_id);
+        entry
+            .and_modify(|pieces| *pieces |= &peer_pieces)
+            .or_insert(peer_pieces);
     }
 
-    pub fn set_peer_piece(&mut self, peer_key: PeerKey, piece_index: usize) {
-        if let Some(entry) = self.peer_pieces.entry(peer_key) {
-            entry
-                .and_modify(|pieces| pieces.set(piece_index, true))
-                .or_insert_with(|| (0..self.completed_pieces.len()).map(|_| false).collect());
-        } else {
-            // TODO: this really isn't an error but want to make it visible for now
-            log::error!("Attempted to update piece for peer that was removed");
-        }
+    pub fn set_peer_piece(&mut self, connection_id: usize, piece_index: usize) {
+        let entry = self.peer_pieces.entry(connection_id);
+        entry
+            .and_modify(|pieces| pieces.set(piece_index, true))
+            .or_insert_with(|| (0..self.completed_pieces.len()).map(|_| false).collect());
     }
 
     // TODO: Get rid of this?
@@ -188,5 +192,78 @@ impl PieceSelector {
         } else {
             self.piece_length / SUBPIECE_SIZE as u32
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct Piece {
+    pub index: i32,
+    // Contains only completed subpieces
+    pub completed_subpieces: BitBox,
+    // Contains both completed and inflight subpieces
+    pub inflight_subpieces: BitBox,
+    pub last_subpiece_length: i32,
+    // TODO used uninit memory here instead
+    pub memory: Vec<u8>,
+}
+
+impl Piece {
+    pub fn new(index: i32, lenght: u32) -> Self {
+        let memory = vec![0; lenght as usize];
+        let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
+            SUBPIECE_SIZE
+        } else {
+            lenght as i32 % SUBPIECE_SIZE
+        };
+        let subpieces =
+            (lenght / SUBPIECE_SIZE as u32) + u32::from(last_subpiece_length != SUBPIECE_SIZE);
+        let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
+        let inflight_subpieces = completed_subpieces.clone();
+        Self {
+            index,
+            completed_subpieces,
+            inflight_subpieces,
+            last_subpiece_length,
+            memory,
+        }
+    }
+
+    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], peer_id: PeerId) {
+        // This subpice is part of the currently downloading piece
+        assert_eq!(self.index, index);
+        let subpiece_index = begin / SUBPIECE_SIZE;
+        log::trace!("[Peer: {}] Subpiece index received: {subpiece_index}", peer_id);
+        let last_subpiece = subpiece_index == self.last_subpiece_index();
+        if last_subpiece {
+            assert_eq!(data.len() as i32, self.last_subpiece_length);
+        } else {
+            assert_eq!(data.len() as i32, SUBPIECE_SIZE);
+        }
+        self.completed_subpieces.set(subpiece_index as usize, true);
+        self.memory[begin as usize..begin as usize + data.len()].copy_from_slice(data);
+    }
+
+    #[inline]
+    pub fn on_subpiece_failed(&mut self, index: i32, begin: i32) {
+        // This subpice is part of the currently downloading piece
+        assert_eq!(self.index, index);
+        let subpiece_index = begin / SUBPIECE_SIZE;
+        self.inflight_subpieces.set(subpiece_index as usize, false);
+    }
+
+    // Perhaps this can return the subpice or a peer request directly?
+    #[inline]
+    pub fn next_unstarted_subpice(&self) -> Option<usize> {
+        self.inflight_subpieces.first_zero()
+    }
+
+    #[inline]
+    pub fn last_subpiece_index(&self) -> i32 {
+        self.completed_subpieces.len() as i32 - 1
+    }
+
+    #[inline]
+    pub fn is_complete(&self) -> bool {
+        self.completed_subpieces.all()
     }
 }
