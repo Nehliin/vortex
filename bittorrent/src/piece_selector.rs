@@ -20,7 +20,7 @@ pub const SUBPIECE_SIZE: i32 = 16_384;
 
 pub struct RandomPiece;*/
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Subpiece {
     pub index: i32,
     pub offset: i32,
@@ -205,6 +205,7 @@ impl PieceSelector {
     }
 }
 
+// TODO flatten this
 #[derive(Debug)]
 pub struct Piece {
     pub index: i32,

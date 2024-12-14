@@ -338,30 +338,41 @@ impl PeerConnection {
         self.moving_rtt.add_sample(&rtt);
     }
 
-    pub fn on_request_timeout(&mut self) {
-        let Some(subpiece) = self.queued.pop_back() else {
-            // might have been received later?
-            log::warn!("Piece timed out but not found in queue");
-            return;
-        };
+    // returns if the supiece actually was marked as a failure
+    fn try_mark_subpiece_failed(&mut self, subpiece: Subpiece) -> bool {
         if let Some(piece) = self
             .currently_downloading
             .iter_mut()
             .find(|piece| piece.index == subpiece.index)
         {
             let subpiece_index = subpiece.offset / SUBPIECE_SIZE;
-            // TODO HANDLE THIS BETTER
             if piece.completed_subpieces[subpiece_index as usize] {
-                log::debug!(
-                    "[PeerId {}]: Subpiece NOT timed out: {}, {}",
+                log::error!(
+                    "[PeerId {}]: Subpiece is already completed, can't mark as failed {}, {}",
                     self.peer_id,
                     subpiece.index,
                     subpiece.offset
                 );
-                return;
+                return false;
             }
+            piece.on_subpiece_failed(subpiece.index, subpiece.offset);
+            true
+            // self.pending_disconnect = true;
+        } else {
+            false
+            // This might race with it completing so this isn't really an error
+        }
+    }
+
+    pub fn on_request_timeout(&mut self) {
+        let Some(subpiece) = self.queued.pop_back() else {
+            // might have been received later?
+            log::warn!("Piece timed out but not found in queue");
+            return;
+        };
+        if self.try_mark_subpiece_failed(subpiece) {
             log::warn!(
-                "[PeerId {}]: Subpiece timeout: {}, {}",
+                "[PeerId {}]: Subpiece timed out: {}, {}",
                 self.peer_id,
                 subpiece.index,
                 subpiece.offset
@@ -369,16 +380,15 @@ impl PeerConnection {
             self.slow_start = false;
             // TODO: time out recovery
             self.desired_queue_size = 1;
-            piece.on_subpiece_failed(subpiece.index, subpiece.offset);
-            // self.pending_disconnect = true;
-        } else {
-            // This might race with it completing so this isn't really an error
-            //log::error!(
-            //   "[PeerId {}]: Peer wasn't dowloading parent piece: {}",
-            //  self.peer_id,
-            // subpiece.index
-            //);
         }
+    }
+
+    #[inline]
+    fn is_valid_piece_req(&self, subpiece: Subpiece, num_pieces: i32) -> bool {
+        subpiece.index >= 0
+            && subpiece.index <= num_pieces
+            && subpiece.offset % SUBPIECE_SIZE == 0
+            && subpiece.size <= SUBPIECE_SIZE
     }
 
     pub fn handle_message(
@@ -525,6 +535,20 @@ impl PeerConnection {
                 begin,
                 length,
             } => {
+                let subpiece = Subpiece {
+                    index,
+                    offset: begin,
+                    size: length,
+                };
+                if !self
+                    .is_valid_piece_req(subpiece, torrent_state.torrent_info.pieces.len() as i32)
+                {
+                    log::warn!(
+                        "[Peer: {}] Piece request ignored, invalid request",
+                        self.peer_id
+                    );
+                    todo!("reqject request")
+                }
                 let should_unchoke = torrent_state.should_unchoke();
                 if should_unchoke && self.is_choking {
                     self.unchoke(torrent_state, true);
@@ -545,6 +569,46 @@ impl PeerConnection {
                         "[Peer: {}] Piece request ignored, peer can't be unchoked",
                         self.peer_id
                     );
+                }
+            }
+            PeerMessage::RejectRequest {
+                index,
+                begin,
+                length,
+            } => {
+                if !self.fast_ext {
+                    return Err(Error::Disconnect(
+                        "Received reject request without fast_ext being enabled",
+                    ));
+                }
+                let subpiece = Subpiece {
+                    index,
+                    offset: begin,
+                    size: length,
+                };
+                if !self
+                    .is_valid_piece_req(subpiece, torrent_state.torrent_info.pieces.len() as i32)
+                {
+                    log::warn!(
+                        "[Peer: {}] Piece Reject request ignored, invalid request",
+                        self.peer_id
+                    );
+                }
+                // TODO disconnect if receiving a reject for a never requested piece
+                // TODO 2: if choked remove from allowed fast if rejected piece is part of that 
+                else if self.try_mark_subpiece_failed(subpiece) {
+                    if let Some(i) = self.queued.iter().position(|q_sub| *q_sub == subpiece) {
+                        log::warn!(
+                            "[PeerId {}]: Subpiece request rejected: {index}, {begin}",
+                            self.peer_id,
+                        );
+                        self.queued.remove(i);
+                    } else {
+                        log::error!(
+                            "[PeerId {}]: Subpiece request rejected twice: {index}, {begin}",
+                            self.peer_id,
+                        );
+                    }
                 }
             }
             PeerMessage::Cancel {

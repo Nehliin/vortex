@@ -147,6 +147,7 @@ pub enum PeerMessage {
     HaveAll,
     HaveNone,
     Request { index: i32, begin: i32, length: i32 },
+    RejectRequest { index: i32, begin: i32, length: i32 },
     SuggestPiece { index: i32 },
     Cancel { index: i32, begin: i32, length: i32 },
     Piece { index: i32, begin: i32, data: Bytes },
@@ -165,6 +166,7 @@ impl PeerMessage {
     pub const HAVE_ALL: u8 = 0x0E;
     pub const HAVE_NONE: u8 = 0x0F;
     pub const SUGGEST_PIECE: u8 = 0x0D;
+    pub const REJECT_REQUEST: u8 = 0x10;
 
     // TODO: make const and use of this more
     pub fn encoded_size(&self) -> usize {
@@ -177,7 +179,9 @@ impl PeerMessage {
             | PeerMessage::NotInterested => 1,
             PeerMessage::Have { index: _ } | PeerMessage::SuggestPiece { .. } => 5,
             PeerMessage::Bitfield(bitfield) => 1 + bitfield.as_raw_slice().len(),
-            PeerMessage::Request { .. } | PeerMessage::Cancel { .. } => 13,
+            PeerMessage::Request { .. }
+            | PeerMessage::RejectRequest { .. }
+            | PeerMessage::Cancel { .. } => 13,
             PeerMessage::Piece { data, .. } => 13 + data.len(),
         };
         // Length prefix + message
@@ -227,6 +231,17 @@ impl PeerMessage {
             } => {
                 buf.put_i32(13);
                 buf.put_u8(Self::REQUEST);
+                buf.put_i32(*index);
+                buf.put_i32(*begin);
+                buf.put_i32(*length);
+            }
+            PeerMessage::RejectRequest {
+                index,
+                begin,
+                length,
+            } => {
+                buf.put_i32(13);
+                buf.put_u8(Self::REJECT_REQUEST);
                 buf.put_i32(*index);
                 buf.put_i32(*begin);
                 buf.put_i32(*length);
@@ -330,6 +345,19 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
         PeerMessage::BITFIELD => {
             let bits = BitVec::<_, Msb0>::from_slice(&data[..]);
             Ok(PeerMessage::Bitfield(bits))
+        }
+        PeerMessage::REJECT_REQUEST => {
+            if data.remaining() < 12 {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let index = data.get_i32();
+            let begin = data.get_i32();
+            let length = data.get_i32();
+            Ok(PeerMessage::RejectRequest {
+                index,
+                begin,
+                length,
+            })
         }
         PeerMessage::REQUEST => {
             if data.remaining() < 12 {
