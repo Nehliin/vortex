@@ -147,6 +147,7 @@ pub enum PeerMessage {
     HaveAll,
     HaveNone,
     Request { index: i32, begin: i32, length: i32 },
+    SuggestPiece { index: i32 },
     Cancel { index: i32, begin: i32, length: i32 },
     Piece { index: i32, begin: i32, data: Bytes },
 }
@@ -163,8 +164,9 @@ impl PeerMessage {
     pub const CANCEL: u8 = 8;
     pub const HAVE_ALL: u8 = 0x0E;
     pub const HAVE_NONE: u8 = 0x0F;
+    pub const SUGGEST_PIECE: u8 = 0x0D;
 
-    // TODO: make use of me outside fuzzing
+    // TODO: make const and use of this more
     pub fn encoded_size(&self) -> usize {
         let message_size = match self {
             PeerMessage::Choke
@@ -173,7 +175,7 @@ impl PeerMessage {
             | PeerMessage::HaveNone
             | PeerMessage::Interested
             | PeerMessage::NotInterested => 1,
-            PeerMessage::Have { index: _ } => 5,
+            PeerMessage::Have { index: _ } | PeerMessage::SuggestPiece { .. } => 5,
             PeerMessage::Bitfield(bitfield) => 1 + bitfield.as_raw_slice().len(),
             PeerMessage::Request { .. } | PeerMessage::Cancel { .. } => 13,
             PeerMessage::Piece { data, .. } => 13 + data.len(),
@@ -228,6 +230,11 @@ impl PeerMessage {
                 buf.put_i32(*index);
                 buf.put_i32(*begin);
                 buf.put_i32(*length);
+            }
+            PeerMessage::SuggestPiece { index } => {
+                buf.put_i32(5);
+                buf.put_u8(Self::SUGGEST_PIECE);
+                buf.put_i32(*index);
             }
             PeerMessage::Cancel {
                 index,
@@ -335,6 +342,14 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
                 index,
                 begin,
                 length,
+            })
+        }
+        PeerMessage::SUGGEST_PIECE => {
+            if data.remaining() < 4 {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            Ok(PeerMessage::SuggestPiece {
+                index: data.get_i32(),
             })
         }
         PeerMessage::PIECE => {

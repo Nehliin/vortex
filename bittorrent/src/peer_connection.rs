@@ -512,6 +512,14 @@ impl PeerConnection {
                 // Mark ourselves as interested
                 self.interested(true);
             }
+            PeerMessage::SuggestPiece { index } => {
+                if !self.fast_ext {
+                    return Err(Error::Disconnect(
+                        "Received suggest piece without fast_ext being enabled",
+                    ));
+                }
+                log::info!("[Peer: {}] received suggested piece: {index}", self.peer_id);
+            }
             PeerMessage::Request {
                 index,
                 begin,
