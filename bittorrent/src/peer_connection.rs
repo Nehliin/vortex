@@ -119,6 +119,10 @@ pub struct PeerConnection {
     pub stateful_decoder: PeerMessageDecoder,
     // Stored here to prevent reallocations
     pub outgoing_msgs_buffer: Vec<OutgoingMsg>,
+    // Uses vec instead of hashset since this is expected to be small
+    pub allowed_fast_pieces: Vec<i32>,
+    // The pieces we allow others to request when choked
+    pub accept_fast_pieces: Vec<i32>,
 }
 
 impl PeerConnection {
@@ -142,6 +146,8 @@ impl PeerConnection {
             prev_throughput: 0,
             outgoing_msgs_buffer: Default::default(),
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
+            allowed_fast_pieces: Default::default(),
+            accept_fast_pieces: Default::default(),
         }
     }
 
@@ -454,6 +460,37 @@ impl PeerConnection {
                     .piece_selector
                     .set_peer_piece(conn_id, index as usize);
             }
+            PeerMessage::AllowedFast { index } => {
+                if !self.fast_ext {
+                    return Err(Error::Disconnect(
+                        "Allowed fast received when fast_ext wasn't enabled",
+                    ));
+                }
+                if index < 0 || index > torrent_state.torrent_info.pieces.len() as i32 {
+                    log::warn!("[PeerId: {}] Invalid allowed fast message", self.peer_id);
+                } else if !self.allowed_fast_pieces.contains(&index) {
+                    self.allowed_fast_pieces.push(index);
+                    if !torrent_state.piece_selector.has_completed(index as usize)
+                        && !torrent_state.piece_selector.is_inflight(index as usize)
+                        && torrent_state
+                            .piece_selector
+                            .do_peer_have_piece(conn_id, index as usize)
+                    {
+                        log::info!(
+                            "[PeerId: {}] Requesting new piece {index} via Allowed fast set!",
+                            self.peer_id
+                        );
+                        // Mark ourselves as interested
+                        self.interested(true);
+                        torrent_state.piece_selector.mark_inflight(index as usize);
+                        self.currently_downloading.push(Piece::new(
+                            index,
+                            torrent_state.piece_selector.piece_len(index),
+                        ));
+                        self.fill_request_queue();
+                    }
+                }
+            }
             PeerMessage::HaveAll => {
                 if !self.fast_ext {
                     return Err(Error::Disconnect(
@@ -472,6 +509,8 @@ impl PeerConnection {
                 torrent_state
                     .piece_selector
                     .update_peer_pieces(conn_id, bitfield.into_boxed_bitslice());
+                // Mark ourselves as interested
+                self.interested(true);
             }
             PeerMessage::HaveNone => {
                 if !self.fast_ext {
@@ -595,8 +634,12 @@ impl PeerConnection {
                     );
                 }
                 // TODO disconnect if receiving a reject for a never requested piece
-                // TODO 2: if choked remove from allowed fast if rejected piece is part of that 
-                else if self.try_mark_subpiece_failed(subpiece) {
+                if self.peer_choking {
+                    // apparently not allowed fast
+                    if let Some(i) = self.allowed_fast_pieces.iter().position(|i| index == *i) {
+                        self.allowed_fast_pieces.swap_remove(i);
+                    }
+                } else if self.try_mark_subpiece_failed(subpiece) {
                     if let Some(i) = self.queued.iter().position(|q_sub| *q_sub == subpiece) {
                         log::warn!(
                             "[PeerId {}]: Subpiece request rejected: {index}, {begin}",

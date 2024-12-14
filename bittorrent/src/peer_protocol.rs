@@ -143,6 +143,7 @@ pub enum PeerMessage {
     Interested,
     NotInterested,
     Have { index: i32 },
+    AllowedFast { index: i32 },
     Bitfield(BitVec<u8, Msb0>),
     HaveAll,
     HaveNone,
@@ -167,6 +168,7 @@ impl PeerMessage {
     pub const HAVE_NONE: u8 = 0x0F;
     pub const SUGGEST_PIECE: u8 = 0x0D;
     pub const REJECT_REQUEST: u8 = 0x10;
+    pub const ALLOWED_FAST: u8 = 0x11;
 
     // TODO: make const and use of this more
     pub fn encoded_size(&self) -> usize {
@@ -177,7 +179,9 @@ impl PeerMessage {
             | PeerMessage::HaveNone
             | PeerMessage::Interested
             | PeerMessage::NotInterested => 1,
-            PeerMessage::Have { index: _ } | PeerMessage::SuggestPiece { .. } => 5,
+            PeerMessage::AllowedFast { index: _ }
+            | PeerMessage::Have { index: _ }
+            | PeerMessage::SuggestPiece { .. } => 5,
             PeerMessage::Bitfield(bitfield) => 1 + bitfield.as_raw_slice().len(),
             PeerMessage::Request { .. }
             | PeerMessage::RejectRequest { .. }
@@ -209,6 +213,11 @@ impl PeerMessage {
             PeerMessage::Have { index } => {
                 buf.put_i32(5);
                 buf.put_u8(Self::HAVE);
+                buf.put_i32(*index);
+            }
+            PeerMessage::AllowedFast { index } => {
+                buf.put_i32(5);
+                buf.put_u8(Self::ALLOWED_FAST);
                 buf.put_i32(*index);
             }
             PeerMessage::HaveAll => {
@@ -341,7 +350,14 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
                 index: data.get_i32(),
             })
         }
-
+        PeerMessage::ALLOWED_FAST => {
+            if data.remaining() < 4 {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            Ok(PeerMessage::AllowedFast {
+                index: data.get_i32(),
+            })
+        }
         PeerMessage::BITFIELD => {
             let bits = BitVec::<_, Msb0>::from_slice(&data[..]);
             Ok(PeerMessage::Bitfield(bits))

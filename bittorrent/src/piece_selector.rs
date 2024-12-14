@@ -129,6 +129,13 @@ impl PieceSelector {
             .or_insert_with(|| (0..self.completed_pieces.len()).map(|_| false).collect());
     }
 
+    pub fn do_peer_have_piece(&mut self, connection_id: usize, piece_index: usize) -> bool {
+        self.peer_pieces
+            .get(&connection_id)
+            .map(|pieces| pieces[piece_index])
+            .unwrap_or(false)
+    }
+
     // TODO: Get rid of this?
     #[inline]
     pub fn mark_complete(&mut self, index: usize) {
