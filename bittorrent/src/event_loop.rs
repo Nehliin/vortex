@@ -18,8 +18,8 @@ use slab::Slab;
 use crate::{
     buf_pool::BufferPool,
     buf_ring::{Bgid, Bid, BufferRing},
-    peer_connection::{Error, PeerConnection},
-    peer_protocol::{parse_handshake, write_handshake, HANDSHAKE_SIZE},
+    peer_connection::{Error, OutgoingMsg, PeerConnection},
+    peer_protocol::{self, parse_handshake, write_handshake, HANDSHAKE_SIZE},
     piece_selector::SUBPIECE_SIZE,
     TorrentState,
 };
@@ -410,12 +410,41 @@ impl EventLoop {
                 // We always have a buffer associated
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
                 // Expect this to be the handshake response
-                let peer_id = parse_handshake(torrent_state.info_hash, &buffer[..len]).unwrap();
-                let peer_connection = PeerConnection::new(fd, peer_id);
+                let parsed_handshake =
+                    parse_handshake(torrent_state.info_hash, &buffer[..len]).unwrap();
+                let peer_connection =
+                    PeerConnection::new(fd, parsed_handshake.peer_id, parsed_handshake.fast_ext);
                 log::info!("Finished handshake!: {peer_connection:?}");
                 let connection_idx = self.connections.insert(peer_connection);
                 // We are now connected!
                 *event = Event::ConnectedRecv { connection_idx };
+
+                let completed = torrent_state.piece_selector.completed_clone();
+                let message = if completed.all() {
+                    peer_protocol::PeerMessage::HaveAll
+                } else if completed.not_any() {
+                    peer_protocol::PeerMessage::HaveNone
+                } else {
+                    peer_protocol::PeerMessage::Bitfield(completed.into())
+                };
+                // sent as first message after handshake
+                let bitfield_msg = OutgoingMsg {
+                    message,
+                    ordered: true,
+                };
+                let buffer = self.write_pool.get_buffer();
+                bitfield_msg.message.encode(buffer.inner);
+                let size = bitfield_msg.message.encoded_size();
+                push_connected_write(
+                    connection_idx,
+                    fd,
+                    &mut self.events,
+                    sq,
+                    buffer.index,
+                    &buffer.inner[..size],
+                    bitfield_msg.ordered,
+                    backlog,
+                );
             }
             Event::ConnectedRecv { connection_idx } => {
                 let connection = &mut self.connections[connection_idx];
@@ -481,11 +510,8 @@ impl EventLoop {
                                             )
                                         }
                                     }
-                                    Err(Error::Disconnect) => {
-                                        log::warn!(
-                                            "[Peer {}] is being disconnected",
-                                            connection.peer_id
-                                        );
+                                    Err(err @ Error::Disconnect(_)) => {
+                                        log::warn!("[Peer {}] {err}", connection.peer_id);
                                         // TODO proper shutdown
                                     }
                                     Err(err) => {

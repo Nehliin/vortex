@@ -20,7 +20,7 @@ pub const SUBPIECE_SIZE: i32 = 16_384;
 
 pub struct RandomPiece;*/
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Subpiece {
     pub index: i32,
     pub offset: i32,
@@ -110,6 +110,11 @@ impl PieceSelector {
         }
     }
 
+    #[inline]
+    pub fn bitfield_received(&self, connection_id: usize) -> bool {
+        self.peer_pieces.contains_key(&connection_id)
+    }
+
     pub fn update_peer_pieces(&mut self, connection_id: usize, peer_pieces: BitBox<u8, Msb0>) {
         let entry = self.peer_pieces.entry(connection_id);
         entry
@@ -122,6 +127,13 @@ impl PieceSelector {
         entry
             .and_modify(|pieces| pieces.set(piece_index, true))
             .or_insert_with(|| (0..self.completed_pieces.len()).map(|_| false).collect());
+    }
+
+    pub fn do_peer_have_piece(&mut self, connection_id: usize, piece_index: usize) -> bool {
+        self.peer_pieces
+            .get(&connection_id)
+            .map(|pieces| pieces[piece_index])
+            .unwrap_or(false)
     }
 
     // TODO: Get rid of this?
@@ -149,6 +161,11 @@ impl PieceSelector {
     #[inline]
     pub fn completed_all(&self) -> bool {
         self.completed_pieces.all()
+    }
+
+    #[inline]
+    pub fn completed_clone(&self) -> BitBox<u8, Msb0> {
+        self.completed_pieces.clone()
     }
 
     #[inline]
@@ -195,6 +212,7 @@ impl PieceSelector {
     }
 }
 
+// TODO flatten this
 #[derive(Debug)]
 pub struct Piece {
     pub index: i32,
@@ -232,7 +250,10 @@ impl Piece {
         // This subpice is part of the currently downloading piece
         assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
-        log::trace!("[Peer: {}] Subpiece index received: {subpiece_index}", peer_id);
+        log::trace!(
+            "[Peer: {}] Subpiece index received: {subpiece_index}",
+            peer_id
+        );
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {
             assert_eq!(data.len() as i32, self.last_subpiece_length);

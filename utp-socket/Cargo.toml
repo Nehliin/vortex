@@ -12,7 +12,7 @@ license = "BSD-3-Clause"
 anyhow = { workspace = true }
 rand = { workspace = true }
 bytes = { workspace = true }
-tokio-uring = { workspace = true, branch = "master", features = ["bytes"]}
+tokio-uring = { workspace = true, features = ["bytes"]}
 tokio = { workspace = true, features = ["time", "sync", "macros"] }
 log = { workspace = true }
 libc = "0.2"
