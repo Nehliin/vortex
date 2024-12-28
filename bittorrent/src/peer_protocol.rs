@@ -116,8 +116,7 @@ pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<Par
         return Err(ErrorKind::InvalidData.into());
     }
     buffer.advance(str_len);
-    println!("buffer: {:?}", &buffer[..8]);
-    // Extensions, only fast for now
+    // Extensions, only fast ext is checked for now
     let fast_ext = buffer[7] & 0x04 != 0;
     buffer.advance(8);
     let peer_info_hash: [u8; 20] = buffer[..20]
