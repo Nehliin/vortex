@@ -479,21 +479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lava_torrent"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81730ad85660dd85c8196a684cb51cee60c69c8f99c82d6ecb6df5bc79c4859d"
-dependencies = [
- "conv",
- "itertools",
- "num_cpus",
- "percent-encoding",
- "rayon",
- "sha1",
- "thiserror 1.0.38",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
