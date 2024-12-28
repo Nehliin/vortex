@@ -706,7 +706,44 @@ impl PeerConnection {
                 index,
                 begin,
                 length,
-            } => todo!(),
+            } => {
+                log::trace!("[Peer: {}] Received cancel request, index: {index}, begin: {begin}, length: {length}", self.peer_id);
+                // if we are talking to a fast_ext peer we need to respond with something here,
+                // either reject or a piece
+                if self.fast_ext {
+                    let subpiece = Subpiece {
+                        index,
+                        offset: begin,
+                        size: length,
+                    };
+                    if !self
+                        .outgoing_msgs_buffer
+                        .iter()
+                        .any(|msg| match msg.message {
+                            PeerMessage::RejectRequest {
+                                index,
+                                begin,
+                                length,
+                            } if index == subpiece.index
+                                && subpiece.offset == begin
+                                && subpiece.size == length =>
+                            {
+                                true
+                            }
+                            PeerMessage::Piece { index, begin, .. }
+                                if index == subpiece.index && subpiece.offset == begin =>
+                            {
+                                true
+                            }
+                            _ => false,
+                        })
+                    {
+                        // We've not already queued up a response
+                        // so reject the request
+                        self.reject_request(subpiece, false);
+                    }
+                }
+            }
             PeerMessage::Piece { index, begin, data } => {
                 // TODO: disconnect on recv piece never requested if fast_ext is enabled
                 log::trace!(
