@@ -2,6 +2,11 @@
 name = "vortex-bittorrent"
 version = "0.1.0"
 edition = "2021"
+description = "An implementation of the bittorrent protocol built on top of io-uring"
+homepage = "https://github.com/Nehliin/vortex"
+repository = "https://github.com/Nehliin/vortex"
+license = "BSD-3-Clause"
+
 
 [dependencies]
 io-uring = "0.7"
