@@ -83,6 +83,7 @@ then
         --name "${name}" \
         --env PUID=$UID \
         --env PGID=$UID \
+        --env WHITELIST="192.168.0.137" \
         --mount type=bind,src="${tr_config_dir}",dst=/config \
         --mount type=bind,src="${tr_downloads_dir}",dst=/downloads \
         --mount type=bind,src="${tr_watch_dir}",dst=/watch \

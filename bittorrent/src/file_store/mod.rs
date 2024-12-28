@@ -1,10 +1,13 @@
-use std::path::{Path, PathBuf};
-
-use lava_torrent::torrent::v1::Torrent;
-use tokio_uring::{
-    buf::BoundedBuf,
-    fs::{File, OpenOptions},
+use std::{
+    io,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
 };
+
+use file::MmapFile;
+use lava_torrent::torrent::v1::Torrent;
+
+mod file;
 
 #[derive(Debug)]
 struct TorrentFile {
@@ -17,7 +20,7 @@ struct TorrentFile {
     // Offset within the end piece
     end_offset: i32,
     // File handle
-    file: File,
+    file: file::MmapFile,
 }
 
 impl TorrentFile {
@@ -38,15 +41,22 @@ impl TorrentFile {
 }
 
 // TODO: Consider getting rid of default impl
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FileStore {
     piece_length: u64,
     files: Vec<TorrentFile>,
 }
 
 impl FileStore {
-    pub async fn new(root: impl AsRef<Path>, torrent_info: &Torrent) -> anyhow::Result<Self> {
-        async fn new_impl(root: &Path, torrent_info: &Torrent) -> anyhow::Result<FileStore> {
+    pub fn dummy() -> Self {
+        Self {
+            piece_length: 0,
+            files: Default::default(),
+        }
+    }
+
+    pub fn new(root: impl AsRef<Path>, torrent_info: &Torrent) -> io::Result<Self> {
+        fn new_impl(root: &Path, torrent_info: &Torrent) -> io::Result<FileStore> {
             let mut result = Vec::new();
             let mut start_piece = 0;
             let mut start_offset = 0;
@@ -70,29 +80,9 @@ impl FileStore {
                 path_buf.push(&torrent_file.path);
                 if let Some(parent_dir) = path_buf.parent() {
                     // TODO: consider caching already created directories
-                    tokio_uring::fs::create_dir_all(parent_dir).await?;
+                    std::fs::create_dir_all(parent_dir)?;
                 }
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(&path_buf)
-                    .await?;
-
-                let metadata = file.statx().await?;
-                // Only fallocate if necessary so existing data isn't overwritten
-                if metadata.stx_size != torrent_file.length as u64 {
-                    // Default mode is described in the man pages as:
-                    // allocates the disk space within the range specified by offset and
-                    // len. The file size (as reported by stat(2)) will be changed if
-                    // offset+len is greater than the file size.  Any subregion within
-                    // the range specified by offset and len that did not contain data
-                    // before the call will be initialized to zero.
-                    const DEFAULT_FALLOCATE_MODE: i32 = 0;
-
-                    file.fallocate(0, torrent_file.length as u64, DEFAULT_FALLOCATE_MODE)
-                        .await?;
-                }
+                let file = MmapFile::create(&path_buf, torrent_file.length as usize)?;
 
                 let torrent_file = TorrentFile {
                     start_piece,
@@ -110,13 +100,13 @@ impl FileStore {
                 piece_length,
             })
         }
-        new_impl(root.as_ref(), torrent_info).await
+        new_impl(root.as_ref(), torrent_info)
     }
 
-    pub async fn write_piece(&self, index: i32, mut piece_data: Vec<u8>) -> anyhow::Result<()> {
+    pub fn write_piece(&mut self, index: i32, piece_data: &[u8]) -> io::Result<()> {
         let files = self
             .files
-            .iter()
+            .iter_mut()
             .filter(|file| file.start_piece <= index && index <= file.end_piece);
         for file in files {
             let file_offset = file.offset(index, self.piece_length);
@@ -125,21 +115,27 @@ impl FileStore {
             } else {
                 0
             };
-            let file_data = if index == file.end_piece {
-                piece_data.slice(data_start_offset..file.end_offset as usize)
+            let relevant_piece_data = if index == file.end_piece {
+                &piece_data[data_start_offset..file.end_offset as usize]
             } else {
-                piece_data.slice(data_start_offset..)
+                &piece_data[data_start_offset..]
             };
-            let (res, buf) = file.file.write_all_at(file_data, file_offset).await;
-            piece_data = buf.into_inner();
-            res?;
+            let file_data = file.file.get_mut();
+
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    relevant_piece_data.as_ptr(),
+                    file_data.as_mut_ptr().add(file_offset as usize),
+                    relevant_piece_data.len(),
+                )
+            }
         }
         Ok(())
     }
 
     // invariant here is that the piece has been completed before, it's not up
     // to the store to control that.
-    pub async fn read_piece(&self, index: i32) -> anyhow::Result<Vec<u8>> {
+    pub fn read_piece(&self, index: i32) -> io::Result<Vec<u8>> {
         let files = self
             .files
             .iter()
@@ -156,26 +152,32 @@ impl FileStore {
             } else {
                 0
             };
-            let piece_data_slice = if index == file.end_piece {
-                piece_data.slice(data_start_offset..file.end_offset as usize)
+            let relevant_piece_data = if index == file.end_piece {
+                &mut piece_data[data_start_offset..file.end_offset as usize]
             } else {
-                piece_data.slice(data_start_offset..)
+                &mut piece_data[data_start_offset..]
             };
-            let (bytes_read, buf) = file.file.read_at(piece_data_slice, file_offset).await;
-            total_read += bytes_read?;
-            piece_data = buf.into_inner();
+            let file_data = file.file.get();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    file_data.as_ptr().add(file_offset as usize),
+                    relevant_piece_data.as_mut_ptr(),
+                    relevant_piece_data.len(),
+                )
+            }
+            total_read += relevant_piece_data.len();
         }
         piece_data.truncate(total_read);
         if piece_data.is_empty() {
-            anyhow::bail!("Invalid piece index");
+            return Err(io::ErrorKind::InvalidInput.into());
         } else {
             Ok(piece_data)
         }
     }
 
-    pub async fn close(self) -> anyhow::Result<()> {
+    pub fn close(self) -> io::Result<()> {
         for torrent_file in self.files {
-            torrent_file.file.close().await?;
+            torrent_file.file.close()?;
         }
         Ok(())
     }
@@ -220,10 +222,10 @@ mod tests {
         }
     }
 
-    async fn read_file_by_piece(root: impl AsRef<Path>, torrent_info: &Torrent) {
-        let store = FileStore::new(root, torrent_info).await.unwrap();
+    fn read_file_by_piece(root: impl AsRef<Path>, torrent_info: &Torrent) {
+        let store = FileStore::new(root, torrent_info).unwrap();
         for (index, piece_hash) in torrent_info.pieces.iter().enumerate() {
-            let piece_data = store.read_piece(index as i32).await.unwrap();
+            let piece_data = store.read_piece(index as i32).unwrap();
             let mut hasher = Sha1::new();
             hasher.update(piece_data);
             let actual_hash = hasher.finalize();
@@ -257,27 +259,20 @@ mod tests {
             .copied()
             .collect();
         let download_tmp_dir_path = download_tmp_dir.path.clone();
-        tokio_uring::start(async move {
-            let file_store = FileStore::new(&download_tmp_dir_path, &torrent_info)
-                .await
-                .unwrap();
+        let mut file_store = FileStore::new(&download_tmp_dir_path, &torrent_info).unwrap();
 
-            for (index, _) in torrent_info.pieces.iter().enumerate() {
-                let (piece, remainder) = all_data.split_at(piece_len.min(all_data.len()));
-                file_store
-                    .write_piece(index as i32, piece.to_vec())
-                    .await
-                    .unwrap();
-                all_data = remainder.to_vec();
-            }
-            assert!(all_data.is_empty());
-            // Close so they can be opened up later on
-            // and should ensure everything is synced properly
-            for file in file_store.files {
-                file.file.close().await.unwrap();
-            }
-            read_file_by_piece(&download_tmp_dir_path, &torrent_info).await;
-        });
+        for (index, _) in torrent_info.pieces.iter().enumerate() {
+            let (piece, remainder) = all_data.split_at(piece_len.min(all_data.len()));
+            file_store.write_piece(index as i32, piece).unwrap();
+            all_data = remainder.to_vec();
+        }
+        assert!(all_data.is_empty());
+        // Close so they can be opened up later on
+        // and should ensure everything is synced properly
+        for file in file_store.files {
+            file.file.close().unwrap();
+        }
+        read_file_by_piece(&download_tmp_dir_path, &torrent_info);
 
         for file in files.iter() {
             let path = file.path.to_str().unwrap();
@@ -388,12 +383,8 @@ mod tests {
             .build()
             .unwrap();
 
-        tokio_uring::start(async move {
-            let file_store = FileStore::new(&download_tmp_dir.path, &torrent_info)
-                .await
-                .unwrap();
-            // 500 is out of bounds
-            assert!(file_store.read_piece(500).await.is_err());
-        });
+        let file_store = FileStore::new(&download_tmp_dir.path, &torrent_info).unwrap();
+        // 500 is out of bounds
+        assert!(file_store.read_piece(500).is_err());
     }
 }
