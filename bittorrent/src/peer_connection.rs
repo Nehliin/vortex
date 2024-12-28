@@ -635,7 +635,8 @@ impl PeerConnection {
                 }
                 // TODO disconnect if receiving a reject for a never requested piece
                 if self.peer_choking {
-                    // apparently not allowed fast
+                    // Remove from the allowed fast set if it was reported there since it
+                    // apparently wasn't allowed fast
                     if let Some(i) = self.allowed_fast_pieces.iter().position(|i| index == *i) {
                         self.allowed_fast_pieces.swap_remove(i);
                     }
