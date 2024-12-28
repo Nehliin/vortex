@@ -162,6 +162,29 @@ impl PeerConnection {
         });
     }
 
+    fn reject_request(&mut self, subpiece: Subpiece, ordered: bool) {
+        // TODO: Disconnect on too many rejected pieces
+        self.outgoing_msgs_buffer.push(OutgoingMsg {
+            message: PeerMessage::RejectRequest {
+                index: subpiece.index,
+                begin: subpiece.offset,
+                length: subpiece.size,
+            },
+            ordered,
+        });
+    }
+
+    fn send_piece(&mut self, index: i32, offset: i32, data: Bytes, ordered: bool) {
+        self.outgoing_msgs_buffer.push(OutgoingMsg {
+            message: PeerMessage::Piece {
+                index,
+                begin: offset,
+                data,
+            },
+            ordered,
+        });
+    }
+
     fn interested(&mut self, ordered: bool) {
         self.is_interested = true;
         self.outgoing_msgs_buffer.push(OutgoingMsg {
@@ -579,35 +602,59 @@ impl PeerConnection {
                     offset: begin,
                     size: length,
                 };
-                if !self
-                    .is_valid_piece_req(subpiece, torrent_state.torrent_info.pieces.len() as i32)
-                {
-                    log::warn!(
-                        "[Peer: {}] Piece request ignored, invalid request",
-                        self.peer_id
-                    );
-                    todo!("reqject request")
-                }
-                let should_unchoke = torrent_state.should_unchoke();
-                if should_unchoke && self.is_choking {
-                    self.unchoke(torrent_state, true);
-                }
-                if !self.is_choking {
-                    unimplemented!();
-                    /*match self.on_piece_request(index, begin, length).await {
-                        Ok(piece_data) => {
-                            let peer_connection = connection_mut_or_return!();
-                            peer_connection.piece(index, begin, piece_data)?;
+                // returns if it was accepted or not
+                let mut handle_req = || {
+                    if !self.is_valid_piece_req(
+                        subpiece,
+                        torrent_state.torrent_info.pieces.len() as i32,
+                    ) {
+                        log::warn!(
+                            "[Peer: {}] Piece request ignored/rejected, invalid request",
+                            self.peer_id
+                        );
+                        None
+                    } else {
+                        let should_unchoke = torrent_state.should_unchoke();
+                        if should_unchoke && self.is_choking {
+                            self.unchoke(torrent_state, true);
                         }
-                        Err(err) => {
-                            log::error!("[Peer: {}] Invalid piece request: {err}", self.peer_id)
+                        // We are either not choking or the piece is part of the fast set and they
+                        // support the fast ext
+                        if !self.is_choking
+                            || (self.accept_fast_pieces.contains(&subpiece.index) && self.fast_ext)
+                        {
+                            if !torrent_state
+                                .piece_selector
+                                .has_completed(subpiece.index as usize)
+                            {
+                                return None;
+                            }
+                            // TODO: no real need to read the entire piece here
+                            let Ok(mut piece_data) = torrent_state.file_store.read_piece(index)
+                            else {
+                                log::error!(
+                                    "[Peer: {}] Piece request ignored/rejected, failed to read piece from store: {subpiece:?}",
+                                    self.peer_id
+                                );
+                                return None;
+                            };
+                            // TODO: inefficient, extra alloc her
+                            let mut piece_data = piece_data.split_off(subpiece.offset as usize);
+                            piece_data.truncate(subpiece.size as usize);
+                            Some(piece_data)
+                        } else {
+                            log::warn!(
+                                "[Peer: {}] Piece request ignored/rejected, peer can't be unchoked",
+                                self.peer_id
+                            );
+                            None
                         }
-                    }*/
-                } else {
-                    log::info!(
-                        "[Peer: {}] Piece request ignored, peer can't be unchoked",
-                        self.peer_id
-                    );
+                    }
+                };
+                if let Some(piece_data) = handle_req() {
+                    self.send_piece(subpiece.index, subpiece.offset, piece_data.into(), false);
+                } else if self.fast_ext {
+                    self.reject_request(subpiece, false);
                 }
             }
             PeerMessage::RejectRequest {
