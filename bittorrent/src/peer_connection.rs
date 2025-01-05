@@ -1,11 +1,13 @@
 use std::{
     collections::VecDeque,
     io::{self},
+    net::Ipv4Addr,
     os::fd::RawFd,
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
+use sha1::Digest;
 use thiserror::Error;
 
 use crate::{
@@ -75,6 +77,39 @@ impl MovingRttAverage {
     }
 }
 
+// TODO: don't send pieces the peer already have
+fn generate_fast_set(
+    set_size: u32,
+    num_pieces: u32,
+    info_hash: &[u8; 20],
+    ip: Ipv4Addr,
+    fast_set: &mut Vec<i32>,
+) {
+    fast_set.clear();
+    let mut x = Vec::with_capacity(24);
+    let ip = ip.to_bits() & 0xffffff00;
+    x.extend_from_slice(&ip.to_be_bytes());
+    x.extend_from_slice(info_hash);
+    let mut max_attempts = 300;
+    while fast_set.len() < set_size as usize && max_attempts > 0 {
+        max_attempts -= 1;
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(&x);
+        x = hasher.finalize().to_vec();
+        for i in 0..5 {
+            if fast_set.len() >= set_size as usize {
+                break;
+            }
+            let j = i * 4;
+            let y = u32::from_be_bytes(x[j..j + 4].try_into().unwrap());
+            let index = (y % num_pieces) as i32;
+            if !fast_set.contains(&index) {
+                fast_set.push(index);
+            }
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Peer is being disconnected, Reason {0}")]
@@ -94,10 +129,14 @@ pub struct PeerConnection {
     pub fd: RawFd,
     // TODO: Make this a type that impl display
     pub peer_id: PeerId,
+    // Peer Ip
+    pub ip: Ipv4Addr,
     /// This side is choking the peer
     pub is_choking: bool,
     /// This side is interested what the peer has to offer
     pub is_interested: bool,
+    /// Have we sent allowed fast set yet too the peer
+    pub sent_allowed_fast: bool,
     pub fast_ext: bool,
     /// The peer have informed us that it is choking us.
     pub peer_choking: bool,
@@ -126,12 +165,14 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
-    pub fn new(fd: RawFd, peer_id: PeerId, fast_ext: bool) -> Self {
+    pub fn new(fd: RawFd, peer_id: PeerId, peer_ip: Ipv4Addr, fast_ext: bool) -> Self {
         PeerConnection {
             fd,
             peer_id,
+            ip: peer_ip,
             is_choking: true,
-            is_interested: true,
+            is_interested: false,
+            sent_allowed_fast: false,
             peer_choking: true,
             peer_interested: false,
             timeout_point: None,
@@ -456,6 +497,41 @@ impl PeerConnection {
                 let should_unchoke = torrent_state.should_unchoke();
                 log::info!("[Peer: {}] Peer is interested in us!", self.peer_id);
                 self.peer_interested = true;
+                if !self.sent_allowed_fast && self.fast_ext {
+                    self.sent_allowed_fast = true;
+                    const ALLOWED_FAST_SET_SIZE: usize = 6;
+                    if ALLOWED_FAST_SET_SIZE >= torrent_state.num_pieces() {
+                        for index in 0..torrent_state.num_pieces() {
+                            if !torrent_state
+                                .piece_selector
+                                .do_peer_have_piece(conn_id, index)
+                            {
+                                let index = index as i32;
+                                if !self.accept_fast_pieces.contains(&index) {
+                                    self.accept_fast_pieces.push(index);
+                                }
+                                self.outgoing_msgs_buffer.push(OutgoingMsg {
+                                    message: PeerMessage::AllowedFast { index },
+                                    ordered: false,
+                                });
+                            }
+                        }
+                    } else {
+                        generate_fast_set(
+                            ALLOWED_FAST_SET_SIZE as u32,
+                            torrent_state.num_pieces() as u32,
+                            &torrent_state.info_hash,
+                            self.ip,
+                            &mut self.accept_fast_pieces,
+                        );
+                        for index in self.accept_fast_pieces.iter().copied() {
+                            self.outgoing_msgs_buffer.push(OutgoingMsg {
+                                message: PeerMessage::AllowedFast { index },
+                                ordered: false,
+                            });
+                        }
+                    }
+                }
                 if !self.is_choking {
                     // if we are not choking them we might need to send a
                     // unchoke to avoid some race conditions. Libtorrent
