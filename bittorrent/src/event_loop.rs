@@ -1,8 +1,8 @@
 use std::{
     collections::VecDeque,
     io,
-    net::SocketAddr,
-    os::fd::RawFd,
+    net::{Ipv4Addr, SocketAddr},
+    os::fd::{FromRawFd, RawFd},
     time::{Duration, Instant},
     u32,
 };
@@ -32,7 +32,7 @@ pub enum Event {
     // fd?
     Connect { fd: RawFd, addr: SocketAddr },
     Write { fd: RawFd },
-    Recv { fd: RawFd },
+    Recv { fd: RawFd, ip_addr: Ipv4Addr },
     ConnectedWrite { connection_idx: usize },
     ConnectedRecv { connection_idx: usize },
 }
@@ -137,7 +137,7 @@ fn event_error_handler(
         let event = &events[user_data.event_idx as _];
         // Ran out of buffers!
         match event {
-            Event::Recv { fd } => {
+            Event::Recv { fd, .. } => {
                 let read_op = opcode::RecvMulti::new(types::Fd(*fd), bgid)
                     .build()
                     // Reuse the user data
@@ -316,7 +316,6 @@ impl EventLoop {
         result
     }
 
-    // Returs a boolean indicating if the torrent is complete
     fn event_handler(
         &mut self,
         sq: &mut SubmissionQueue<'_>,
@@ -343,9 +342,23 @@ impl EventLoop {
             Event::Accept => {
                 log::info!("Accepted connection!");
                 let fd = ret;
+                // TODO: double check this
+                let ip_addr = unsafe {
+                    let stream = std::net::TcpStream::from_raw_fd(fd);
+                    let tmp = match stream.peer_addr()? {
+                        SocketAddr::V4(ipv4) => *ipv4.ip(),
+                        SocketAddr::V6(ipv6) => {
+                            log::error!("Received connection from non ipv4 addr: {ipv6}");
+                            return Ok(());
+                        }
+                    };
+                    // don't drop
+                    std::mem::forget(stream);
+                    tmp
+                };
                 // Construct new recv token on accept, after that it lives forever and or is reused
                 // since this is a recvmulti operation
-                let read_token = self.events.insert(Event::Recv { fd });
+                let read_token = self.events.insert(Event::Recv { fd, ip_addr });
                 let user_data = UserData::new(read_token, None);
                 let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
                     .build()
@@ -360,6 +373,13 @@ impl EventLoop {
             }
             Event::Connect { addr, fd } => {
                 self.events.remove(user_data.event_idx as _);
+                let ip_addr = match addr {
+                    SocketAddr::V4(ipv4) => *ipv4.ip(),
+                    SocketAddr::V6(_) => {
+                        log::error!("Connected to non ipv4 addr: {addr}");
+                        return Err(io::ErrorKind::Unsupported.into());
+                    }
+                };
                 // TODO: TIMEOUT
                 let buffer = self.write_pool.get_buffer();
                 write_handshake(self.our_id, torrent_state.info_hash, buffer.inner);
@@ -381,7 +401,7 @@ impl EventLoop {
                         backlog.push_back(write_op);
                     }
                 }
-                let read_token = self.events.insert(Event::Recv { fd });
+                let read_token = self.events.insert(Event::Recv { fd, ip_addr });
                 let user_data = UserData::new(read_token, None);
                 let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
                     .build()
@@ -404,7 +424,7 @@ impl EventLoop {
             Event::ConnectedWrite { connection_idx } => {
                 self.events.remove(user_data.event_idx as _);
             }
-            Event::Recv { fd } => {
+            Event::Recv { fd, ip_addr } => {
                 log::info!("RECV");
                 let len = ret as usize;
                 // We always have a buffer associated
@@ -412,8 +432,12 @@ impl EventLoop {
                 // Expect this to be the handshake response
                 let parsed_handshake =
                     parse_handshake(torrent_state.info_hash, &buffer[..len]).unwrap();
-                let peer_connection =
-                    PeerConnection::new(fd, parsed_handshake.peer_id, parsed_handshake.fast_ext);
+                let peer_connection = PeerConnection::new(
+                    fd,
+                    parsed_handshake.peer_id,
+                    ip_addr,
+                    parsed_handshake.fast_ext,
+                );
                 log::info!("Finished handshake!: {peer_connection:?}");
                 let connection_idx = self.connections.insert(peer_connection);
                 // We are now connected!
