@@ -489,7 +489,7 @@ impl PeerConnection {
                         "Allowed fast received when fast_ext wasn't enabled",
                     ));
                 }
-                if index < 0 || index > torrent_state.torrent_info.pieces.len() as i32 {
+                if index < 0 || index > torrent_state.num_pieces() as i32 {
                     log::warn!("[PeerId: {}] Invalid allowed fast message", self.peer_id);
                 } else if !self.allowed_fast_pieces.contains(&index) {
                     self.allowed_fast_pieces.push(index);
@@ -526,7 +526,7 @@ impl PeerConnection {
                         self.peer_id
                     );
                 }
-                let num_pieces = torrent_state.torrent_info.pieces.len();
+                let num_pieces = torrent_state.num_pieces();
                 log::info!("[Peer: {}] Have all received", self.peer_id);
                 let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
                 torrent_state
@@ -547,7 +547,7 @@ impl PeerConnection {
                         self.peer_id
                     );
                 }
-                let num_pieces = torrent_state.torrent_info.pieces.len();
+                let num_pieces = torrent_state.num_pieces();
                 log::info!("[Peer: {}] Have None received", self.peer_id);
                 let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
                 torrent_state
@@ -558,12 +558,12 @@ impl PeerConnection {
                 if torrent_state.piece_selector.bitfield_received(conn_id) && self.fast_ext {
                     log::error!("[PeerId: {}] Bitfield already received", self.peer_id);
                 }
-                if torrent_state.torrent_info.pieces.len() != field.len() {
-                    if field.len() < torrent_state.torrent_info.pieces.len() {
+                if torrent_state.num_pieces() != field.len() {
+                    if field.len() < torrent_state.num_pieces() {
                         log::error!(
                             "[Peer: {}] Received invalid bitfield, expected {}, got: {}",
                             self.peer_id,
-                            torrent_state.torrent_info.pieces.len(),
+                            torrent_state.num_pieces(),
                             field.len()
                         );
                         return Err(Error::Disconnect("Invalid bitfield"));
@@ -572,10 +572,10 @@ impl PeerConnection {
                     log::debug!(
                         "[Peer: {}] Received padded bitfield, expected {}, got: {}",
                         self.peer_id,
-                        torrent_state.torrent_info.pieces.len(),
+                        torrent_state.num_pieces(),
                         field.len()
                     );
-                    field.truncate(torrent_state.torrent_info.pieces.len());
+                    field.truncate(torrent_state.num_pieces());
                 }
                 log::info!("[Peer: {}] Bifield received", self.peer_id);
                 torrent_state
@@ -604,10 +604,7 @@ impl PeerConnection {
                 };
                 // returns if it was accepted or not
                 let mut handle_req = || {
-                    if !self.is_valid_piece_req(
-                        subpiece,
-                        torrent_state.torrent_info.pieces.len() as i32,
-                    ) {
+                    if !self.is_valid_piece_req(subpiece, torrent_state.num_pieces() as i32) {
                         log::warn!(
                             "[Peer: {}] Piece request ignored/rejected, invalid request",
                             self.peer_id
@@ -672,9 +669,7 @@ impl PeerConnection {
                     offset: begin,
                     size: length,
                 };
-                if !self
-                    .is_valid_piece_req(subpiece, torrent_state.torrent_info.pieces.len() as i32)
-                {
+                if !self.is_valid_piece_req(subpiece, torrent_state.num_pieces() as i32) {
                     log::warn!(
                         "[Peer: {}] Piece Reject request ignored, invalid request",
                         self.peer_id

@@ -130,6 +130,11 @@ impl TorrentState {
         }
     }
 
+    #[inline]
+    pub fn num_pieces(&self) -> usize {
+        self.torrent_info.pieces.len()
+    }
+
     pub(crate) fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) {
         let hash_time = Instant::now();
         let mut hasher = sha1::Sha1::new();
