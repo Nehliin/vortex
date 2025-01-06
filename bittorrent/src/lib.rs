@@ -8,7 +8,7 @@ use event_loop::{Event, EventLoop, UserData};
 use file_store::FileStore;
 use io_uring::{
     opcode,
-    types::{self},
+    types::{self, Timespec},
     IoUring,
 };
 use lava_torrent::torrent::v1::Torrent;
@@ -55,15 +55,19 @@ pub fn connect_to(addr: SocketAddr, torrent_state: TorrentState) {
         addr.len(),
     )
     .build()
-    //    .flags(io_uring::squeue::Flags::IO_LINK)
+    .flags(io_uring::squeue::Flags::IO_LINK)
     .user_data(user_data.as_u64());
     unsafe {
         ring.submission().push(&connect_op).unwrap();
     }
-    //   let timeout_op = opcode::LinkTimeout::new(TIMESPEC).build().user_data(0xdead);
-    //  unsafe {
-    //     ring.submission().push(&timeout_op).unwrap();
-    //}
+    let timeout = Timespec::new().sec(3);
+    let user_data = UserData::new(event_idx, None);
+    let timeout_op = opcode::LinkTimeout::new(&timeout)
+        .build()
+        .user_data(user_data.as_u64());
+    unsafe {
+        ring.submission().push(&timeout_op).unwrap();
+    }
 
     ring.submission().sync();
 

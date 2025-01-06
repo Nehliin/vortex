@@ -14,6 +14,7 @@ use io_uring::{
     IoUring, SubmissionQueue,
 };
 use slab::Slab;
+use socket2::Socket;
 
 use crate::{
     buf_pool::BufferPool,
@@ -131,50 +132,71 @@ fn event_error_handler(
     bgid: Bgid,
     backlog: &mut VecDeque<io_uring::squeue::Entry>,
 ) -> io::Result<()> {
-    if error_code as i32 == libc::ENOBUFS {
-        // TODO: statistics
-        log::warn!("Ran out of buffers!, resubmitting recv op");
-        let event = &events[user_data.event_idx as _];
-        // Ran out of buffers!
-        match event {
-            Event::Recv { fd, .. } => {
-                let read_op = opcode::RecvMulti::new(types::Fd(*fd), bgid)
-                    .build()
-                    // Reuse the user data
-                    .user_data(user_data.as_u64())
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                unsafe {
-                    if sq.push(&read_op).is_err() {
-                        log::warn!("SQ buffer full, pushing to backlog");
-                        backlog.push_back(read_op);
+    match error_code as i32 {
+        libc::ENOBUFS => {
+            // TODO: statistics
+            let event = &events[user_data.event_idx as _];
+            log::warn!("Ran out of buffers!, resubmitting recv op");
+            // Ran out of buffers!
+            match event {
+                Event::Recv { fd, .. } => {
+                    let read_op = opcode::RecvMulti::new(types::Fd(*fd), bgid)
+                        .build()
+                        // Reuse the user data
+                        .user_data(user_data.as_u64())
+                        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                    unsafe {
+                        if sq.push(&read_op).is_err() {
+                            log::warn!("SQ buffer full, pushing to backlog");
+                            backlog.push_back(read_op);
+                        }
                     }
+                    Ok(())
                 }
-                Ok(())
-            }
-            Event::ConnectedRecv { connection_idx } => {
-                let fd = connections[*connection_idx].fd;
-                let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
-                    .build()
-                    // Reuse the user data
-                    .user_data(user_data.as_u64())
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                unsafe {
-                    if sq.push(&read_op).is_err() {
-                        log::warn!("SQ buffer full, pushing to backlog");
-                        backlog.push_back(read_op);
+                Event::ConnectedRecv { connection_idx } => {
+                    let fd = connections[*connection_idx].fd;
+                    let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
+                        .build()
+                        // Reuse the user data
+                        .user_data(user_data.as_u64())
+                        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                    unsafe {
+                        if sq.push(&read_op).is_err() {
+                            log::warn!("SQ buffer full, pushing to backlog");
+                            backlog.push_back(read_op);
+                        }
                     }
+                    Ok(())
                 }
-                Ok(())
-            }
-            _ => {
-                panic!("Ran out of buffers on a non recv operation: {event:?}");
+                _ => {
+                    panic!("Ran out of buffers on a non recv operation: {event:?}");
+                }
             }
         }
-    } else {
-        let event = events.remove(user_data.event_idx as _);
-        dbg!(event);
-        let err = std::io::Error::from_raw_os_error(error_code as i32);
-        Err(err)
+        libc::ETIME => {
+            let event = events.remove(user_data.event_idx as _);
+            let Event::Connect { fd, addr } = event else {
+                panic!("Timed out something other than a connect: {event:?}");
+            };
+            log::warn!("Connect timed out!: {addr}");
+            let socket = unsafe { Socket::from_raw_fd(fd) };
+            socket.shutdown(std::net::Shutdown::Both)?;
+            Ok(())
+        }
+        libc::ECANCELED => {
+            // This is the timeout or the connect operation being cancelled, the event should be deleted by the successful
+            // the ETIME handler or the successful connection event
+            // NOTE: the event idx might have been overwritten and reused by the time this is handled
+            // so don't trust the event connected to the index
+            log::trace!("Event cancelled");
+            Ok(())
+        }
+        _ => {
+            let event = events.remove(user_data.event_idx as _);
+            log::error!("Unhandled error event: {event:?}");
+            let err = std::io::Error::from_raw_os_error(error_code as i32);
+            Err(err)
+        }
     }
 }
 
@@ -326,7 +348,6 @@ impl EventLoop {
     ) -> io::Result<()> {
         let ret = cqe.result();
         let user_data = UserData::from_u64(cqe.user_data());
-        let event = &mut self.events[user_data.event_idx as usize];
         if ret < 0 {
             return event_error_handler(
                 sq,
@@ -338,6 +359,7 @@ impl EventLoop {
                 backlog,
             );
         }
+        let event = &mut self.events[user_data.event_idx as usize];
         match event.clone() {
             Event::Accept => {
                 log::info!("Accepted connection!");
