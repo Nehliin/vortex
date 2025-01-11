@@ -1,6 +1,5 @@
 use std::{io::Write, net::TcpStream};
 
-use vortex_bittorrent::setup_listener;
 
 fn main() {
     env_logger::builder()

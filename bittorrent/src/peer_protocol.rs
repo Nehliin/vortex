@@ -57,19 +57,19 @@ impl<'a> Arbitrary<'a> for PeerMessage {
     }
 }
 
-pub fn generate_peer_id() -> [u8; 20] {
+pub fn generate_peer_id() -> PeerId {
     // Based on http://www.bittorrent.org/beps/bep_0020.html
     const PREFIX: [u8; 8] = *b"-VT0010-";
     let generatated = rand::random::<[u8; 12]>();
     let mut result: [u8; 20] = [0; 20];
     result[0..8].copy_from_slice(&PREFIX);
     result[8..].copy_from_slice(&generatated);
-    result
+    PeerId(result)
 }
 
 pub const HANDSHAKE_SIZE: usize = 68;
 
-pub fn write_handshake(our_peer_id: [u8; 20], info_hash: [u8; 20], mut buffer: &mut [u8]) {
+pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], mut buffer: &mut [u8]) {
     const PROTOCOL: &[u8] = b"BitTorrent protocol";
     buffer.put_u8(PROTOCOL.len() as u8);
     buffer.put_slice(PROTOCOL);
@@ -77,7 +77,7 @@ pub fn write_handshake(our_peer_id: [u8; 20], info_hash: [u8; 20], mut buffer: &
     extension[7] |= 0x04;
     buffer.put_slice(&extension as &[u8]);
     buffer.put_slice(&info_hash as &[u8]);
-    buffer.put_slice(&our_peer_id as &[u8]);
+    buffer.put_slice(&our_peer_id.0 as &[u8]);
 }
 
 #[derive(Debug, Clone, Copy)]

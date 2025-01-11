@@ -1,10 +1,10 @@
 use std::{
     collections::VecDeque,
     io,
-    net::{Ipv4Addr, SocketAddr},
-    os::fd::{FromRawFd, RawFd},
+    net::SocketAddrV4,
+    os::fd::{AsRawFd, FromRawFd, RawFd},
+    sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
-    u32,
 };
 
 use io_uring::{
@@ -14,27 +14,27 @@ use io_uring::{
     IoUring, SubmissionQueue,
 };
 use slab::Slab;
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
     buf_pool::BufferPool,
     buf_ring::{Bgid, Bid, BufferRing},
-    peer_connection::{Error, OutgoingMsg, PeerConnection},
-    peer_protocol::{self, parse_handshake, write_handshake, HANDSHAKE_SIZE},
+    peer_connection::{OutgoingMsg, PeerConnection},
+    peer_protocol::{self, parse_handshake, write_handshake, PeerId, HANDSHAKE_SIZE},
     piece_selector::SUBPIECE_SIZE,
-    TorrentState,
+    Error, TorrentState,
 };
 
-// Write fd Read fd
-// Write ConnectionId Read ConnectionId !!!
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Event {
     Accept,
-    // fd?
-    Connect { fd: RawFd, addr: SocketAddr },
-    Write { fd: RawFd },
-    Recv { fd: RawFd, ip_addr: Ipv4Addr },
+    Connect { socket: Socket, addr: SocketAddrV4 },
+    Write { socket: Socket },
+    Recv { socket: Socket },
     ConnectedWrite { connection_idx: usize },
     ConnectedRecv { connection_idx: usize },
+    // Dummy used to allow stable keys in the slab
+    Dummy,
 }
 
 pub fn push_connected_write(
@@ -66,34 +66,6 @@ pub fn push_connected_write(
             backlog.push_back(write_op);
         }
     }
-    /*if let Some((subpiece, timeout)) = timeout {
-        let timespec = Timespec::new()
-            .sec(timeout.as_secs())
-            .nsec(timeout.subsec_nanos());
-        let event = events.insert(Event::Timeout {
-            connection_idx: conn_id,
-            subpiece,
-            timespec,
-        });
-        let user_data = UserData::new(event, None);
-        let Some(Event::Timeout {
-            connection_idx: _,
-            timespec,
-            subpiece: _,
-        }) = &events.get(event)
-        else {
-            unreachable!();
-        };
-        let timeout_op = opcode::Timeout::new(timespec as *const _)
-            .build()
-            .user_data(user_data.as_u64());
-        unsafe {
-            if sq.push(&timeout_op).is_err() {
-                log::warn!("SQ buffer full, pushing to backlog");
-                backlog.push_back(timeout_op);
-            }
-        }
-    }*/
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -131,50 +103,71 @@ fn event_error_handler(
     bgid: Bgid,
     backlog: &mut VecDeque<io_uring::squeue::Entry>,
 ) -> io::Result<()> {
-    if error_code as i32 == libc::ENOBUFS {
-        // TODO: statistics
-        log::warn!("Ran out of buffers!, resubmitting recv op");
-        let event = &events[user_data.event_idx as _];
-        // Ran out of buffers!
-        match event {
-            Event::Recv { fd, .. } => {
-                let read_op = opcode::RecvMulti::new(types::Fd(*fd), bgid)
-                    .build()
-                    // Reuse the user data
-                    .user_data(user_data.as_u64())
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                unsafe {
-                    if sq.push(&read_op).is_err() {
-                        log::warn!("SQ buffer full, pushing to backlog");
-                        backlog.push_back(read_op);
+    match error_code as i32 {
+        libc::ENOBUFS => {
+            // TODO: statistics
+            let event = &events[user_data.event_idx as _];
+            log::warn!("Ran out of buffers!, resubmitting recv op");
+            // Ran out of buffers!
+            match event {
+                Event::Recv { socket } => {
+                    let fd = socket.as_raw_fd();
+                    let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
+                        .build()
+                        // Reuse the user data
+                        .user_data(user_data.as_u64())
+                        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                    unsafe {
+                        if sq.push(&read_op).is_err() {
+                            log::warn!("SQ buffer full, pushing to backlog");
+                            backlog.push_back(read_op);
+                        }
                     }
+                    Ok(())
                 }
-                Ok(())
-            }
-            Event::ConnectedRecv { connection_idx } => {
-                let fd = connections[*connection_idx].fd;
-                let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
-                    .build()
-                    // Reuse the user data
-                    .user_data(user_data.as_u64())
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                unsafe {
-                    if sq.push(&read_op).is_err() {
-                        log::warn!("SQ buffer full, pushing to backlog");
-                        backlog.push_back(read_op);
+                Event::ConnectedRecv { connection_idx } => {
+                    let fd = connections[*connection_idx].socket.as_raw_fd();
+                    let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
+                        .build()
+                        // Reuse the user data
+                        .user_data(user_data.as_u64())
+                        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                    unsafe {
+                        if sq.push(&read_op).is_err() {
+                            log::warn!("SQ buffer full, pushing to backlog");
+                            backlog.push_back(read_op);
+                        }
                     }
+                    Ok(())
                 }
-                Ok(())
-            }
-            _ => {
-                panic!("Ran out of buffers on a non recv operation: {event:?}");
+                _ => {
+                    panic!("Ran out of buffers on a non recv operation: {event:?}");
+                }
             }
         }
-    } else {
-        let event = events.remove(user_data.event_idx as _);
-        dbg!(event);
-        let err = std::io::Error::from_raw_os_error(error_code as i32);
-        Err(err)
+        libc::ETIME => {
+            let event = events.remove(user_data.event_idx as _);
+            let Event::Connect { socket, addr } = event else {
+                panic!("Timed out something other than a connect: {event:?}");
+            };
+            log::warn!("Connect timed out!: {addr}");
+            socket.shutdown(std::net::Shutdown::Both)?;
+            Ok(())
+        }
+        libc::ECANCELED => {
+            // This is the timeout or the connect operation being cancelled, the event should be deleted by the successful
+            // the ETIME handler or the successful connection event
+            // NOTE: the event idx might have been overwritten and reused by the time this is handled
+            // so don't trust the event connected to the index
+            log::trace!("Event cancelled");
+            Ok(())
+        }
+        _ => {
+            let event = events.remove(user_data.event_idx as _);
+            log::error!("Unhandled error event: {event:?}");
+            let err = std::io::Error::from_raw_os_error(error_code as i32);
+            Err(err)
+        }
     }
 }
 
@@ -185,16 +178,18 @@ pub struct EventLoop {
     write_pool: BufferPool,
     read_ring: BufferRing,
     connections: Slab<PeerConnection>,
-    our_id: [u8; 20],
+    peer_provider: Receiver<SocketAddrV4>,
+    our_id: PeerId,
 }
 
 impl EventLoop {
-    pub fn new(our_id: [u8; 20], events: Slab<Event>) -> Self {
+    pub fn new(our_id: PeerId, events: Slab<Event>, peer_provider: Receiver<SocketAddrV4>) -> Self {
         Self {
             events,
             write_pool: BufferPool::new(128, 4096),
             read_ring: BufferRing::new(1, 128, (SUBPIECE_SIZE * 2) as _).unwrap(),
             connections: Slab::with_capacity(64),
+            peer_provider,
             our_id,
         }
     }
@@ -204,7 +199,7 @@ impl EventLoop {
         mut ring: IoUring,
         mut torrent_state: TorrentState,
         mut tick: impl FnMut(&Duration, &mut Slab<PeerConnection>, &mut TorrentState),
-    ) -> io::Result<()> {
+    ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
         // lambda to be able to catch errors an always unregistering the read ring
         let mut actual_loop = || {
@@ -223,7 +218,7 @@ impl EventLoop {
                     }
                     Err(err) => {
                         log::error!("Failed ring submission, aborting: {err}");
-                        return Err(err);
+                        return Err(Error::Io(err));
                     }
                 }
                 cq.sync();
@@ -240,7 +235,7 @@ impl EventLoop {
                             }
                             Err(err) => {
                                 log::error!("Failed ring submission, aborting: {err}");
-                                return Err(err);
+                                return Err(Error::Io(err));
                             }
                         }
                     }
@@ -265,7 +260,7 @@ impl EventLoop {
                     // TODO deal with this in the tick itself
                     for (conn_id, connection) in self.connections.iter_mut() {
                         for msg in connection.outgoing_msgs_buffer.iter_mut() {
-                            let conn_fd = connection.fd;
+                            let conn_fd = connection.socket.as_raw_fd();
                             let buffer = self.write_pool.get_buffer();
                             msg.message.encode(buffer.inner);
                             let size = msg.message.encoded_size();
@@ -304,6 +299,7 @@ impl EventLoop {
                         self.read_ring.return_bid(bid);
                     }
                 }
+                self.connect_to_new_peers(&mut sq)?;
                 sq.sync();
                 if torrent_state.is_complete {
                     log::info!("Torrent complete!");
@@ -316,6 +312,40 @@ impl EventLoop {
         result
     }
 
+    fn connect_to_new_peers(&mut self, sq: &mut SubmissionQueue<'_>) -> Result<(), Error> {
+        loop {
+            match self.peer_provider.try_recv() {
+                Ok(addr) => {
+                    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+                    //socket.set_recv_buffer_size(1 << 19).unwrap();
+                    let fd = socket.as_raw_fd();
+                    let event_idx = self.events.insert(Event::Connect { socket, addr });
+                    let user_data = UserData::new(event_idx, None);
+                    let addr = SockAddr::from(addr);
+                    let connect_op =
+                        opcode::Connect::new(types::Fd(fd), addr.as_ptr() as *const _, addr.len())
+                            .build()
+                            .flags(io_uring::squeue::Flags::IO_LINK)
+                            .user_data(user_data.as_u64());
+                    unsafe {
+                        sq.push(&connect_op).unwrap();
+                    }
+                    let timeout = Timespec::new().sec(3);
+                    let user_data = UserData::new(event_idx, None);
+                    let timeout_op = opcode::LinkTimeout::new(&timeout)
+                        .build()
+                        .user_data(user_data.as_u64());
+                    unsafe {
+                        sq.push(&timeout_op).unwrap();
+                    }
+                }
+                Err(TryRecvError::Disconnected) => return Err(Error::PeerProviderDisconnect),
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        Ok(())
+    }
+
     fn event_handler(
         &mut self,
         sq: &mut SubmissionQueue<'_>,
@@ -326,7 +356,6 @@ impl EventLoop {
     ) -> io::Result<()> {
         let ret = cqe.result();
         let user_data = UserData::from_u64(cqe.user_data());
-        let event = &mut self.events[user_data.event_idx as usize];
         if ret < 0 {
             return event_error_handler(
                 sq,
@@ -338,27 +367,23 @@ impl EventLoop {
                 backlog,
             );
         }
-        match event.clone() {
+        let mut event = Event::Dummy;
+        std::mem::swap(&mut event, &mut self.events[user_data.event_idx as usize]);
+        match event {
             Event::Accept => {
-                log::info!("Accepted connection!");
+                // The event is reused and not replaced
+                std::mem::swap(&mut event, &mut self.events[user_data.event_idx as usize]);
                 let fd = ret;
-                // TODO: double check this
-                let ip_addr = unsafe {
-                    let stream = std::net::TcpStream::from_raw_fd(fd);
-                    let tmp = match stream.peer_addr()? {
-                        SocketAddr::V4(ipv4) => *ipv4.ip(),
-                        SocketAddr::V6(ipv6) => {
-                            log::error!("Received connection from non ipv4 addr: {ipv6}");
-                            return Ok(());
-                        }
-                    };
-                    // don't drop
-                    std::mem::forget(stream);
-                    tmp
+                let socket = unsafe { Socket::from_raw_fd(fd) };
+                if socket.peer_addr()?.is_ipv6() {
+                    log::error!("Received connection from non ipv4 addr");
+                    return Ok(());
                 };
+
+                log::info!("Accepted connection: {:?}", socket.peer_addr()?);
                 // Construct new recv token on accept, after that it lives forever and or is reused
                 // since this is a recvmulti operation
-                let read_token = self.events.insert(Event::Recv { fd, ip_addr });
+                let read_token = self.events.insert(Event::Recv { socket });
                 let user_data = UserData::new(read_token, None);
                 let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
                     .build()
@@ -371,19 +396,19 @@ impl EventLoop {
                     }
                 }
             }
-            Event::Connect { addr, fd } => {
-                self.events.remove(user_data.event_idx as _);
-                let ip_addr = match addr {
-                    SocketAddr::V4(ipv4) => *ipv4.ip(),
-                    SocketAddr::V6(_) => {
-                        log::error!("Connected to non ipv4 addr: {addr}");
-                        return Err(io::ErrorKind::Unsupported.into());
-                    }
-                };
-                // TODO: TIMEOUT
+            Event::Connect { socket, addr } => {
+                log::info!("Connected to: {addr}");
+                // TODO: TIMEOUT HANDSHAKE
                 let buffer = self.write_pool.get_buffer();
                 write_handshake(self.our_id, torrent_state.info_hash, buffer.inner);
-                let write_token = self.events.insert(Event::Write { fd });
+                let fd = socket.as_raw_fd();
+                // The event is replaced (this removes the dummy)
+                let old = std::mem::replace(
+                    &mut self.events[user_data.event_idx as usize],
+                    Event::Write { socket },
+                );
+                debug_assert!(matches!(old, Event::Dummy));
+                let write_token = user_data.event_idx as usize;
                 let user_data = UserData::new(write_token, Some(buffer.index));
                 let write_op = opcode::Write::new(
                     types::Fd(fd),
@@ -392,16 +417,24 @@ impl EventLoop {
                     HANDSHAKE_SIZE as u32,
                 )
                 .build()
-                .user_data(user_data.as_u64())
-                // Link with read
-                .flags(io_uring::squeue::Flags::IO_LINK);
+                .user_data(user_data.as_u64());
                 unsafe {
                     if sq.push(&write_op).is_err() {
                         log::warn!("SQ buffer full, pushing to backlog");
                         backlog.push_back(write_op);
                     }
                 }
-                let read_token = self.events.insert(Event::Recv { fd, ip_addr });
+            }
+            Event::Write { socket } => {
+                let fd = socket.as_raw_fd();
+                log::debug!("Wrote to unestablsihed connection");
+                // The event is replaced (this removes the dummy)
+                let old = std::mem::replace(
+                    &mut self.events[user_data.event_idx as usize],
+                    Event::Recv { socket },
+                );
+                debug_assert!(matches!(old, Event::Dummy));
+                let read_token = user_data.event_idx as usize;
                 let user_data = UserData::new(read_token, None);
                 let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
                     .build()
@@ -413,19 +446,14 @@ impl EventLoop {
                         backlog.push_back(read_op);
                     }
                 }
-                // send write + read linked
-                // This only reports connect complete user data is needed to provide more info
-                println!("CONNECT: {addr}");
             }
-            Event::Write { fd } => {
-                log::debug!("Wrote to unestablsihed connection");
+            Event::ConnectedWrite { connection_idx: _ } => {
+                // neither replaced nor modified
+                // TODO: add to metrics
                 self.events.remove(user_data.event_idx as _);
             }
-            Event::ConnectedWrite { connection_idx } => {
-                self.events.remove(user_data.event_idx as _);
-            }
-            Event::Recv { fd, ip_addr } => {
-                log::info!("RECV");
+            Event::Recv { socket } => {
+                let fd = socket.as_raw_fd();
                 let len = ret as usize;
                 // We always have a buffer associated
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
@@ -433,15 +461,19 @@ impl EventLoop {
                 let parsed_handshake =
                     parse_handshake(torrent_state.info_hash, &buffer[..len]).unwrap();
                 let peer_connection = PeerConnection::new(
-                    fd,
+                    socket,
                     parsed_handshake.peer_id,
-                    ip_addr,
                     parsed_handshake.fast_ext,
                 );
                 log::info!("Finished handshake!: {peer_connection:?}");
                 let connection_idx = self.connections.insert(peer_connection);
                 // We are now connected!
-                *event = Event::ConnectedRecv { connection_idx };
+                // The event is replaced (this removes the dummy)
+                let old = std::mem::replace(
+                    &mut self.events[user_data.event_idx as usize],
+                    Event::ConnectedRecv { connection_idx },
+                );
+                debug_assert!(matches!(old, Event::Dummy));
 
                 let completed = torrent_state.piece_selector.completed_clone();
                 let message = if completed.all() {
@@ -471,15 +503,19 @@ impl EventLoop {
                 );
             }
             Event::ConnectedRecv { connection_idx } => {
+                // The event is reused and not replaced
+                std::mem::swap(&mut event, &mut self.events[user_data.event_idx as usize]);
                 let connection = &mut self.connections[connection_idx];
                 let is_more = io_uring::cqueue::more(cqe.flags());
                 if !is_more {
                     log::warn!("No more, starting new recv");
-                    let read_op =
-                        opcode::RecvMulti::new(types::Fd(connection.fd), self.read_ring.bgid())
-                            .build()
-                            .user_data(user_data.as_u64())
-                            .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                    let read_op = opcode::RecvMulti::new(
+                        types::Fd(connection.socket.as_raw_fd()),
+                        self.read_ring.bgid(),
+                    )
+                    .build()
+                    .user_data(user_data.as_u64())
+                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                     unsafe {
                         if sq.push(&read_op).is_err() {
                             log::warn!("SQ buffer full, pushing to backlog");
@@ -496,18 +532,14 @@ impl EventLoop {
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
                 let buffer = &buffer[..len];
                 if buffer.is_empty() {
-                    println!("READ 0");
+                    log::warn!("READ 0");
                     self.events.remove(user_data.event_idx as _);
-                    let fd = connection.fd;
                     self.connections.remove(connection_idx as _);
-                    println!("shutting down connection");
+                    log::warn!("shutting down connection");
                     // TODO graceful shutdown
-                    unsafe {
-                        libc::close(fd);
-                    }
                 } else {
                     connection.stateful_decoder.append_data(buffer);
-                    let conn_fd = connection.fd;
+                    let conn_fd = connection.socket.as_raw_fd();
                     while let Some(parse_result) = connection.stateful_decoder.next() {
                         match parse_result {
                             Ok(peer_message) => {
@@ -550,6 +582,7 @@ impl EventLoop {
                     }
                 }
             }
+            Event::Dummy => unreachable!(),
         }
         Ok(())
     }

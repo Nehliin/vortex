@@ -1,19 +1,17 @@
 use std::{
     collections::VecDeque,
-    io::{self},
     net::Ipv4Addr,
-    os::fd::RawFd,
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
 use sha1::Digest;
-use thiserror::Error;
+use socket2::Socket;
 
 use crate::{
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{Piece, PieceSelector, Subpiece, SUBPIECE_SIZE},
-    TorrentState,
+    Error, TorrentState,
 };
 
 // Taken from
@@ -110,14 +108,6 @@ fn generate_fast_set(
     }
 }
 
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Peer is being disconnected, Reason {0}")]
-    Disconnect(&'static str),
-    #[error("Peer encountered IO issue")]
-    Io(#[source] io::Error),
-}
-
 #[derive(Debug)]
 pub struct OutgoingMsg {
     pub message: PeerMessage,
@@ -126,11 +116,9 @@ pub struct OutgoingMsg {
 
 #[derive(Debug)]
 pub struct PeerConnection {
-    pub fd: RawFd,
+    pub socket: Socket,
     // TODO: Make this a type that impl display
     pub peer_id: PeerId,
-    // Peer Ip
-    pub ip: Ipv4Addr,
     /// This side is choking the peer
     pub is_choking: bool,
     /// This side is interested what the peer has to offer
@@ -165,11 +153,10 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
-    pub fn new(fd: RawFd, peer_id: PeerId, peer_ip: Ipv4Addr, fast_ext: bool) -> Self {
+    pub fn new(socket: Socket, peer_id: PeerId, fast_ext: bool) -> Self {
         PeerConnection {
-            fd,
+            socket,
             peer_id,
-            ip: peer_ip,
             is_choking: true,
             is_interested: false,
             sent_allowed_fast: false,
@@ -521,7 +508,11 @@ impl PeerConnection {
                             ALLOWED_FAST_SET_SIZE as u32,
                             torrent_state.num_pieces() as u32,
                             &torrent_state.info_hash,
-                            self.ip,
+                            *self.socket
+                                .peer_addr()?
+                                .as_socket_ipv4()
+                                .expect("Only ipv4 addresses are supported")
+                                .ip(),
                             &mut self.accept_fast_pieces,
                         );
                         for index in self.accept_fast_pieces.iter().copied() {
