@@ -1,6 +1,8 @@
 use std::{
-    net::{SocketAddr, TcpListener},
+    io,
+    net::{SocketAddrV4, TcpListener},
     os::fd::AsRawFd,
+    sync::mpsc::Receiver,
     time::{Duration, Instant},
 };
 
@@ -8,16 +10,14 @@ use event_loop::{Event, EventLoop, UserData};
 use file_store::FileStore;
 use io_uring::{
     opcode,
-    types::{self, Timespec},
+    types::{self},
     IoUring,
 };
-use lava_torrent::torrent::v1::Torrent;
 use peer_connection::PeerConnection;
-use peer_protocol::generate_peer_id;
 use piece_selector::{Piece, PieceSelector};
 use sha1::Digest;
 use slab::Slab;
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use thiserror::Error;
 
 mod buf_pool;
 mod buf_ring;
@@ -27,91 +27,69 @@ mod peer_connection;
 mod peer_protocol;
 mod piece_selector;
 
-pub fn connect_to(addr: SocketAddr, torrent_state: TorrentState) {
-    // check ulimit
-    let mut ring: IoUring = IoUring::builder()
-        .setup_single_issuer()
-        .setup_clamp()
-        .setup_cqsize(1024)
-        .setup_defer_taskrun()
-        .setup_coop_taskrun()
-        .build(1024)
-        .unwrap();
+pub use peer_protocol::PeerId;
+pub use peer_protocol::generate_peer_id;
 
-    let mut events = Slab::with_capacity(1024);
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-    socket.set_recv_buffer_size(1 << 19).unwrap();
-    //dbg!(socket.recv_buffer_size());
-
-    let event_idx = events.insert(Event::Connect {
-        addr,
-        fd: socket.as_raw_fd(),
-    });
-    let user_data = UserData::new(event_idx, None);
-    let addr = SockAddr::from(addr);
-    let connect_op = opcode::Connect::new(
-        types::Fd(socket.as_raw_fd()),
-        addr.as_ptr() as *const _,
-        addr.len(),
-    )
-    .build()
-    .flags(io_uring::squeue::Flags::IO_LINK)
-    .user_data(user_data.as_u64());
-    unsafe {
-        ring.submission().push(&connect_op).unwrap();
-    }
-    let timeout = Timespec::new().sec(3);
-    let user_data = UserData::new(event_idx, None);
-    let timeout_op = opcode::LinkTimeout::new(&timeout)
-        .build()
-        .user_data(user_data.as_u64());
-    unsafe {
-        ring.submission().push(&timeout_op).unwrap();
-    }
-
-    ring.submission().sync();
-
-    // event loop
-    let our_id = generate_peer_id();
-    let mut event_loop = EventLoop::new(our_id, events);
-    event_loop.run(ring, torrent_state, tick).unwrap()
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Peer is being disconnected, Reason {0}")]
+    Disconnect(&'static str),
+    #[error("Encountered IO issue: {0}")]
+    Io(#[from] io::Error),
+    #[error("Peer provider disconnected")]
+    PeerProviderDisconnect,
 }
 
-pub fn setup_listener(torrent_state: TorrentState) {
-    // check ulimit
-    let mut ring: IoUring = IoUring::builder()
-        .setup_single_issuer()
-        .setup_clamp()
-        .setup_cqsize(4096)
-        .setup_defer_taskrun()
-        .setup_coop_taskrun()
-        .build(4096)
-        .unwrap();
-
-    let mut events = Slab::with_capacity(4096);
-    let event_idx = events.insert(Event::Accept);
-    let user_data = UserData::new(event_idx, None);
-
-    let listener = TcpListener::bind(("127.0.0.1", 3456)).unwrap();
-    let accept_op = opcode::AcceptMulti::new(types::Fd(listener.as_raw_fd()))
-        .build()
-        .user_data(user_data.as_u64());
-
-    unsafe {
-        ring.submission().push(&accept_op).unwrap();
-    }
-    ring.submission().sync();
-
-    let our_id = generate_peer_id();
-    let mut event_loop = EventLoop::new(our_id, events);
-
-    event_loop.run(ring, torrent_state, tick).unwrap()
+pub struct Torrent {
+    our_id: PeerId,
+    torrent_info: lava_torrent::torrent::v1::Torrent,
 }
 
-pub struct TorrentState {
+impl Torrent {
+    pub fn new(torrent_info: lava_torrent::torrent::v1::Torrent, our_id: PeerId) -> Self {
+        Self {
+            our_id,
+            torrent_info,
+        }
+    }
+
+    pub fn start(&self, peer_provider: Receiver<SocketAddrV4>) -> Result<(), Error> {
+        // check ulimit
+        let mut ring: IoUring = IoUring::builder()
+            .setup_single_issuer()
+            .setup_clamp()
+            .setup_cqsize(4096)
+            .setup_defer_taskrun()
+            .setup_coop_taskrun()
+            .build(4096)
+            .unwrap();
+
+        let mut events = Slab::with_capacity(4096);
+        let event_idx = events.insert(Event::Accept);
+        let user_data = UserData::new(event_idx, None);
+
+        let listener = TcpListener::bind(("0.0.0.0", 3456)).unwrap();
+        let accept_op = opcode::AcceptMulti::new(types::Fd(listener.as_raw_fd()))
+            .build()
+            .user_data(user_data.as_u64());
+
+        unsafe {
+            ring.submission().push(&accept_op).unwrap();
+        }
+        ring.submission().sync();
+
+        let mut event_loop = EventLoop::new(self.our_id, events, peer_provider);
+
+        let torrent_state = TorrentState::new(self.torrent_info.clone());
+
+        event_loop.run(ring, torrent_state, tick)
+    }
+}
+
+struct TorrentState {
     info_hash: [u8; 20],
     piece_selector: PieceSelector,
-    torrent_info: Torrent,
+    torrent_info: lava_torrent::torrent::v1::Torrent,
     num_unchoked: u32,
     max_unchoked: u32,
     file_store: FileStore,
@@ -119,7 +97,7 @@ pub struct TorrentState {
 }
 
 impl TorrentState {
-    pub fn new(torrent: Torrent) -> Self {
+    pub fn new(torrent: lava_torrent::torrent::v1::Torrent) -> Self {
         let info_hash = torrent.info_hash_bytes().try_into().unwrap();
         let file_store =
             FileStore::new("/home/popuser/vortex/bittorrent/downloaded/", &torrent).unwrap();

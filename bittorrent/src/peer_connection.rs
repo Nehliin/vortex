@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    io::{self},
     net::Ipv4Addr,
     os::fd::RawFd,
     time::{Duration, Instant},
@@ -8,12 +7,9 @@ use std::{
 
 use bytes::Bytes;
 use sha1::Digest;
-use thiserror::Error;
 
 use crate::{
-    peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
-    piece_selector::{Piece, PieceSelector, Subpiece, SUBPIECE_SIZE},
-    TorrentState,
+    peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder}, piece_selector::{Piece, PieceSelector, Subpiece, SUBPIECE_SIZE}, Error, TorrentState
 };
 
 // Taken from
@@ -108,14 +104,6 @@ fn generate_fast_set(
             }
         }
     }
-}
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Peer is being disconnected, Reason {0}")]
-    Disconnect(&'static str),
-    #[error("Peer encountered IO issue")]
-    Io(#[source] io::Error),
 }
 
 #[derive(Debug)]

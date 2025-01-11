@@ -1,8 +1,9 @@
 use std::{
     collections::VecDeque,
     io,
-    net::{Ipv4Addr, SocketAddr},
-    os::fd::{FromRawFd, RawFd},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    os::fd::{AsRawFd, FromRawFd, RawFd},
+    sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
     u32,
 };
@@ -14,15 +15,15 @@ use io_uring::{
     IoUring, SubmissionQueue,
 };
 use slab::Slab;
-use socket2::Socket;
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
     buf_pool::BufferPool,
     buf_ring::{Bgid, Bid, BufferRing},
-    peer_connection::{Error, OutgoingMsg, PeerConnection},
-    peer_protocol::{self, parse_handshake, write_handshake, HANDSHAKE_SIZE},
+    peer_connection::{OutgoingMsg, PeerConnection},
+    peer_protocol::{self, parse_handshake, write_handshake, PeerId, HANDSHAKE_SIZE},
     piece_selector::SUBPIECE_SIZE,
-    TorrentState,
+    Error, TorrentState,
 };
 
 // Write fd Read fd
@@ -207,16 +208,22 @@ pub struct EventLoop {
     write_pool: BufferPool,
     read_ring: BufferRing,
     connections: Slab<PeerConnection>,
-    our_id: [u8; 20],
+    peer_provider: Receiver<SocketAddrV4>,
+    our_id: PeerId,
 }
 
 impl EventLoop {
-    pub fn new(our_id: [u8; 20], events: Slab<Event>) -> Self {
+    pub fn new(
+        our_id: PeerId,
+        events: Slab<Event>,
+        peer_provider: Receiver<SocketAddrV4>,
+    ) -> Self {
         Self {
             events,
             write_pool: BufferPool::new(128, 4096),
             read_ring: BufferRing::new(1, 128, (SUBPIECE_SIZE * 2) as _).unwrap(),
             connections: Slab::with_capacity(64),
+            peer_provider,
             our_id,
         }
     }
@@ -226,7 +233,7 @@ impl EventLoop {
         mut ring: IoUring,
         mut torrent_state: TorrentState,
         mut tick: impl FnMut(&Duration, &mut Slab<PeerConnection>, &mut TorrentState),
-    ) -> io::Result<()> {
+    ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
         // lambda to be able to catch errors an always unregistering the read ring
         let mut actual_loop = || {
@@ -245,7 +252,7 @@ impl EventLoop {
                     }
                     Err(err) => {
                         log::error!("Failed ring submission, aborting: {err}");
-                        return Err(err);
+                        return Err(Error::Io(err));
                     }
                 }
                 cq.sync();
@@ -262,7 +269,7 @@ impl EventLoop {
                             }
                             Err(err) => {
                                 log::error!("Failed ring submission, aborting: {err}");
-                                return Err(err);
+                                return Err(Error::Io(err));
                             }
                         }
                     }
@@ -326,6 +333,7 @@ impl EventLoop {
                         self.read_ring.return_bid(bid);
                     }
                 }
+                self.connect_to_new_peers(&mut sq)?;
                 sq.sync();
                 if torrent_state.is_complete {
                     log::info!("Torrent complete!");
@@ -336,6 +344,47 @@ impl EventLoop {
         let result = actual_loop();
         self.read_ring.unregister(&ring.submitter())?;
         result
+    }
+
+    fn connect_to_new_peers(&mut self, sq: &mut SubmissionQueue<'_>) -> Result<(), Error> {
+        loop {
+            match self.peer_provider.try_recv() {
+                Ok(addr) => {
+                    let socket =
+                        Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+                    //socket.set_recv_buffer_size(1 << 19).unwrap();
+                    let event_idx = self.events.insert(Event::Connect {
+                        addr: std::net::SocketAddr::V4(addr),
+                        fd: socket.as_raw_fd(),
+                    });
+                    let user_data = UserData::new(event_idx, None);
+                    let addr = SockAddr::from(addr);
+                    let connect_op = opcode::Connect::new(
+                        types::Fd(socket.as_raw_fd()),
+                        addr.as_ptr() as *const _,
+                        addr.len(),
+                    )
+                    .build()
+                    .flags(io_uring::squeue::Flags::IO_LINK)
+                    .user_data(user_data.as_u64());
+                    std::mem::forget(socket);
+                    unsafe {
+                        sq.push(&connect_op).unwrap();
+                    }
+                    let timeout = Timespec::new().sec(3);
+                    let user_data = UserData::new(event_idx, None);
+                    let timeout_op = opcode::LinkTimeout::new(&timeout)
+                        .build()
+                        .user_data(user_data.as_u64());
+                    unsafe {
+                        sq.push(&timeout_op).unwrap();
+                    }
+                }
+                Err(TryRecvError::Disconnected) => return Err(Error::PeerProviderDisconnect),
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        Ok(())
     }
 
     fn event_handler(
@@ -362,7 +411,6 @@ impl EventLoop {
         let event = &mut self.events[user_data.event_idx as usize];
         match event.clone() {
             Event::Accept => {
-                log::info!("Accepted connection!");
                 let fd = ret;
                 // TODO: double check this
                 let ip_addr = unsafe {
@@ -378,6 +426,7 @@ impl EventLoop {
                     std::mem::forget(stream);
                     tmp
                 };
+                log::info!("Accepted connection: {ip_addr}");
                 // Construct new recv token on accept, after that it lives forever and or is reused
                 // since this is a recvmulti operation
                 let read_token = self.events.insert(Event::Recv { fd, ip_addr });
