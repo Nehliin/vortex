@@ -27,8 +27,8 @@ mod peer_connection;
 mod peer_protocol;
 mod piece_selector;
 
-pub use peer_protocol::PeerId;
 pub use peer_protocol::generate_peer_id;
+pub use peer_protocol::PeerId;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -126,34 +126,24 @@ impl TorrentState {
         log::info!("Piece hashed in: {} microsec", hash_time.as_micros());
         // The hash can be provided to the data storage or the peer connection
         // when the piece is requested so it can be used for validation later on
-        let position = self
-            .torrent_info
-            .pieces
-            .iter()
-            .position(|piece_hash| data_hash.as_slice() == piece_hash);
-        match position {
-            Some(piece_index) if piece_index == index as usize => {
-                log::info!("Piece hash matched downloaded data");
-                self.piece_selector.mark_complete(piece_index);
-                self.file_store.write_piece(index, &data).unwrap();
+        let expected_hash = &self.torrent_info.pieces[index as usize];
+        if expected_hash == data_hash.as_slice() {
+            log::info!("Piece hash matched downloaded data");
+            self.piece_selector.mark_complete(index as usize);
+            self.file_store.write_piece(index, &data).unwrap();
 
-                // Purge disconnected peers TODO move to tick instead
-                //self.peer_list.connections.retain(|_, peer| {
-                 //   peer.have(index).is_ok()
-                //});
-
-                if self.piece_selector.completed_all() {
-                    let file_store = std::mem::replace(&mut self.file_store, FileStore::dummy());
-                    file_store.close().unwrap();
-                    self.is_complete = true;
-                }
+            // Purge disconnected peers TODO move to tick instead
+            //self.peer_list.connections.retain(|_, peer| {
+            //   peer.have(index).is_ok()
+            //});
+            if self.piece_selector.completed_all() {
+                let file_store = std::mem::replace(&mut self.file_store, FileStore::dummy());
+                file_store.close().unwrap();
+                self.is_complete = true;
             }
-            Some(piece_index) => log::error!(
-                    "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
-            ),
-            None => {
-                log::error!("Piece sha1 hash not found!");
-            }
+        } else {
+            log::error!("Piece hash didn't match expected hash!");
+            self.piece_selector.mark_not_inflight(index as usize);
         }
     }
 
