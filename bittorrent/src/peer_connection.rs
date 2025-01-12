@@ -179,6 +179,14 @@ impl PeerConnection {
         }
     }
 
+    pub fn release_pieces(&mut self, torrent_state: &mut TorrentState) {
+        for piece in self.currently_downloading.iter() {
+            torrent_state
+                .piece_selector
+                .mark_not_inflight(piece.index as usize)
+        }
+    }
+
     fn unchoke(&mut self, torrent_state: &mut TorrentState, ordered: bool) {
         if self.is_choking {
             torrent_state.num_unchoked += 1;
@@ -327,7 +335,6 @@ impl PeerConnection {
         if let Some(position) = position {
             let mut piece = self.currently_downloading.swap_remove(position);
             piece.on_subpiece(m_index, m_begin, &data[..], self.peer_id);
-            self.timeout_point = Some(Instant::now());
             if !piece.is_complete() {
                 // Next subpice to download (that isn't already inflight)
                 while let Some(next_subpiece) = piece.next_unstarted_subpice() {
@@ -373,17 +380,11 @@ impl PeerConnection {
                 m_index,
                 m_begin
             );
-            // TODO: This not how to do this
-            //  self.moving_rtt.add_sample(&Duration::from_secs(3));
             return;
         };
         if self.slow_start {
             self.desired_queue_size += 1;
             self.desired_queue_size = self.desired_queue_size.clamp(0, 500);
-        }
-        if self.pending_disconnect {
-            // Restart slow_start here? Or clear rrt?
-            self.pending_disconnect = false;
         }
         self.throughput += length as u64;
         let request = self.queued.remove(pos).unwrap();
@@ -421,10 +422,11 @@ impl PeerConnection {
         }
     }
 
-    pub fn on_request_timeout(&mut self) {
+    pub fn on_request_timeout(&mut self, torrent_state: &mut TorrentState) {
         let Some(subpiece) = self.queued.pop_back() else {
-            // might have been received later?
-            log::warn!("Piece timed out but not found in queue");
+            // Probably caused by the request being rejected or the timeout happen because
+            // we had not requested anything more
+            log::warn!("[PeerId: {}] Piece timed out but not found in queue", self.peer_id);
             return;
         };
         if self.try_mark_subpiece_failed(subpiece) {
@@ -435,6 +437,8 @@ impl PeerConnection {
                 subpiece.offset
             );
             self.slow_start = false;
+            self.release_pieces(torrent_state);
+            self.currently_downloading.clear(); 
             // TODO: time out recovery
             self.desired_queue_size = 1;
         }
@@ -508,7 +512,8 @@ impl PeerConnection {
                             ALLOWED_FAST_SET_SIZE as u32,
                             torrent_state.num_pieces() as u32,
                             &torrent_state.info_hash,
-                            *self.socket
+                            *self
+                                .socket
                                 .peer_addr()?
                                 .as_socket_ipv4()
                                 .expect("Only ipv4 addresses are supported")
@@ -815,13 +820,15 @@ impl PeerConnection {
                 );
                 self.update_stats(index, begin, data.len() as u32);
                 if let Some(piece) = self.on_subpiece(index, begin, data) {
-                    torrent_state.on_piece_completed(piece.index, piece.memory);
-                    log::info!(
+                    if torrent_state.on_piece_completed(piece.index, piece.memory) {
+log::info!(
                         "[Peer: {}] Piece {}/{} completed!",
                         self.peer_id,
                         torrent_state.piece_selector.total_completed(),
                         torrent_state.piece_selector.pieces()
                     );
+                    }
+                    
                 }
             }
         }

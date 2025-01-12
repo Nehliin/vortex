@@ -452,19 +452,6 @@ checksum = "453ad9f582a441959e5f0d088b02ce04cfe8d51a8eaf077f12ac6d3e94164ca6"
 
 [[package]]
 name = "lava_torrent"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6371ac668775cf28fcf777c5819103ff396bc96d971b4328e9cadd011b21fe87"
-dependencies = [
- "conv",
- "itertools",
- "percent-encoding",
- "sha1",
- "thiserror 1.0.38",
-]
-
-[[package]]
-name = "lava_torrent"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81730ad85660dd85c8196a684cb51cee60c69c8f99c82d6ecb6df5bc79c4859d"
@@ -1084,7 +1071,7 @@ dependencies = [
  "bytes",
  "env_logger",
  "io-uring 0.7.1",
- "lava_torrent 0.11.1",
+ "lava_torrent",
  "libc",
  "log",
  "rand",
@@ -1103,7 +1090,7 @@ dependencies = [
  "env_logger",
  "futures",
  "indicatif",
- "lava_torrent 0.10.0",
+ "lava_torrent",
  "log",
  "num-bigint",
  "parking_lot",

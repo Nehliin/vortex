@@ -27,8 +27,8 @@ mod peer_connection;
 mod peer_protocol;
 mod piece_selector;
 
-pub use peer_protocol::PeerId;
 pub use peer_protocol::generate_peer_id;
+pub use peer_protocol::PeerId;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -117,7 +117,8 @@ impl TorrentState {
         self.torrent_info.pieces.len()
     }
 
-    pub(crate) fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) {
+    // Returns if the piece is valid
+    pub(crate) fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) -> bool {
         let hash_time = Instant::now();
         let mut hasher = sha1::Sha1::new();
         hasher.update(&data);
@@ -126,34 +127,26 @@ impl TorrentState {
         log::info!("Piece hashed in: {} microsec", hash_time.as_micros());
         // The hash can be provided to the data storage or the peer connection
         // when the piece is requested so it can be used for validation later on
-        let position = self
-            .torrent_info
-            .pieces
-            .iter()
-            .position(|piece_hash| data_hash.as_slice() == piece_hash);
-        match position {
-            Some(piece_index) if piece_index == index as usize => {
-                log::info!("Piece hash matched downloaded data");
-                self.piece_selector.mark_complete(piece_index);
-                self.file_store.write_piece(index, &data).unwrap();
+        let expected_hash = &self.torrent_info.pieces[index as usize];
+        if expected_hash == data_hash.as_slice() {
+            log::info!("Piece hash matched downloaded data");
+            self.piece_selector.mark_complete(index as usize);
+            self.file_store.write_piece(index, &data).unwrap();
 
-                // Purge disconnected peers TODO move to tick instead
-                //self.peer_list.connections.retain(|_, peer| {
-                 //   peer.have(index).is_ok()
-                //});
-
-                if self.piece_selector.completed_all() {
-                    let file_store = std::mem::replace(&mut self.file_store, FileStore::dummy());
-                    file_store.close().unwrap();
-                    self.is_complete = true;
-                }
+            // Purge disconnected peers TODO move to tick instead
+            //self.peer_list.connections.retain(|_, peer| {
+            //   peer.have(index).is_ok()
+            //});
+            if self.piece_selector.completed_all() {
+                let file_store = std::mem::replace(&mut self.file_store, FileStore::dummy());
+                file_store.close().unwrap();
+                self.is_complete = true;
             }
-            Some(piece_index) => log::error!(
-                    "Piece hash didn't match expected index! expected index: {index}, piece_index: {piece_index}"
-            ),
-            None => {
-                log::error!("Piece sha1 hash not found!");
-            }
+            true
+        } else {
+            log::error!("Piece hash didn't match expected hash!");
+            self.piece_selector.mark_not_inflight(index as usize);
+            false
         }
     }
 
@@ -172,7 +165,7 @@ fn tick(
     // 2. Go through them in order
     // 3. select pieces
     // TODO use retain instead of iter mut in the loop below and get rid of this
-    //let mut disconnects = Vec::new();
+    let mut disconnects = Vec::new();
     for (id, connection) in connections.iter_mut() {
         // If this connection have no inflight 2 iterations in a row
         // disconnect it and clear all pieces it was currently downloading
@@ -180,20 +173,20 @@ fn tick(
 
         if let Some(time) = connection.timeout_point {
             if time.elapsed() > connection.request_timeout() {
-                connection.on_request_timeout();
+                log::warn!("TIMEOUT: {id}");
+                connection.on_request_timeout(torrent_state);
             }
         }
 
-        if connection.pending_disconnect && !connection.peer_choking && connection.queued.is_empty()
-        {
-            log::error!("Disconnect");
-            //disconnects.push(peer_key);
+        if connection.pending_disconnect {
+            log::debug!("Disconnect: {id}");
+            disconnects.push(id);
             continue;
         }
 
         if !connection.peer_choking {
             // slow start win size increase is handled in update_stats
-            if !connection.slow_start && !connection.pending_disconnect {
+            if !connection.slow_start {
                 // From the libtorrent impl, request queue time = 3
                 let new_queue_capacity =
                     3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
@@ -217,7 +210,7 @@ fn tick(
             && connection.throughput > 0
             && connection.throughput < connection.prev_throughput + 5000
         {
-            log::error!("Exiting slow start");
+            log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
             connection.slow_start = false;
         }
         connection.prev_throughput = connection.throughput;
@@ -268,5 +261,10 @@ fn tick(
             }
         }
         peer.fill_request_queue();
+    }
+
+    for id in disconnects {
+        let mut conn = connections.remove(id);
+        conn.release_pieces(torrent_state);
     }
 }
