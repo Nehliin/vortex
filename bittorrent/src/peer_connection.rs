@@ -179,6 +179,14 @@ impl PeerConnection {
         }
     }
 
+    pub fn release_pieces(&mut self, torrent_state: &mut TorrentState) {
+        for piece in self.currently_downloading.iter() {
+            torrent_state
+                .piece_selector
+                .mark_not_inflight(piece.index as usize)
+        }
+    }
+
     fn unchoke(&mut self, torrent_state: &mut TorrentState, ordered: bool) {
         if self.is_choking {
             torrent_state.num_unchoked += 1;

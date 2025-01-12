@@ -183,8 +183,7 @@ fn event_error_handler(
             Ok(())
         }
         _ => {
-            let event = events.remove(user_data.event_idx as _);
-            log::error!("Unhandled error event: {event:?}");
+            events.remove(user_data.event_idx as _);
             let err = std::io::Error::from_raw_os_error(error_code as i32);
             Err(err)
         }
@@ -579,10 +578,17 @@ impl EventLoop {
                                         )
                                     }
                                 }
+                                Err(err @ Error::Disconnect(_)) => {
+                                    log::warn!("[Peer {}] {err}", connection.peer_id);
+                                    connection.pending_disconnect = true;
+                                }
+                                Err(err) => {
+                                    log::error!("Failed handling message: {err}");
+                                }
                             }
-                            Err(err) => {
-                                log::error!("Failed decoding message: {err}");
-                            }
+                        }
+                        Err(err) => {
+                            log::error!("Failed decoding message: {err}");
                         }
                     }
                 }

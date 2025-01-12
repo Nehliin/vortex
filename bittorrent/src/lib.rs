@@ -172,7 +172,7 @@ fn tick(
     // 2. Go through them in order
     // 3. select pieces
     // TODO use retain instead of iter mut in the loop below and get rid of this
-    //let mut disconnects = Vec::new();
+    let mut disconnects = Vec::new();
     for (id, connection) in connections.iter_mut() {
         // If this connection have no inflight 2 iterations in a row
         // disconnect it and clear all pieces it was currently downloading
@@ -184,10 +184,9 @@ fn tick(
             }
         }
 
-        if connection.pending_disconnect && !connection.peer_choking && connection.queued.is_empty()
-        {
-            log::error!("Disconnect");
-            //disconnects.push(peer_key);
+        if connection.pending_disconnect {
+            log::debug!("Disconnect: {id}");
+            disconnects.push(id);
             continue;
         }
 
@@ -268,5 +267,10 @@ fn tick(
             }
         }
         peer.fill_request_queue();
+    }
+
+    for id in disconnects {
+        let mut conn = connections.remove(id);
+        conn.release_pieces(torrent_state);
     }
 }
