@@ -13,7 +13,7 @@ tokio-uring = { workspace = true }
 anyhow = { workspace = true }
 ahash = "0.8"
 parking_lot = { workspace = true }
-lava_torrent = "0.10"
+lava_torrent = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "macros"] }
 log = { workspace = true }
 env_logger = { workspace = true }

@@ -16,6 +16,7 @@ log = "0.4"
 parking_lot = "0.12"
 rand = "0.8.5"
 env_logger = "0.10"
+lava_torrent = "0.11"
 
 [profile.release]
 overflow-checks = true
