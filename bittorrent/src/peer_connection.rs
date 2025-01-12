@@ -185,6 +185,7 @@ impl PeerConnection {
                 .piece_selector
                 .mark_not_inflight(piece.index as usize)
         }
+        self.currently_downloading.clear();
     }
 
     fn unchoke(&mut self, torrent_state: &mut TorrentState, ordered: bool) {
@@ -438,7 +439,6 @@ impl PeerConnection {
             );
             self.slow_start = false;
             self.release_pieces(torrent_state);
-            self.currently_downloading.clear(); 
             // TODO: time out recovery
             self.desired_queue_size = 1;
         }
