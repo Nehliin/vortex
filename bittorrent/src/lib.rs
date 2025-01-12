@@ -180,7 +180,8 @@ fn tick(
 
         if let Some(time) = connection.timeout_point {
             if time.elapsed() > connection.request_timeout() {
-                connection.on_request_timeout();
+                log::warn!("TIMEOUT: {id}");
+                connection.on_request_timeout(torrent_state);
             }
         }
 

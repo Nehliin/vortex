@@ -429,7 +429,7 @@ impl PeerConnection {
         }
     }
 
-    pub fn on_request_timeout(&mut self) {
+    pub fn on_request_timeout(&mut self, torrent_state: &mut TorrentState) {
         let Some(subpiece) = self.queued.pop_back() else {
             // might have been received later?
             log::warn!("Piece timed out but not found in queue");
@@ -443,6 +443,8 @@ impl PeerConnection {
                 subpiece.offset
             );
             self.slow_start = false;
+            self.release_pieces(torrent_state);
+            self.currently_downloading.clear(); 
             // TODO: time out recovery
             self.desired_queue_size = 1;
         }
@@ -516,7 +518,8 @@ impl PeerConnection {
                             ALLOWED_FAST_SET_SIZE as u32,
                             torrent_state.num_pieces() as u32,
                             &torrent_state.info_hash,
-                            *self.socket
+                            *self
+                                .socket
                                 .peer_addr()?
                                 .as_socket_ipv4()
                                 .expect("Only ipv4 addresses are supported")
