@@ -183,7 +183,7 @@ fn tick(
 
         if !connection.peer_choking {
             // slow start win size increase is handled in update_stats
-            if !connection.slow_start && !connection.pending_disconnect {
+            if !connection.slow_start {
                 // From the libtorrent impl, request queue time = 3
                 let new_queue_capacity =
                     3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
@@ -207,7 +207,7 @@ fn tick(
             && connection.throughput > 0
             && connection.throughput < connection.prev_throughput + 5000
         {
-            log::error!("Exiting slow start");
+            log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
             connection.slow_start = false;
         }
         connection.prev_throughput = connection.throughput;

@@ -475,7 +475,7 @@ impl EventLoop {
                 let fd = socket.as_raw_fd();
                 let len = ret as usize;
                 if len == 0 {
-                    log::warn!("READ 0");
+                    log::debug!("No more data when expecting handshake");
                     self.events.remove(user_data.event_idx as _);
                     return Ok(());
                 }
@@ -536,7 +536,7 @@ impl EventLoop {
                 let connection = &mut self.connections[connection_idx];
                 let len = ret as usize;
                 if len == 0 {
-                    log::warn!("READ 0");
+                    log::debug!("[PeerId: {}] No more data, mark as pending disconnect", connection.peer_id);
                     self.events.remove(user_data.event_idx as _);
                     connection.pending_disconnect = true;
                     return Ok(());

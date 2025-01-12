@@ -335,7 +335,6 @@ impl PeerConnection {
         if let Some(position) = position {
             let mut piece = self.currently_downloading.swap_remove(position);
             piece.on_subpiece(m_index, m_begin, &data[..], self.peer_id);
-            self.timeout_point = Some(Instant::now());
             if !piece.is_complete() {
                 // Next subpice to download (that isn't already inflight)
                 while let Some(next_subpiece) = piece.next_unstarted_subpice() {
@@ -381,17 +380,11 @@ impl PeerConnection {
                 m_index,
                 m_begin
             );
-            // TODO: This not how to do this
-            //  self.moving_rtt.add_sample(&Duration::from_secs(3));
             return;
         };
         if self.slow_start {
             self.desired_queue_size += 1;
             self.desired_queue_size = self.desired_queue_size.clamp(0, 500);
-        }
-        if self.pending_disconnect {
-            // Restart slow_start here? Or clear rrt?
-            self.pending_disconnect = false;
         }
         self.throughput += length as u64;
         let request = self.queued.remove(pos).unwrap();
@@ -431,8 +424,9 @@ impl PeerConnection {
 
     pub fn on_request_timeout(&mut self, torrent_state: &mut TorrentState) {
         let Some(subpiece) = self.queued.pop_back() else {
-            // might have been received later?
-            log::warn!("Piece timed out but not found in queue");
+            // Probably caused by the request being rejected or the timeout happen because
+            // we had not requested anything more
+            log::warn!("[PeerId: {}] Piece timed out but not found in queue", self.peer_id);
             return;
         };
         if self.try_mark_subpiece_failed(subpiece) {
