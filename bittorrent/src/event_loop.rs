@@ -68,6 +68,26 @@ pub fn push_connected_write(
     }
 }
 
+fn restart_multishot_recv(
+    sq: &mut SubmissionQueue<'_>,
+    user_data: UserData,
+    fd: RawFd,
+    backlog: &mut VecDeque<io_uring::squeue::Entry>,
+    bgid: Bgid,
+) {
+    log::warn!("Starting new recv multishot");
+    let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
+        .build()
+        .user_data(user_data.as_u64())
+        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+    unsafe {
+        if sq.push(&read_op).is_err() {
+            log::warn!("SQ buffer full, pushing to backlog");
+            backlog.push_back(read_op);
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct UserData {
     buffer_idx: Option<u32>,
@@ -455,6 +475,15 @@ impl EventLoop {
             Event::Recv { socket } => {
                 let fd = socket.as_raw_fd();
                 let len = ret as usize;
+                if len == 0 {
+                    log::warn!("READ 0");
+                    self.events.remove(user_data.event_idx as _);
+                    return Ok(());
+                }
+                let is_more = io_uring::cqueue::more(cqe.flags());
+                if !is_more {
+                    restart_multishot_recv(sq, user_data, fd, backlog, self.read_ring.bgid());
+                }
                 // We always have a buffer associated
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
                 // Expect this to be the handshake response
@@ -506,72 +535,48 @@ impl EventLoop {
                 // The event is reused and not replaced
                 std::mem::swap(&mut event, &mut self.events[user_data.event_idx as usize]);
                 let connection = &mut self.connections[connection_idx];
-                let is_more = io_uring::cqueue::more(cqe.flags());
-                if !is_more {
-                    log::warn!("No more, starting new recv");
-                    let read_op = opcode::RecvMulti::new(
-                        types::Fd(connection.socket.as_raw_fd()),
-                        self.read_ring.bgid(),
-                    )
-                    .build()
-                    .user_data(user_data.as_u64())
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                    unsafe {
-                        if sq.push(&read_op).is_err() {
-                            log::warn!("SQ buffer full, pushing to backlog");
-                            backlog.push_back(read_op);
-                        }
-                    }
-                    // This event doesn't contain any data
+                let len = ret as usize;
+                if len == 0 {
+                    log::warn!("READ 0");
+                    self.events.remove(user_data.event_idx as _);
+                    connection.pending_disconnect = true;
                     return Ok(());
                 }
-
-                let len = ret as usize;
+                let is_more = io_uring::cqueue::more(cqe.flags());
+                if !is_more {
+                    let fd = connection.socket.as_raw_fd();
+                    restart_multishot_recv(sq, user_data, fd, backlog, self.read_ring.bgid());
+                }
 
                 // We always have a buffer associated
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
                 let buffer = &buffer[..len];
-                if buffer.is_empty() {
-                    log::warn!("READ 0");
-                    self.events.remove(user_data.event_idx as _);
-                    self.connections.remove(connection_idx as _);
-                    log::warn!("shutting down connection");
-                    // TODO graceful shutdown
-                } else {
-                    connection.stateful_decoder.append_data(buffer);
-                    let conn_fd = connection.socket.as_raw_fd();
-                    while let Some(parse_result) = connection.stateful_decoder.next() {
-                        match parse_result {
-                            Ok(peer_message) => {
-                                match connection.handle_message(
-                                    connection_idx,
-                                    peer_message,
-                                    torrent_state,
-                                ) {
-                                    Ok(outgoing_messages) => {
-                                        for outgoing in outgoing_messages {
-                                            // Buffers are returned in the event loop
-                                            let buffer = self.write_pool.get_buffer();
-                                            outgoing.message.encode(buffer.inner);
-                                            let size = outgoing.message.encoded_size();
-                                            push_connected_write(
-                                                connection_idx,
-                                                conn_fd,
-                                                &mut self.events,
-                                                sq,
-                                                buffer.index,
-                                                &buffer.inner[..size],
-                                                outgoing.ordered,
-                                                backlog,
-                                            )
-                                        }
-                                    }
-                                    Err(err @ Error::Disconnect(_)) => {
-                                        log::warn!("[Peer {}] {err}", connection.peer_id);
-                                        // TODO proper shutdown
-                                    }
-                                    Err(err) => {
-                                        log::error!("Failed handling message: {err}");
+                connection.stateful_decoder.append_data(buffer);
+                let conn_fd = connection.socket.as_raw_fd();
+                while let Some(parse_result) = connection.stateful_decoder.next() {
+                    match parse_result {
+                        Ok(peer_message) => {
+                            match connection.handle_message(
+                                connection_idx,
+                                peer_message,
+                                torrent_state,
+                            ) {
+                                Ok(outgoing_messages) => {
+                                    for outgoing in outgoing_messages {
+                                        // Buffers are returned in the event loop
+                                        let buffer = self.write_pool.get_buffer();
+                                        outgoing.message.encode(buffer.inner);
+                                        let size = outgoing.message.encoded_size();
+                                        push_connected_write(
+                                            connection_idx,
+                                            conn_fd,
+                                            &mut self.events,
+                                            sq,
+                                            buffer.index,
+                                            &buffer.inner[..size],
+                                            outgoing.ordered,
+                                            backlog,
+                                        )
                                     }
                                 }
                             }
