@@ -248,7 +248,7 @@ impl Piece {
 
     pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], peer_id: PeerId) {
         // This subpice is part of the currently downloading piece
-        assert_eq!(self.index, index);
+        debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
         log::trace!(
             "[Peer: {}] Subpiece index received: {subpiece_index}",
@@ -256,9 +256,9 @@ impl Piece {
         );
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {
-            assert_eq!(data.len() as i32, self.last_subpiece_length);
+            debug_assert_eq!(data.len() as i32, self.last_subpiece_length);
         } else {
-            assert_eq!(data.len() as i32, SUBPIECE_SIZE);
+            debug_assert_eq!(data.len() as i32, SUBPIECE_SIZE);
         }
         self.completed_subpieces.set(subpiece_index as usize, true);
         self.memory[begin as usize..begin as usize + data.len()].copy_from_slice(data);
