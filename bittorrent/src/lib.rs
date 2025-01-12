@@ -117,7 +117,8 @@ impl TorrentState {
         self.torrent_info.pieces.len()
     }
 
-    pub(crate) fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) {
+    // Returns if the piece is valid
+    pub(crate) fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) -> bool {
         let hash_time = Instant::now();
         let mut hasher = sha1::Sha1::new();
         hasher.update(&data);
@@ -141,9 +142,11 @@ impl TorrentState {
                 file_store.close().unwrap();
                 self.is_complete = true;
             }
+            true
         } else {
             log::error!("Piece hash didn't match expected hash!");
             self.piece_selector.mark_not_inflight(index as usize);
+            false
         }
     }
 

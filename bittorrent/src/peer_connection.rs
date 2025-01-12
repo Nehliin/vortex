@@ -820,13 +820,15 @@ impl PeerConnection {
                 );
                 self.update_stats(index, begin, data.len() as u32);
                 if let Some(piece) = self.on_subpiece(index, begin, data) {
-                    torrent_state.on_piece_completed(piece.index, piece.memory);
-                    log::info!(
+                    if torrent_state.on_piece_completed(piece.index, piece.memory) {
+log::info!(
                         "[Peer: {}] Piece {}/{} completed!",
                         self.peer_id,
                         torrent_state.piece_selector.total_completed(),
                         torrent_state.piece_selector.pieces()
                     );
+                    }
+                    
                 }
             }
         }
