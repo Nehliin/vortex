@@ -174,6 +174,12 @@ fn event_error_handler(
             socket.shutdown(std::net::Shutdown::Both)?;
             Ok(())
         }
+        libc::ECONNREFUSED => {
+            // Failling to connect due to this is not really an error due to
+            // the likelyhood of being stale info in the DHT
+            log::debug!("Connection refused");
+            Ok(())
+        }
         libc::ECANCELED => {
             // This is the timeout or the connect operation being cancelled, the event should be deleted by the successful
             // the ETIME handler or the successful connection event
