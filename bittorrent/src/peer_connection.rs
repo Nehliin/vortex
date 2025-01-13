@@ -117,7 +117,6 @@ pub struct OutgoingMsg {
 #[derive(Debug)]
 pub struct PeerConnection {
     pub socket: Socket,
-    // TODO: Make this a type that impl display
     pub peer_id: PeerId,
     /// This side is choking the peer
     pub is_choking: bool,
@@ -132,9 +131,15 @@ pub struct PeerConnection {
     pub peer_interested: bool,
     // TODO: do we need this both with queued?
     pub currently_downloading: Vec<Piece>,
+    // Target queue size
     pub desired_queue_size: usize,
+    // Currently queued requests that may be inflight
     pub queued: VecDeque<Subpiece>,
-    pub timeout_point: Option<Instant>,
+    // Time since any data was received
+    pub last_seen: Instant,
+    // Time since last received subpiece request, used to timeout 
+    // requests
+    pub last_received_subpiece: Option<Instant>,
     pub slow_start: bool,
     // The averge time between pieces being received
     pub moving_rtt: MovingRttAverage,
@@ -162,10 +167,11 @@ impl PeerConnection {
             sent_allowed_fast: false,
             peer_choking: true,
             peer_interested: false,
-            timeout_point: None,
+            last_received_subpiece: None,
             fast_ext,
             queued: VecDeque::with_capacity(64),
             desired_queue_size: 4,
+            last_seen: Instant::now(),
             slow_start: true,
             moving_rtt: Default::default(),
             currently_downloading: Default::default(),
@@ -259,7 +265,7 @@ impl PeerConnection {
                     Self::push_subpiece_request(
                         &mut self.outgoing_msgs_buffer,
                         &mut self.queued,
-                        &mut self.timeout_point,
+                        &mut self.last_received_subpiece,
                         piece,
                         subindex,
                     );
@@ -343,7 +349,7 @@ impl PeerConnection {
                         Self::push_subpiece_request(
                             &mut self.outgoing_msgs_buffer,
                             &mut self.queued,
-                            &mut self.timeout_point,
+                            &mut self.last_received_subpiece,
                             &mut piece,
                             next_subpiece,
                         );
@@ -390,9 +396,9 @@ impl PeerConnection {
         self.throughput += length as u64;
         let request = self.queued.remove(pos).unwrap();
         log::debug!("Subpiece completed: {}, {}", request.index, request.offset);
-        let rtt = self.timeout_point.take().unwrap().elapsed();
+        let rtt = self.last_received_subpiece.take().unwrap().elapsed();
         if !self.queued.is_empty() {
-            self.timeout_point = Some(Instant::now());
+            self.last_received_subpiece = Some(Instant::now());
         }
         self.moving_rtt.add_sample(&rtt);
     }
@@ -459,7 +465,7 @@ impl PeerConnection {
         torrent_state: &mut TorrentState,
     ) -> Result<&[OutgoingMsg], Error> {
         self.outgoing_msgs_buffer.clear();
-        //log::debug!("Received: {peer_message:?}");
+        self.last_seen = Instant::now();
         match peer_message {
             PeerMessage::Choke => {
                 log::error!("[Peer: {}] Peer is choking us!", self.peer_id);
