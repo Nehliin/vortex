@@ -60,7 +60,6 @@ fn main() {
         ip_list: Default::default(),
     };
     let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
-    torrent_info.info_hash
     let peer_list_map =
         Arc::new((Mutex::new([(info_hash, torrent_peer_list)].into_iter().collect())));
     let peer_list_provider = PeerListProvider(peer_list_map);

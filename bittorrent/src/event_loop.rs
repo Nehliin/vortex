@@ -75,7 +75,7 @@ fn restart_multishot_recv(
     backlog: &mut VecDeque<io_uring::squeue::Entry>,
     bgid: Bgid,
 ) {
-    log::warn!("Starting new recv multishot");
+    log::debug!("Starting new recv multishot");
     let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
         .build()
         .user_data(user_data.as_u64())
@@ -172,6 +172,12 @@ fn event_error_handler(
             };
             log::warn!("Connect timed out!: {addr}");
             socket.shutdown(std::net::Shutdown::Both)?;
+            Ok(())
+        }
+        libc::ECONNREFUSED => {
+            // Failling to connect due to this is not really an error due to
+            // the likelyhood of being stale info in the DHT
+            log::debug!("Connection refused");
             Ok(())
         }
         libc::ECANCELED => {
@@ -536,7 +542,10 @@ impl EventLoop {
                 let connection = &mut self.connections[connection_idx];
                 let len = ret as usize;
                 if len == 0 {
-                    log::debug!("[PeerId: {}] No more data, mark as pending disconnect", connection.peer_id);
+                    log::debug!(
+                        "[PeerId: {}] No more data, mark as pending disconnect",
+                        connection.peer_id
+                    );
                     self.events.remove(user_data.event_idx as _);
                     connection.pending_disconnect = true;
                     return Ok(());
@@ -589,6 +598,7 @@ impl EventLoop {
                         }
                         Err(err) => {
                             log::error!("Failed decoding message: {err}");
+                            connection.pending_disconnect = true;
                         }
                     }
                 }

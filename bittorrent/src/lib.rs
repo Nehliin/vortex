@@ -167,19 +167,20 @@ fn tick(
     // TODO use retain instead of iter mut in the loop below and get rid of this
     let mut disconnects = Vec::new();
     for (id, connection) in connections.iter_mut() {
-        // If this connection have no inflight 2 iterations in a row
-        // disconnect it and clear all pieces it was currently downloading
-        // this is not very granular and will need tweaking
-
-        if let Some(time) = connection.timeout_point {
+        if connection.last_seen.elapsed() > Duration::from_secs(120) {
+            log::warn!("Timeout due to inactivity: {}", connection.peer_id);
+            connection.pending_disconnect = true;
+        }
+        if let Some(time) = connection.last_received_subpiece {
             if time.elapsed() > connection.request_timeout() {
-                log::warn!("TIMEOUT: {id}");
+                // error just to make more visible
+                log::error!("TIMEOUT: {}", connection.peer_id);
                 connection.on_request_timeout(torrent_state);
             }
         }
 
         if connection.pending_disconnect {
-            log::debug!("Disconnect: {id}");
+            log::debug!("Disconnect: {}", connection.peer_id);
             disconnects.push(id);
             continue;
         }
