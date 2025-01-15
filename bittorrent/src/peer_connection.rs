@@ -433,7 +433,12 @@ impl PeerConnection {
         let Some(subpiece) = self.queued.pop_back() else {
             // Probably caused by the request being rejected or the timeout happen because
             // we had not requested anything more
-            log::warn!("[PeerId: {}] Piece timed out but not found in queue", self.peer_id);
+            log::warn!(
+                "[PeerId: {}] Piece timed out but not found in queue",
+                self.peer_id
+            );
+            // Don't timeout again
+            self.last_received_subpiece = None;
             return;
         };
         if self.try_mark_subpiece_failed(subpiece) {
@@ -827,14 +832,13 @@ impl PeerConnection {
                 self.update_stats(index, begin, data.len() as u32);
                 if let Some(piece) = self.on_subpiece(index, begin, data) {
                     if torrent_state.on_piece_completed(piece.index, piece.memory) {
-log::info!(
-                        "[Peer: {}] Piece {}/{} completed!",
-                        self.peer_id,
-                        torrent_state.piece_selector.total_completed(),
-                        torrent_state.piece_selector.pieces()
-                    );
+                        log::info!(
+                            "[Peer: {}] Piece {}/{} completed!",
+                            self.peer_id,
+                            torrent_state.piece_selector.total_completed(),
+                            torrent_state.piece_selector.pieces()
+                        );
                     }
-                    
                 }
             }
         }
