@@ -114,6 +114,18 @@ pub struct OutgoingMsg {
     pub ordered: bool,
 }
 
+#[derive(Error, Debug)]
+pub enum DisconnectReason {
+    #[error("Peer closed the connection")]
+    ClosedConnection,
+    #[error("Peer was idle for too long")]
+    Idle,
+    #[error("Protocol error {0}")]
+    ProtocolError(&'static str),
+    #[error("Invalid message received")]
+    InvalidMessage,
+}
+
 #[derive(Debug)]
 pub struct PeerConnection {
     pub socket: Socket,
@@ -137,7 +149,7 @@ pub struct PeerConnection {
     pub queued: VecDeque<Subpiece>,
     // Time since any data was received
     pub last_seen: Instant,
-    // Time since last received subpiece request, used to timeout 
+    // Time since last received subpiece request, used to timeout
     // requests
     pub last_received_subpiece: Option<Instant>,
     pub slow_start: bool,
@@ -147,7 +159,7 @@ pub struct PeerConnection {
     pub prev_throughput: u64,
     // If this connection is about to be disconnected
     // because of low througput. (Choke instead?)
-    pub pending_disconnect: bool,
+    pub pending_disconnect: Option<DisconnectReason>,
     pub stateful_decoder: PeerMessageDecoder,
     // Stored here to prevent reallocations
     pub outgoing_msgs_buffer: Vec<OutgoingMsg>,
@@ -175,7 +187,7 @@ impl PeerConnection {
             slow_start: true,
             moving_rtt: Default::default(),
             currently_downloading: Default::default(),
-            pending_disconnect: false,
+            pending_disconnect: None,
             throughput: 0,
             prev_throughput: 0,
             outgoing_msgs_buffer: Default::default(),
@@ -468,7 +480,7 @@ impl PeerConnection {
         conn_id: usize,
         peer_message: PeerMessage,
         torrent_state: &mut TorrentState,
-    ) -> Result<&[OutgoingMsg], Error> {
+    ) {
         self.outgoing_msgs_buffer.clear();
         self.last_seen = Instant::now();
         match peer_message {
@@ -480,13 +492,13 @@ impl PeerConnection {
                 self.peer_choking = false;
                 if !self.is_interested {
                     // Not interested so don't do anything
-                    return Ok(&self.outgoing_msgs_buffer);
+                    return;
                 }
                 // TODO: Get rid of this, should be allowed to continue here?
                 // or this is controlled by the tick?
-                if !self.currently_downloading.is_empty() {
-                    return Ok(&self.outgoing_msgs_buffer);
-                }
+                //if !self.currently_downloading.is_empty() {
+                //   return Ok(&self.outgoing_msgs_buffer);
+                //}
                 if let Some(piece_idx) = torrent_state.piece_selector.next_piece(conn_id) {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
@@ -525,7 +537,8 @@ impl PeerConnection {
                             &torrent_state.info_hash,
                             *self
                                 .socket
-                                .peer_addr()?
+                                .peer_addr()
+                                .expect("Socket should be connected")
                                 .as_socket_ipv4()
                                 .expect("Only ipv4 addresses are supported")
                                 .ip(),
@@ -568,9 +581,10 @@ impl PeerConnection {
             }
             PeerMessage::AllowedFast { index } => {
                 if !self.fast_ext {
-                    return Err(Error::Disconnect(
+                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                         "Allowed fast received when fast_ext wasn't enabled",
                     ));
+                    return;
                 }
                 if index < 0 || index > torrent_state.num_pieces() as i32 {
                     log::warn!("[PeerId: {}] Invalid allowed fast message", self.peer_id);
@@ -599,9 +613,10 @@ impl PeerConnection {
             }
             PeerMessage::HaveAll => {
                 if !self.fast_ext {
-                    return Err(Error::Disconnect(
+                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                         "Have all received when fast_ext wasn't enabled",
                     ));
+                    return;
                 }
                 if torrent_state.piece_selector.bitfield_received(conn_id) {
                     log::error!(
@@ -620,9 +635,10 @@ impl PeerConnection {
             }
             PeerMessage::HaveNone => {
                 if !self.fast_ext {
-                    return Err(Error::Disconnect(
+                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                         "Have none received when fast_ext wasn't enabled",
                     ));
+                    return;
                 }
                 if torrent_state.piece_selector.bitfield_received(conn_id) {
                     log::error!(
@@ -649,7 +665,9 @@ impl PeerConnection {
                             torrent_state.num_pieces(),
                             field.len()
                         );
-                        return Err(Error::Disconnect("Invalid bitfield"));
+                        self.pending_disconnect =
+                            Some(DisconnectReason::ProtocolError("Invalid bitfield"));
+                        return;
                     }
                     // The bitfield might be padded with zeros, remove them first
                     log::debug!(
@@ -669,9 +687,10 @@ impl PeerConnection {
             }
             PeerMessage::SuggestPiece { index } => {
                 if !self.fast_ext {
-                    return Err(Error::Disconnect(
+                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                         "Received suggest piece without fast_ext being enabled",
                     ));
+                    return;
                 }
                 log::info!("[Peer: {}] received suggested piece: {index}", self.peer_id);
             }
@@ -743,9 +762,10 @@ impl PeerConnection {
                 length,
             } => {
                 if !self.fast_ext {
-                    return Err(Error::Disconnect(
+                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                         "Received reject request without fast_ext being enabled",
                     ));
+                    return;
                 }
                 let subpiece = Subpiece {
                     index,
@@ -842,6 +862,5 @@ impl PeerConnection {
                 }
             }
         }
-        Ok(&self.outgoing_msgs_buffer)
     }
 }

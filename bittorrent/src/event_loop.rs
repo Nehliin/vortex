@@ -170,7 +170,7 @@ fn event_error_handler(
             let Event::Connect { socket, addr } = event else {
                 panic!("Timed out something other than a connect: {event:?}");
             };
-            log::warn!("Connect timed out!: {addr}");
+            log::debug!("Connect timed out!: {addr}");
             socket.shutdown(std::net::Shutdown::Both)?;
             Ok(())
         }
@@ -547,7 +547,7 @@ impl EventLoop {
                         connection.peer_id
                     );
                     self.events.remove(user_data.event_idx as _);
-                    connection.pending_disconnect = true;
+                    connection.pending_disconnect = Some(DisconnectReason::ClosedConnection);
                     return Ok(());
                 }
                 let is_more = io_uring::cqueue::more(cqe.flags());
@@ -564,41 +564,27 @@ impl EventLoop {
                 while let Some(parse_result) = connection.stateful_decoder.next() {
                     match parse_result {
                         Ok(peer_message) => {
-                            match connection.handle_message(
-                                connection_idx,
-                                peer_message,
-                                torrent_state,
-                            ) {
-                                Ok(outgoing_messages) => {
-                                    for outgoing in outgoing_messages {
-                                        // Buffers are returned in the event loop
-                                        let buffer = self.write_pool.get_buffer();
-                                        outgoing.message.encode(buffer.inner);
-                                        let size = outgoing.message.encoded_size();
-                                        push_connected_write(
-                                            connection_idx,
-                                            conn_fd,
-                                            &mut self.events,
-                                            sq,
-                                            buffer.index,
-                                            &buffer.inner[..size],
-                                            outgoing.ordered,
-                                            backlog,
-                                        )
-                                    }
-                                }
-                                Err(err @ Error::Disconnect(_)) => {
-                                    log::warn!("[Peer {}] {err}", connection.peer_id);
-                                    connection.pending_disconnect = true;
-                                }
-                                Err(err) => {
-                                    log::error!("Failed handling message: {err}");
-                                }
+                            connection.handle_message(connection_idx, peer_message, torrent_state);
+                            for outgoing in connection.outgoing_msgs_buffer.iter() {
+                                // Buffers are returned in the event loop
+                                let buffer = self.write_pool.get_buffer();
+                                outgoing.message.encode(buffer.inner);
+                                let size = outgoing.message.encoded_size();
+                                push_connected_write(
+                                    connection_idx,
+                                    conn_fd,
+                                    &mut self.events,
+                                    sq,
+                                    buffer.index,
+                                    &buffer.inner[..size],
+                                    outgoing.ordered,
+                                    backlog,
+                                )
                             }
                         }
                         Err(err) => {
-                            log::error!("Failed decoding message: {err}");
-                            connection.pending_disconnect = true;
+                            log::error!("Failed {connection_idx} decoding message: {err}");
+                            connection.pending_disconnect = Some(DisconnectReason::InvalidMessage);
                         }
                     }
                 }

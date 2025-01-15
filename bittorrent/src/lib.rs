@@ -13,7 +13,7 @@ use io_uring::{
     types::{self},
     IoUring,
 };
-use peer_connection::PeerConnection;
+use peer_connection::{DisconnectReason, PeerConnection};
 use piece_selector::{Piece, PieceSelector};
 use sha1::Digest;
 use slab::Slab;
@@ -32,8 +32,6 @@ pub use peer_protocol::PeerId;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Peer is being disconnected, Reason {0}")]
-    Disconnect(&'static str),
     #[error("Encountered IO issue: {0}")]
     Io(#[from] io::Error),
     #[error("Peer provider disconnected")]
@@ -169,7 +167,7 @@ fn tick(
     for (id, connection) in connections.iter_mut() {
         if connection.last_seen.elapsed() > Duration::from_secs(120) {
             log::warn!("Timeout due to inactivity: {}", connection.peer_id);
-            connection.pending_disconnect = true;
+            connection.pending_disconnect = Some(DisconnectReason::Idle);
         }
         if let Some(time) = connection.last_received_subpiece {
             if time.elapsed() > connection.request_timeout() {
@@ -179,8 +177,11 @@ fn tick(
             }
         }
 
-        if connection.pending_disconnect {
-            log::debug!("Disconnect: {}", connection.peer_id);
+        if let Some(reason) = &connection.pending_disconnect {
+            log::info!(
+                "Disconnect: {} id: {id} reason {reason}",
+                connection.peer_id
+            );
             disconnects.push(id);
             continue;
         }
@@ -198,7 +199,7 @@ fn tick(
             connection.desired_queue_size = connection.desired_queue_size.max(1);
         }
         log::info!(
-            "[Peer {}]: throughput: {} bytes/s, queue: {}/{}, time between subpieces: {}ms, currently_downloading: {}",
+            "[Peer {}, id: {id}]: throughput: {} bytes/s, queue: {}/{}, time between subpieces: {}ms, currently_downloading: {}",
             connection.peer_id,
             connection.throughput,
             connection.queued.len(),
