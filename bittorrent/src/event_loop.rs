@@ -93,7 +93,28 @@ fn stop_connection(
     }
 }
 
-fn start_multishot_recv(
+fn recv(
+    sq: &mut SubmissionQueue<'_>,
+    user_data: UserData,
+    fd: RawFd,
+    backlog: &mut VecDeque<io_uring::squeue::Entry>,
+    bgid: Bgid,
+) {
+    log::debug!("Starting recv");
+    let read_op = opcode::Recv::new(types::Fd(fd), null_mut(), 0)
+        .buf_group(bgid)
+        .build()
+        .user_data(user_data.as_u64())
+        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+    unsafe {
+        if sq.push(&read_op).is_err() {
+            log::warn!("SQ buffer full, pushing to backlog");
+            backlog.push_back(read_op);
+        }
+    }
+}
+
+fn recv_multishot(
     sq: &mut SubmissionQueue<'_>,
     user_data: UserData,
     fd: RawFd,
@@ -157,32 +178,12 @@ fn event_error_handler(
             match event {
                 Event::Recv { socket } => {
                     let fd = socket.as_raw_fd();
-                    let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
-                        .build()
-                        // Reuse the user data
-                        .user_data(user_data.as_u64())
-                        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                    unsafe {
-                        if sq.push(&read_op).is_err() {
-                            log::warn!("SQ buffer full, pushing to backlog");
-                            backlog.push_back(read_op);
-                        }
-                    }
+                    recv(sq, user_data, fd, backlog, bgid);
                     Ok(())
                 }
                 Event::ConnectedRecv { connection_idx } => {
                     let fd = connections[*connection_idx].socket.as_raw_fd();
-                    let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
-                        .build()
-                        // Reuse the user data
-                        .user_data(user_data.as_u64())
-                        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                    unsafe {
-                        if sq.push(&read_op).is_err() {
-                            log::warn!("SQ buffer full, pushing to backlog");
-                            backlog.push_back(read_op);
-                        }
-                    }
+                    recv_multishot(sq, user_data, fd, backlog, bgid);
                     Ok(())
                 }
                 _ => {
@@ -497,19 +498,9 @@ impl EventLoop {
                 let read_token = user_data.event_idx as usize;
                 let user_data = UserData::new(read_token, None);
                 // Multishot isn't used here to simplify error handling
-                // when the read is invalid or otherwise doesn't lead to 
+                // when the read is invalid or otherwise doesn't lead to
                 // a full connection which does have graceful shutdown mechanisms
-                let read_op = opcode::Recv::new(types::Fd(fd), null_mut(), 0)
-                    .buf_group(self.read_ring.bgid())
-                    .build()
-                    .user_data(user_data.as_u64())
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                unsafe {
-                    if sq.push(&read_op).is_err() {
-                        log::warn!("SQ buffer full, pushing to backlog");
-                        backlog.push_back(read_op);
-                    }
-                }
+                recv(sq, user_data, fd, backlog, self.read_ring.bgid());
             }
             Event::ConnectedWrite { connection_idx: _ } => {
                 // neither replaced nor modified
@@ -544,8 +535,8 @@ impl EventLoop {
                     Event::ConnectedRecv { connection_idx },
                 );
                 debug_assert!(matches!(old, Event::Dummy));
-                // Recv has been complete, move over to multishot, same user data 
-                start_multishot_recv(sq, user_data, fd, backlog, self.read_ring.bgid());
+                // Recv has been complete, move over to multishot, same user data
+                recv_multishot(sq, user_data, fd, backlog, self.read_ring.bgid());
                 let completed = torrent_state.piece_selector.completed_clone();
                 let message = if completed.all() {
                     peer_protocol::PeerMessage::HaveAll
@@ -591,7 +582,7 @@ impl EventLoop {
                 if !is_more {
                     let fd = connection.socket.as_raw_fd();
                     // restart the operation
-                    start_multishot_recv(sq, user_data, fd, backlog, self.read_ring.bgid());
+                    recv_multishot(sq, user_data, fd, backlog, self.read_ring.bgid());
                 }
 
                 // We always have a buffer associated
