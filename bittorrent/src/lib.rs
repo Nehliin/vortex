@@ -6,13 +6,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use event_loop::{Event, EventLoop, UserData};
+use event_loop::{EventType, EventLoop};
 use file_store::FileStore;
 use io_uring::{
     opcode,
     types::{self},
     IoUring,
 };
+use io_utils::UserData;
 use peer_connection::{DisconnectReason, PeerConnection};
 use piece_selector::{Piece, PieceSelector};
 use sha1::Digest;
@@ -23,6 +24,7 @@ mod buf_pool;
 mod buf_ring;
 mod event_loop;
 mod file_store;
+mod io_utils;
 mod peer_connection;
 mod peer_protocol;
 mod piece_selector;
@@ -63,7 +65,7 @@ impl Torrent {
             .unwrap();
 
         let mut events = Slab::with_capacity(4096);
-        let event_idx = events.insert(Event::Accept);
+        let event_idx = events.insert(EventType::Accept);
         let user_data = UserData::new(event_idx, None);
 
         let listener = TcpListener::bind(("0.0.0.0", 3456)).unwrap();
