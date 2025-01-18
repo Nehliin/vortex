@@ -38,7 +38,7 @@ pub enum Event {
     Dummy,
 }
 
-pub fn push_connected_write(
+pub fn write_to_connection(
     conn_id: usize,
     fd: RawFd,
     events: &mut Slab<Event>,
@@ -313,7 +313,7 @@ impl EventLoop {
                             let buffer = self.write_pool.get_buffer();
                             msg.message.encode(buffer.inner);
                             let size = msg.message.encoded_size();
-                            push_connected_write(
+                            write_to_connection(
                                 conn_id,
                                 conn_fd,
                                 &mut self.events,
@@ -562,7 +562,7 @@ impl EventLoop {
                 let buffer = self.write_pool.get_buffer();
                 bitfield_msg.message.encode(buffer.inner);
                 let size = bitfield_msg.message.encoded_size();
-                push_connected_write(
+                write_to_connection(
                     connection_idx,
                     fd,
                     &mut self.events,
@@ -607,7 +607,7 @@ impl EventLoop {
                                 let buffer = self.write_pool.get_buffer();
                                 outgoing.message.encode(buffer.inner);
                                 let size = outgoing.message.encoded_size();
-                                push_connected_write(
+                                write_to_connection(
                                     connection_idx,
                                     conn_fd,
                                     &mut self.events,
