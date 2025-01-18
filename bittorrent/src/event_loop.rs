@@ -235,8 +235,8 @@ impl EventLoop {
     pub fn new(our_id: PeerId, events: Slab<Event>, peer_provider: Receiver<SocketAddrV4>) -> Self {
         Self {
             events,
-            write_pool: BufferPool::new(128, 4096),
-            read_ring: BufferRing::new(1, 128, (SUBPIECE_SIZE * 2) as _).unwrap(),
+            write_pool: BufferPool::new(256, (SUBPIECE_SIZE * 2) as _),
+            read_ring: BufferRing::new(1, 256, (SUBPIECE_SIZE * 2) as _).unwrap(),
             connections: Slab::with_capacity(64),
             peer_provider,
             our_id,
@@ -536,8 +536,9 @@ impl EventLoop {
                     parsed_handshake.peer_id,
                     parsed_handshake.fast_ext,
                 );
-                log::info!("Finished handshake!: {peer_connection:?}");
+                let id = peer_connection.peer_id;
                 let connection_idx = self.connections.insert(peer_connection);
+                log::info!("Finished handshake! [{connection_idx}]: {id}");
                 // We are now connected!
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
