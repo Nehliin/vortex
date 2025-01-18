@@ -264,7 +264,7 @@ impl EventLoop {
                         log::warn!("Ring busy")
                     }
                     Err(ref err) if err.raw_os_error() == Some(libc::ETIME) => {
-                        log::debug!("Tick hit ETIME")
+                        log::debug!("CQE_WAIT_TIME was reached before target events")
                     }
                     Err(err) => {
                         log::error!("Failed ring submission, aborting: {err}");
@@ -326,10 +326,7 @@ impl EventLoop {
                             );
                         }
                         if let Some(reason) = &connection.pending_disconnect {
-                            log::warn!(
-                                "Disconnect: {} reason {reason}",
-                                connection.peer_id
-                            );
+                            log::warn!("Disconnect: {} reason {reason}", connection.peer_id);
                             stop_connection(
                                 conn_id,
                                 connection.socket.as_raw_fd(),
