@@ -553,12 +553,3 @@ fn conn_parse_and_handle_msgs<Q: SubmissionQueue>(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    #[test]
-    fn test_user_data_roundtrip() {}
-}
