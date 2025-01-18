@@ -162,28 +162,23 @@ fn tick(
     // 1. Calculate bandwidth (deal with initial start up)
     // 2. Go through them in order
     // 3. select pieces
-    // TODO use retain instead of iter mut in the loop below and get rid of this
-    let mut disconnects = Vec::new();
-    for (id, connection) in connections.iter_mut() {
+    for (id, connection) in connections
+        .iter_mut()
+        // Filter out connections that are pending diconnect
+        .filter(|(_, conn)| conn.pending_disconnect.is_none())
+    {
         if connection.last_seen.elapsed() > Duration::from_secs(120) {
             log::warn!("Timeout due to inactivity: {}", connection.peer_id);
             connection.pending_disconnect = Some(DisconnectReason::Idle);
+            continue;
         }
+        // TODO: If we are not using fast extension this might be triggered by a snub
         if let Some(time) = connection.last_received_subpiece {
             if time.elapsed() > connection.request_timeout() {
                 // error just to make more visible
                 log::error!("TIMEOUT: {}", connection.peer_id);
                 connection.on_request_timeout(torrent_state);
             }
-        }
-
-        if let Some(reason) = &connection.pending_disconnect {
-            log::info!(
-                "Disconnect: {} id: {id} reason {reason}",
-                connection.peer_id
-            );
-            disconnects.push(id);
-            continue;
         }
 
         if !connection.peer_choking {
@@ -223,12 +218,18 @@ fn tick(
     // Request new pieces and fill up request queues
     let mut peer_bandwidth: Vec<_> = connections
         .iter_mut()
-        .map(|(key, peer)| (key, peer.remaining_request_queue_spots()))
+        .filter_map(|(key, peer)| {
+            // Skip connections that are pending disconnect
+            if peer.pending_disconnect.is_none() {
+                Some((key, peer.remaining_request_queue_spots()))
+            } else {
+                None
+            }
+        })
         .collect();
 
     peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
     for (peer_key, mut bandwidth) in peer_bandwidth {
-        //dbg!(bandwidth);
         let peer = &mut connections[peer_key];
 
         while {
@@ -263,10 +264,5 @@ fn tick(
             }
         }
         peer.fill_request_queue();
-    }
-
-    for id in disconnects {
-        let mut conn = connections.remove(id);
-        conn.release_pieces(torrent_state);
     }
 }

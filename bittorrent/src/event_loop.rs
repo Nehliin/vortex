@@ -10,7 +10,7 @@ use std::{
 use io_uring::{
     cqueue::Entry,
     opcode,
-    types::{self, Timespec},
+    types::{self, CancelBuilder, Timespec},
     IoUring, SubmissionQueue,
 };
 use slab::Slab;
@@ -19,7 +19,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use crate::{
     buf_pool::BufferPool,
     buf_ring::{Bgid, Bid, BufferRing},
-    peer_connection::{OutgoingMsg, PeerConnection},
+    peer_connection::{DisconnectReason, OutgoingMsg, PeerConnection},
     peer_protocol::{self, parse_handshake, write_handshake, PeerId, HANDSHAKE_SIZE},
     piece_selector::SUBPIECE_SIZE,
     Error, TorrentState,
@@ -33,6 +33,7 @@ pub enum Event {
     Recv { socket: Socket },
     ConnectedWrite { connection_idx: usize },
     ConnectedRecv { connection_idx: usize },
+    ConnectionStopped { connection_idx: usize },
     // Dummy used to allow stable keys in the slab
     Dummy,
 }
@@ -64,6 +65,29 @@ pub fn push_connected_write(
         if sq.push(&write_op).is_err() {
             log::warn!("SQ buffer full, pushing to backlog");
             backlog.push_back(write_op);
+        }
+    }
+}
+
+// Cancelles all operations on the socket
+fn stop_connection(
+    conn_id: usize,
+    fd: RawFd,
+    events: &mut Slab<Event>,
+    sq: &mut SubmissionQueue<'_>,
+    backlog: &mut VecDeque<io_uring::squeue::Entry>,
+) {
+    let event = events.insert(Event::ConnectionStopped {
+        connection_idx: conn_id,
+    });
+    let user_data = UserData::new(event, None);
+    let cancel_op = opcode::AsyncCancel2::new(CancelBuilder::fd(types::Fd(fd)).all())
+        .build()
+        .user_data(user_data.as_u64());
+    unsafe {
+        if sq.push(&cancel_op).is_err() {
+            log::warn!("SQ buffer full, pushing to backlog");
+            backlog.push_back(cancel_op);
         }
     }
 }
@@ -300,6 +324,19 @@ impl EventLoop {
                                 &mut backlog,
                             );
                         }
+                        if let Some(reason) = &connection.pending_disconnect {
+                            log::warn!(
+                                "Disconnect: {} reason {reason}",
+                                connection.peer_id
+                            );
+                            stop_connection(
+                                conn_id,
+                                connection.socket.as_raw_fd(),
+                                &mut self.events,
+                                &mut sq,
+                                &mut backlog,
+                            );
+                        } 
                         connection.outgoing_msgs_buffer.clear();
                     }
                     sq.sync();
@@ -588,6 +625,14 @@ impl EventLoop {
                         }
                     }
                 }
+            }
+            Event::ConnectionStopped { connection_idx } => {
+                let mut connection = self.connections.remove(connection_idx);
+                connection.release_pieces(torrent_state);
+                log::debug!(
+                    "Pending operations cancelled, disconnecting: {}",
+                    connection.peer_id
+                );
             }
             Event::Dummy => unreachable!(),
         }
