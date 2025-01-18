@@ -3,6 +3,7 @@ use std::{
     io,
     net::SocketAddrV4,
     os::fd::{AsRawFd, FromRawFd, RawFd},
+    ptr::null_mut,
     sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
 };
@@ -92,14 +93,14 @@ fn stop_connection(
     }
 }
 
-fn restart_multishot_recv(
+fn start_multishot_recv(
     sq: &mut SubmissionQueue<'_>,
     user_data: UserData,
     fd: RawFd,
     backlog: &mut VecDeque<io_uring::squeue::Entry>,
     bgid: Bgid,
 ) {
-    log::debug!("Starting new recv multishot");
+    log::debug!("Starting recv multishot");
     let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
         .build()
         .user_data(user_data.as_u64())
@@ -336,7 +337,7 @@ impl EventLoop {
                                 &mut sq,
                                 &mut backlog,
                             );
-                        } 
+                        }
                         connection.outgoing_msgs_buffer.clear();
                     }
                     sq.sync();
@@ -498,7 +499,11 @@ impl EventLoop {
                 debug_assert!(matches!(old, Event::Dummy));
                 let read_token = user_data.event_idx as usize;
                 let user_data = UserData::new(read_token, None);
-                let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
+                // Multishot isn't used here to simplify error handling
+                // when the read is invalid or otherwise doesn't lead to 
+                // a full connection which does have graceful shutdown mechanisms
+                let read_op = opcode::Recv::new(types::Fd(fd), null_mut(), 0)
+                    .buf_group(self.read_ring.bgid())
                     .build()
                     .user_data(user_data.as_u64())
                     .flags(io_uring::squeue::Flags::BUFFER_SELECT);
@@ -522,10 +527,6 @@ impl EventLoop {
                     self.events.remove(user_data.event_idx as _);
                     return Ok(());
                 }
-                let is_more = io_uring::cqueue::more(cqe.flags());
-                if !is_more {
-                    restart_multishot_recv(sq, user_data, fd, backlog, self.read_ring.bgid());
-                }
                 // We always have a buffer associated
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
                 // Expect this to be the handshake response
@@ -546,7 +547,8 @@ impl EventLoop {
                     Event::ConnectedRecv { connection_idx },
                 );
                 debug_assert!(matches!(old, Event::Dummy));
-
+                // Recv has been complete, move over to multishot, same user data 
+                start_multishot_recv(sq, user_data, fd, backlog, self.read_ring.bgid());
                 let completed = torrent_state.piece_selector.completed_clone();
                 let message = if completed.all() {
                     peer_protocol::PeerMessage::HaveAll
@@ -591,7 +593,8 @@ impl EventLoop {
                 let is_more = io_uring::cqueue::more(cqe.flags());
                 if !is_more {
                     let fd = connection.socket.as_raw_fd();
-                    restart_multishot_recv(sq, user_data, fd, backlog, self.read_ring.bgid());
+                    // restart the operation
+                    start_multishot_recv(sq, user_data, fd, backlog, self.read_ring.bgid());
                 }
 
                 // We always have a buffer associated
