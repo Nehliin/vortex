@@ -92,6 +92,7 @@ fn main() {
 
     let id = generate_peer_id();
     let torrrent = Torrent::new(torrent_info, id);
+    let start_time = Instant::now();
     torrrent.start(rc).unwrap();
-    log::info!("DOWNLOADED");
+    log::info!("DOWNLOADED in {}", start_time.elapsed().as_secs());
 }
