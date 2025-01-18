@@ -120,6 +120,8 @@ pub enum DisconnectReason {
     ClosedConnection,
     #[error("Peer was idle for too long")]
     Idle,
+    #[error("Peer reset the underlying connection")]
+    TcpReset,
     #[error("Protocol error {0}")]
     ProtocolError(&'static str),
     #[error("Invalid message received")]

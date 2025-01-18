@@ -165,6 +165,7 @@ fn event_error_handler(
     error_code: u32,
     user_data: UserData,
     events: &mut Slab<Event>,
+    torrent_state: &mut TorrentState,
     connections: &mut Slab<PeerConnection>,
     bgid: Bgid,
     backlog: &mut VecDeque<io_uring::squeue::Entry>,
@@ -198,6 +199,34 @@ fn event_error_handler(
             };
             log::debug!("Connect timed out!: {addr}");
             socket.shutdown(std::net::Shutdown::Both)?;
+            Ok(())
+        }
+        libc::ECONNRESET => {
+            let event = events.remove(user_data.event_idx as _);
+            match event {
+                Event::Write { socket } | Event::Recv { socket } => {
+                    log::error!(
+                        "Connection to {:?} reset before handshake completed",
+                        socket.peer_addr().expect("Must have connected")
+                    );
+                    socket.shutdown(std::net::Shutdown::Both);
+                }
+                Event::ConnectedRecv { connection_idx }
+                | Event::ConnectedWrite { connection_idx } => {
+                    let connection = &mut connections[connection_idx];
+                    log::error!("Peer [{}] Connection reset", connection.peer_id);
+                    connection.pending_disconnect = Some(DisconnectReason::TcpReset);
+                }
+                Event::ConnectionStopped { connection_idx } => {
+                    let mut connection = connections.remove(connection_idx);
+                    log::error!(
+                        "Peer [{}] Connection reset during shutdown",
+                        connection.peer_id
+                    );
+                    connection.release_pieces(torrent_state);
+                }
+                Event::Dummy | Event::Connect { .. } | Event::Accept => unreachable!(),
+            }
             Ok(())
         }
         libc::ECONNREFUSED => {
@@ -423,6 +452,7 @@ impl EventLoop {
                 -ret as _,
                 user_data,
                 &mut self.events,
+                torrent_state,
                 &mut self.connections,
                 self.read_ring.bgid(),
                 backlog,
