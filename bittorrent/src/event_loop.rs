@@ -396,11 +396,20 @@ impl EventLoop {
                     self.events.remove(user_data.event_idx as _);
                     return Ok(());
                 }
+                // TODO: This could happen due to networks splitting the handshake up
+                // so it should be dealt with better, but since the handshake is so
+                // small (well below MTU) I suspect that to be rare
+                if len < HANDSHAKE_SIZE {
+                    log::error!("Didn't receive enough data to parse handshake");
+                    self.events.remove(user_data.event_idx as _);
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
                 // We always have a buffer associated
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
+                let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
                 let parsed_handshake =
-                    parse_handshake(torrent_state.info_hash, &buffer[..len]).unwrap();
+                    parse_handshake(torrent_state.info_hash, handshake_data).unwrap();
                 let peer_connection = PeerConnection::new(
                     socket,
                     parsed_handshake.peer_id,
@@ -416,6 +425,21 @@ impl EventLoop {
                     EventType::ConnectedRecv { connection_idx },
                 );
                 debug_assert!(matches!(old, EventType::Dummy));
+
+                // The initial Recv might have contained more data
+                // than just the handshake so need to handle that here
+                // since the read_buffer will be overwritten by the next
+                // incoming recv cqe
+                let connection = &mut self.connections[connection_idx];
+                connection.stateful_decoder.append_data(remainder);
+                conn_parse_and_handle_msgs(
+                    sq,
+                    connection_idx,
+                    connection,
+                    torrent_state,
+                    &mut self.write_pool,
+                    &mut self.events,
+                );
                 // Recv has been complete, move over to multishot, same user data
                 io_utils::recv_multishot(sq, user_data, fd, self.read_ring.bgid());
                 let completed = torrent_state.piece_selector.completed_clone();
@@ -469,33 +493,14 @@ impl EventLoop {
                 let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
                 let buffer = &buffer[..len];
                 connection.stateful_decoder.append_data(buffer);
-                let conn_fd = connection.socket.as_raw_fd();
-                while let Some(parse_result) = connection.stateful_decoder.next() {
-                    match parse_result {
-                        Ok(peer_message) => {
-                            connection.handle_message(connection_idx, peer_message, torrent_state);
-                            for outgoing in connection.outgoing_msgs_buffer.iter() {
-                                // Buffers are returned in the event loop
-                                let buffer = self.write_pool.get_buffer();
-                                outgoing.message.encode(buffer.inner);
-                                let size = outgoing.message.encoded_size();
-                                io_utils::write_to_connection(
-                                    connection_idx,
-                                    conn_fd,
-                                    &mut self.events,
-                                    sq,
-                                    buffer.index,
-                                    &buffer.inner[..size],
-                                    outgoing.ordered,
-                                )
-                            }
-                        }
-                        Err(err) => {
-                            log::error!("Failed {connection_idx} decoding message: {err}");
-                            connection.pending_disconnect = Some(DisconnectReason::InvalidMessage);
-                        }
-                    }
-                }
+                conn_parse_and_handle_msgs(
+                    sq,
+                    connection_idx,
+                    connection,
+                    torrent_state,
+                    &mut self.write_pool,
+                    &mut self.events,
+                );
             }
             EventType::ConnectionStopped { connection_idx } => {
                 let mut connection = self.connections.remove(connection_idx);
@@ -508,6 +513,44 @@ impl EventLoop {
             EventType::Dummy => unreachable!(),
         }
         Ok(())
+    }
+}
+
+fn conn_parse_and_handle_msgs<Q: SubmissionQueue>(
+    sq: &mut BackloggedSubmissionQueue<Q>,
+    connection_idx: usize,
+    connection: &mut PeerConnection,
+    torrent_state: &mut TorrentState,
+    write_pool: &mut BufferPool,
+    events: &mut Slab<EventType>,
+) {
+    let conn_fd = connection.socket.as_raw_fd();
+    while let Some(parse_result) = connection.stateful_decoder.next() {
+        match parse_result {
+            Ok(peer_message) => {
+                connection.handle_message(connection_idx, peer_message, torrent_state);
+                for outgoing in connection.outgoing_msgs_buffer.iter() {
+                    // Buffers are returned in the event loop
+                    let buffer = write_pool.get_buffer();
+                    outgoing.message.encode(buffer.inner);
+                    let size = outgoing.message.encoded_size();
+                    io_utils::write_to_connection(
+                        connection_idx,
+                        conn_fd,
+                        events,
+                        sq,
+                        buffer.index,
+                        &buffer.inner[..size],
+                        outgoing.ordered,
+                    )
+                }
+            }
+            Err(err) => {
+                log::error!("Failed {connection_idx} decoding message: {err}");
+                connection.pending_disconnect = Some(DisconnectReason::InvalidMessage);
+                break;
+            }
+        }
     }
 }
 
