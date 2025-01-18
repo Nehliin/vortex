@@ -280,6 +280,16 @@ impl EventLoop {
                     let timeout_op = opcode::LinkTimeout::new(&timeout)
                         .build()
                         .user_data(user_data.as_u64());
+                    // If the queue doesn't fit both events they need
+                    // to be sent to the backlog so they can be submitted
+                    // together and not with a arbitrary delay inbetween.
+                    // That would mess up the timeout
+                    if sq.remaining() >= 2 {
+                        sq.push(connect_op);
+                        sq.push(timeout_op);
+                    } else {
+                        sq.push_backlog(connect_op);
+                        sq.push_backlog(timeout_op);
                     }
                 }
                 Err(TryRecvError::Disconnected) => return Err(Error::PeerProviderDisconnect),
