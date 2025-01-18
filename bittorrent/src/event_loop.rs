@@ -220,7 +220,7 @@ fn event_error_handler(
     }
 }
 
-const TIMESPEC: &Timespec = &Timespec::new().sec(1);
+const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(250_000_000);
 
 pub struct EventLoop {
     events: Slab<Event>,
@@ -256,8 +256,8 @@ impl EventLoop {
             let mut backlog: VecDeque<io_uring::squeue::Entry> = VecDeque::new();
             let mut last_tick = Instant::now();
             loop {
-                let args = types::SubmitArgs::new().timespec(TIMESPEC);
-                match submitter.submit_with_args(1, &args) {
+                let args = types::SubmitArgs::new().timespec(CQE_WAIT_TIME);
+                match submitter.submit_with_args(16, &args) {
                     Ok(_) => (),
                     Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
                         log::warn!("Ring busy")
