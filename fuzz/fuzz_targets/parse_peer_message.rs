@@ -1,11 +1,12 @@
 #![no_main]
 
-use bittorrent::peer_message::PeerMessageDecoder;
 use libfuzzer_sys::fuzz_target;
+use vortex_bittorrent::PeerMessageDecoder;
 
 fuzz_target!(|data: Vec<Vec<u8>>| {
-    let mut decoder = PeerMessageDecoder::default();
+    let mut decoder = PeerMessageDecoder::new(1 << 12);
     for partial in data {
-        decoder.decode(&mut partial.as_slice());
+        decoder.append_data(partial.as_slice());
+        while decoder.next().is_some() {}
     }
 });

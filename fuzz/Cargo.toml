@@ -31,17 +31,12 @@ members = ["."]
 #test = false
 #doc = false
 
-#[[bin]]
-#name = "parse_peer_message"
-#path = "fuzz_targets/parse_peer_message.rs"
-#test = false
-#doc = false
-
-#[[bin]]
-#name = "peer_message_roundtrip"
-#path = "fuzz_targets/peer_message_roundtrip.rs"
-#test = false
-#doc = false
+[[bin]]
+name = "parse_peer_message"
+path = "fuzz_targets/parse_peer_message.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "peer_message_roundtrip"
