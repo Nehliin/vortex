@@ -582,6 +582,9 @@ pub fn tick(
             }
         }
 
+        // Take delta into account when calculating throughput
+        connection.throughput =
+            (connection.throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
         if !connection.peer_choking {
             // slow start win size increase is handled in update_stats
             if !connection.slow_start {
