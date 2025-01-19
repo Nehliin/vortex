@@ -1,6 +1,5 @@
 use std::{
     io,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -169,7 +168,7 @@ impl FileStore {
         }
         piece_data.truncate(total_read);
         if piece_data.is_empty() {
-            return Err(io::ErrorKind::InvalidInput.into());
+            Err(io::ErrorKind::InvalidInput.into())
         } else {
             Ok(piece_data)
         }
@@ -199,9 +198,9 @@ mod tests {
 
     impl TempDir {
         fn new(path: &str) -> Self {
-            std::fs::create_dir_all(path).unwrap();
+            let path = format!("/tmp/{path}");
+            std::fs::create_dir_all(&path).unwrap();
             let path: PathBuf = path.into();
-            assert!(!path.has_root());
             Self {
                 path: std::fs::canonicalize(path).unwrap(),
             }
