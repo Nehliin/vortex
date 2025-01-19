@@ -198,7 +198,7 @@ impl PeerMessage {
             PeerMessage::Request { .. }
             | PeerMessage::RejectRequest { .. }
             | PeerMessage::Cancel { .. } => 13,
-            PeerMessage::Piece { data, .. } => 13 + data.len(),
+            PeerMessage::Piece { data, .. } => 9 + data.len(),
         };
         // Length prefix + message
         std::mem::size_of::<i32>() + message_size
@@ -432,4 +432,36 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
     }
 }
 
-// TODO: tests
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn fuzz_encoded_length_bug() {
+        let messages = [
+            PeerMessage::Piece {
+                index: -65536,
+                begin: -1375731957,
+                data: b"\x01".as_slice().into(),
+            },
+            PeerMessage::Choke,
+        ];
+
+        let mut decoder = PeerMessageDecoder::new(1 << 12);
+        let mut parsed = Vec::new();
+        let mut encoded = BytesMut::new();
+        for msg in messages.iter() {
+            let mut msg_buf = vec![0; msg.encoded_size()];
+            msg.encode(&mut msg_buf);
+            encoded.extend_from_slice(&msg_buf);
+        }
+
+        decoder.append_data(&encoded);
+        while let Some(Ok(decoded)) = decoder.next() {
+            parsed.push(decoded);
+        }
+
+        assert_eq!(messages.as_slice(), &parsed);
+    }
+}
