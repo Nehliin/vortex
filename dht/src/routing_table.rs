@@ -89,7 +89,7 @@ impl Bucket {
         self.last_changed = last_changed;
         let mut i = 0;
         for node in self.nodes.iter_mut() {
-            if node.as_ref().map_or(false, |node| bucket.covers(&node.id)) {
+            if node.as_ref().is_some_and(|node| bucket.covers(&node.id)) {
                 // Assert it's covered by only one bucket
                 debug_assert!(
                     !(self.min <= node.as_ref().unwrap().id
@@ -175,7 +175,7 @@ impl RoutingTable {
             .filter(|maybe_node| {
                 maybe_node
                     .as_ref()
-                    .map_or(false, |node| node.last_status != NodeStatus::Bad)
+                    .is_some_and(|node| node.last_status != NodeStatus::Bad)
             })
             .map(|node| node.clone().unwrap())
             .collect();
@@ -193,7 +193,7 @@ impl RoutingTable {
             .flat_map(|bucket| &mut bucket.nodes)
             .filter(|node| {
                 node.as_ref()
-                    .map_or(false, |node| node.last_status != NodeStatus::Bad)
+                    .is_some_and(|node| node.last_status != NodeStatus::Bad)
             })
             .min_by_key(|node| {
                 node.as_ref()
@@ -210,7 +210,7 @@ impl RoutingTable {
             .iter_mut()
             .map(|(_, bucket)| bucket)
             .flat_map(|bucket| &mut bucket.nodes)
-            .find(|node| node.as_ref().map_or(false, |node| node.id == *id))?
+            .find(|node| node.as_ref().is_some_and(|node| node.id == *id))?
             .as_mut()
     }
 

@@ -82,7 +82,11 @@ impl BufferRing {
 
     pub fn get(&self, bid: Bid) -> &[u8] {
         unsafe {
-            let mem_start = self.buffer_memory.addr.add(bid as usize * self.buf_len).as_ptr();
+            let mem_start = self
+                .buffer_memory
+                .addr
+                .add(bid as usize * self.buf_len)
+                .as_ptr();
             std::slice::from_raw_parts(mem_start as *const _, self.buf_len)
         }
     }
@@ -188,8 +192,8 @@ impl BufferRing {
 
 impl Drop for BufferRing {
     fn drop(&mut self) {
-       if self.is_registerd {
+        if self.is_registerd {
             panic!("Must unregister before dropping");
-        } 
+        }
     }
 }

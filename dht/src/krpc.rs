@@ -255,11 +255,15 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
                     | (Some("announce_peer"), Some(query @ Query::AnnouncePeer { .. }))
                     | (Some("ping"), Some(query @ Query::Ping { .. }))
                     | (Some("find_node"), Some(query @ Query::FindNode { .. })) => {
-                        let handler = server_clone.handler.borrow();
-                        if let Some(handler) = handler.as_ref() {
+                        let result = server_clone
+                            .handler
+                            .borrow()
+                            .as_ref()
+                            .map(|handler| handler(addr, query));
+                        if let Some(result) = result {
                             log::debug!("Handling incoming query");
                             // TODO Spawn separate task per query?
-                            match handler(addr, query) {
+                            match result {
                                 Ok(answer) => {
                                     let response_pkt = KrpcPacket {
                                         t: packet.t,

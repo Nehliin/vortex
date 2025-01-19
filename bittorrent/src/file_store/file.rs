@@ -64,10 +64,11 @@ impl MmapFile {
         unsafe { std::slice::from_raw_parts(self.addr.as_ptr() as _, self.len) }
     }
 
-    pub fn close(&self) -> io::Result<()> {
-        let ret = unsafe { libc::munmap(self.addr.as_ptr() as _, self.len) };
+    pub fn sync(&self) -> io::Result<()> {
+        let ret = unsafe { libc::msync(self.addr.as_ptr() as _, self.len, libc::MS_SYNC) };
         if ret != 0 {
-            Err(io::ErrorKind::Other.into())
+            let err_code = unsafe { libc::__errno_location().read() };
+            Err(std::io::Error::from_raw_os_error(err_code))
         } else {
             Ok(())
         }

@@ -2,14 +2,14 @@ use std::fmt::Display;
 use std::io;
 use std::io::ErrorKind;
 
-use arbitrary::Arbitrary;
 use bitvec::{order::Msb0, vec::BitVec};
 use bytes::Buf;
 use bytes::BufMut;
 use bytes::Bytes;
 use bytes::BytesMut;
 
-impl<'a> Arbitrary<'a> for PeerMessage {
+#[cfg(feature = "fuzzing")]
+impl<'a> arbitrary::Arbitrary<'a> for PeerMessage {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let tag: i32 = u.int_in_range(0..=8)?;
         match tag as u8 {
@@ -17,6 +17,8 @@ impl<'a> Arbitrary<'a> for PeerMessage {
             PeerMessage::UNCHOKE => Ok(PeerMessage::Unchoke),
             PeerMessage::INTERESTED => Ok(PeerMessage::Interested),
             PeerMessage::NOT_INTERESTED => Ok(PeerMessage::NotInterested),
+            PeerMessage::HAVE_ALL => Ok(PeerMessage::HaveAll),
+            PeerMessage::HAVE_NONE => Ok(PeerMessage::HaveNone),
             PeerMessage::HAVE => Ok(PeerMessage::Have {
                 index: u.arbitrary()?,
             }),
@@ -39,6 +41,17 @@ impl<'a> Arbitrary<'a> for PeerMessage {
                     })
                 }
             }
+            PeerMessage::REJECT_REQUEST => Ok(PeerMessage::RejectRequest {
+                index: u.arbitrary()?,
+                begin: u.arbitrary()?,
+                length: u.arbitrary()?,
+            }),
+            PeerMessage::SUGGEST_PIECE => Ok(PeerMessage::SuggestPiece {
+                index: u.arbitrary()?,
+            }),
+            PeerMessage::ALLOWED_FAST => Ok(PeerMessage::AllowedFast {
+                index: u.arbitrary()?,
+            }),
             PeerMessage::PIECE => {
                 let vec = u.arbitrary::<Vec<u8>>()?;
                 Ok(PeerMessage::Piece {
@@ -185,7 +198,7 @@ impl PeerMessage {
             PeerMessage::Request { .. }
             | PeerMessage::RejectRequest { .. }
             | PeerMessage::Cancel { .. } => 13,
-            PeerMessage::Piece { data, .. } => 13 + data.len(),
+            PeerMessage::Piece { data, .. } => 9 + data.len(),
         };
         // Length prefix + message
         std::mem::size_of::<i32>() + message_size
@@ -297,6 +310,12 @@ impl PeerMessageDecoder {
 
     pub fn append_data(&mut self, incoming: &[u8]) {
         self.data.extend_from_slice(incoming);
+    }
+
+    // Used in fuzzing for example
+    #[allow(dead_code)]
+    pub fn remaining(&self) -> usize {
+        self.data.remaining()
     }
 }
 
@@ -419,4 +438,36 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
     }
 }
 
-// TODO: tests
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn fuzz_encoded_length_bug() {
+        let messages = [
+            PeerMessage::Piece {
+                index: -65536,
+                begin: -1375731957,
+                data: b"\x01".as_slice().into(),
+            },
+            PeerMessage::Choke,
+        ];
+
+        let mut decoder = PeerMessageDecoder::new(1 << 12);
+        let mut parsed = Vec::new();
+        let mut encoded = BytesMut::new();
+        for msg in messages.iter() {
+            let mut msg_buf = vec![0; msg.encoded_size()];
+            msg.encode(&mut msg_buf);
+            encoded.extend_from_slice(&msg_buf);
+        }
+
+        decoder.append_data(&encoded);
+        while let Some(Ok(decoded)) = decoder.next() {
+            parsed.push(decoded);
+        }
+
+        assert_eq!(messages.as_slice(), &parsed);
+    }
+}

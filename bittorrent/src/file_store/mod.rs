@@ -1,6 +1,5 @@
 use std::{
     io,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -169,15 +168,15 @@ impl FileStore {
         }
         piece_data.truncate(total_read);
         if piece_data.is_empty() {
-            return Err(io::ErrorKind::InvalidInput.into());
+            Err(io::ErrorKind::InvalidInput.into())
         } else {
             Ok(piece_data)
         }
     }
 
-    pub fn close(self) -> io::Result<()> {
+    pub fn sync(self) -> io::Result<()> {
         for torrent_file in self.files {
-            torrent_file.file.close()?;
+            torrent_file.file.sync()?;
         }
         Ok(())
     }
@@ -199,9 +198,9 @@ mod tests {
 
     impl TempDir {
         fn new(path: &str) -> Self {
-            std::fs::create_dir_all(path).unwrap();
+            let path = format!("/tmp/{path}");
+            std::fs::create_dir_all(&path).unwrap();
             let path: PathBuf = path.into();
-            assert!(!path.has_root());
             Self {
                 path: std::fs::canonicalize(path).unwrap(),
             }
@@ -267,10 +266,10 @@ mod tests {
             all_data = remainder.to_vec();
         }
         assert!(all_data.is_empty());
-        // Close so they can be opened up later on
+        // Sync so they can be opened up later on
         // and should ensure everything is synced properly
         for file in file_store.files {
-            file.file.close().unwrap();
+            file.file.sync().unwrap();
         }
         read_file_by_piece(&download_tmp_dir_path, &torrent_info);
 

@@ -10,21 +10,21 @@ deny = [
     { name = "app_dirs" },          # abandoned, use app_dirs2 instead
     { name = "colored" },           # not actively maintained? slow to merge update fixes in and has lots of old dependencies
 ]
+allow = []
 skip = [
     # Windows stuff shouldn't be used so I assume it's feature gated out regardles
-    { name = "windows-sys", version = "0.42"},
-    # TODO: create pr to update itoa
-    { name = "itoa", version = "0.4"}
+    { name = "windows-sys", version = "*"},
+    { name = "thiserror-impl" },
+    { name = "thiserror" }
 ]
-skip-tree = []
+# Going to be removed regardless
+skip-tree = [{name = "tokio-uring"}]
 
 [licenses]
-unlicensed = "deny"
-allow-osi-fsf-free = "neither"
+version = 2
 # We want really high confidence when inferring licenses from text
 confidence-threshold = 0.93
-allow = ["Apache-2.0", "BSD-3-Clause", "MIT"]
+allow = ["Apache-2.0", "BSD-3-Clause", "MIT", "Unicode-3.0"]
 exceptions = [
-    { allow = ["Unicode-DFS-2016"], name = "unicode-ident" },
     { allow = ["Zlib"], name = "slotmap" },
 ]

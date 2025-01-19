@@ -11,7 +11,7 @@ license = "BSD-3-Clause"
 [dependencies]
 tokio-uring = { workspace = true }
 anyhow = { workspace = true }
-ahash = "0.8"
+ahash = { workspace = true }
 parking_lot = { workspace = true }
 lava_torrent = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "macros"] }

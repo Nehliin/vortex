@@ -1,7 +1,10 @@
 use std::{collections::VecDeque, io, os::fd::RawFd, ptr::null_mut};
 
 use io_uring::{
-    opcode, squeue::PushError, types::{self, CancelBuilder}, Submitter
+    opcode,
+    squeue::PushError,
+    types::{self, CancelBuilder},
+    Submitter,
 };
 use slab::Slab;
 

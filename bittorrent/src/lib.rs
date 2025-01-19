@@ -28,6 +28,9 @@ mod peer_connection;
 mod peer_protocol;
 mod piece_selector;
 
+#[cfg(feature = "fuzzing")]
+pub use peer_protocol::*;
+
 pub use peer_protocol::generate_peer_id;
 pub use peer_protocol::PeerId;
 
@@ -138,7 +141,7 @@ impl TorrentState {
             //});
             if self.piece_selector.completed_all() {
                 let file_store = std::mem::replace(&mut self.file_store, FileStore::dummy());
-                file_store.close().unwrap();
+                file_store.sync().unwrap();
                 self.is_complete = true;
             }
             true
