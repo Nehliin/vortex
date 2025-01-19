@@ -44,8 +44,8 @@ members = ["."]
 #doc = false
 
 [[bin]]
-name = "decoding_message_splits"
-path = "fuzz_targets/decoding_message_splits.rs"
+name = "peer_message_roundtrip"
+path = "fuzz_targets/peer_message_roundtrip.rs"
 test = false
 doc = false
 bench = false

@@ -1,36 +1,35 @@
 #![no_main]
 
-use bittorrent::peer_message::PeerMessage;
-use bittorrent::peer_message::PeerMessageDecoder;
 use bytes::Buf;
 use bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;
+use vortex_bittorrent::PeerMessage;
+use vortex_bittorrent::PeerMessageDecoder;
 
 fuzz_target!(|messages: (Vec<PeerMessage>, Vec<usize>)| {
     let mut encoded = BytesMut::new();
     for msg in messages.0.iter() {
-        encoded.reserve(msg.encoded_size());
-        msg.clone().encode(&mut encoded);
+        let mut msg_buf = vec![0; msg.encoded_size()];
+        msg.encode(&mut msg_buf);
+        encoded.extend_from_slice(&msg_buf);
     }
 
-    let mut decoder = PeerMessageDecoder::default();
+    let mut decoder = PeerMessageDecoder::new(1 << 12);
     let mut parsed = Vec::new();
     for split in messages.1.iter() {
         if *split <= encoded.remaining() {
-            let mut partial = encoded.split_to(*split);
-            while let Some(decoded) = decoder.decode(&mut partial) {
-                parsed.push(decoded);
-            }
-        } else {
-            while let Some(decoded) = decoder.decode(&mut encoded) {
+            let partial = encoded.split_to(*split);
+            decoder.append_data(&partial);
+            while let Some(Ok(decoded)) = decoder.next() {
                 parsed.push(decoded);
             }
         }
     }
-    while let Some(msg) = decoder.decode(&mut encoded) {
-        parsed.push(msg);
+    decoder.append_data(&encoded);
+    while let Some(Ok(decoded)) = decoder.next() {
+        parsed.push(decoded);
     }
 
     assert_eq!(messages.0, parsed);
-    assert!(!encoded.has_remaining());
+    assert_eq!(decoder.remaining(), 0);
 });

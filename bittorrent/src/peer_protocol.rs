@@ -311,6 +311,10 @@ impl PeerMessageDecoder {
     pub fn append_data(&mut self, incoming: &[u8]) {
         self.data.extend_from_slice(incoming);
     }
+
+    pub fn remaining(&self) -> usize {
+        self.data.remaining()
+    }
 }
 
 impl Iterator for PeerMessageDecoder {
