@@ -10,10 +10,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-arbitrary = { version = "1.1.3", features = ["derive"]}
+arbitrary = { version = "1.4.1", features = ["derive"]}
 #utp_socket = { path = "../utp_socket" }
-#bittorrent = { path = "../bittorrent" }
-bittorrent-io = { path = "../bittorrent-io" }
+vortex-bittorrent = { path = "../bittorrent", features = ["fuzzing"] }
 bytes = "1.2.1"
 
 # Prevent this from interfering with workspaces
@@ -45,8 +44,8 @@ members = ["."]
 #doc = false
 
 [[bin]]
-name = "decoding_message_v2"
-path = "fuzz_targets/decoding_message_v2.rs"
+name = "decoding_message_splits"
+path = "fuzz_targets/decoding_message_splits.rs"
 test = false
 doc = false
 bench = false
