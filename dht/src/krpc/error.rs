@@ -12,7 +12,7 @@ pub enum Error {
     #[error("Failed encoding packet")]
     PacketEncoding(#[from] serde_bencoded::SerError),
     #[error("Socket error")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, PartialEq)]

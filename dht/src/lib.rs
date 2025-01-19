@@ -378,7 +378,8 @@ impl Dht {
             let Some(candiate) = bucket
                 .nodes_mut()
                 .filter(|node| node.last_status != NodeStatus::Bad)
-                .min_by_key(|node| id.distance(&node.id)) else {
+                .min_by_key(|node| id.distance(&node.id))
+            else {
                 // TODO: Remove bucket
                 log::error!("No nodes left in bucket, refresh failed");
                 return;
@@ -462,7 +463,7 @@ impl Dht {
                         (krpc::error::Error::Timeout(_), NodeStatus::Unknown) => {
                             candiate.last_status = NodeStatus::Bad;
                         }
-                        (krpc::error::Error::IoError(err), _) => {
+                        (krpc::error::Error::Io(err), _) => {
                             log::warn!("Socket failure: {err}");
                         }
                         // TODO: Perhaps not something that should be done for all errors?
@@ -523,7 +524,7 @@ impl Dht {
             {
                 // Ping all unknown nodes to see if they might be replaced until either all are
                 // good or a bad one is found
-                for mut unknown_node in unknown_nodes
+                for unknown_node in unknown_nodes
                     .iter_mut()
                     .filter(|node| node.current_status() == NodeStatus::Unknown)
                 {
@@ -618,8 +619,8 @@ impl Dht {
         let (bucket_id, bucket) = routing_table.find_bucket(target_id)?;
         let mut unknown_nodes: Vec<_> = bucket
             .nodes()
+            .filter(|&node| node.current_status() == NodeStatus::Unknown)
             .cloned()
-            .filter(|node| node.current_status() == NodeStatus::Unknown)
             .collect();
         unknown_nodes.sort_unstable_by(|a, b| a.last_seen.cmp(&b.last_seen));
         Some((bucket_id, unknown_nodes))
