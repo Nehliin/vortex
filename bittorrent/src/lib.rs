@@ -28,6 +28,9 @@ mod peer_connection;
 mod peer_protocol;
 mod piece_selector;
 
+#[cfg(feature = "fuzzing")]
+pub use peer_protocol::*;
+
 pub use peer_protocol::generate_peer_id;
 pub use peer_protocol::PeerId;
 

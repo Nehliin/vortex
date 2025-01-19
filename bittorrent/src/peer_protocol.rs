@@ -2,14 +2,14 @@ use std::fmt::Display;
 use std::io;
 use std::io::ErrorKind;
 
-use arbitrary::Arbitrary;
 use bitvec::{order::Msb0, vec::BitVec};
 use bytes::Buf;
 use bytes::BufMut;
 use bytes::Bytes;
 use bytes::BytesMut;
 
-impl<'a> Arbitrary<'a> for PeerMessage {
+#[cfg(feature = "fuzzing")]
+impl<'a> arbitrary::Arbitrary<'a> for PeerMessage {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let tag: i32 = u.int_in_range(0..=8)?;
         match tag as u8 {
@@ -17,6 +17,8 @@ impl<'a> Arbitrary<'a> for PeerMessage {
             PeerMessage::UNCHOKE => Ok(PeerMessage::Unchoke),
             PeerMessage::INTERESTED => Ok(PeerMessage::Interested),
             PeerMessage::NOT_INTERESTED => Ok(PeerMessage::NotInterested),
+            PeerMessage::HAVE_ALL => Ok(PeerMessage::HaveAll),
+            PeerMessage::HAVE_NONE => Ok(PeerMessage::HaveNone),
             PeerMessage::HAVE => Ok(PeerMessage::Have {
                 index: u.arbitrary()?,
             }),
@@ -39,6 +41,17 @@ impl<'a> Arbitrary<'a> for PeerMessage {
                     })
                 }
             }
+            PeerMessage::REJECT_REQUEST => Ok(PeerMessage::RejectRequest {
+                index: u.arbitrary()?,
+                begin: u.arbitrary()?,
+                length: u.arbitrary()?,
+            }),
+            PeerMessage::SUGGEST_PIECE => Ok(PeerMessage::SuggestPiece {
+                index: u.arbitrary()?,
+            }),
+            PeerMessage::ALLOWED_FAST => Ok(PeerMessage::AllowedFast {
+                index: u.arbitrary()?,
+            }),
             PeerMessage::PIECE => {
                 let vec = u.arbitrary::<Vec<u8>>()?;
                 Ok(PeerMessage::Piece {
