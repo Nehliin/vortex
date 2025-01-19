@@ -11,15 +11,15 @@ license = "BSD-3-Clause"
 io-uring = "0.7"
 libc = "0.2"
 slab = "0.4"
-bytes = "1.8"
+bytes = { workspace = true }
 bitvec = { version = "1.0", default-features = false, features = ["alloc"]}
 arbitrary = { version = "1.4.1", features = ["derive"], optional = true }
-log = "0.4"
+log = { workspace = true }
 socket2 = "0.5"
-rand = "0.8"
+rand = { workspace = true }
 lava_torrent = { workspace = true } 
-thiserror = "2"
-sha1 = "0.10.5"
+thiserror = { workspace = true }
+sha1 = { workspace = true }
 
 [features]
 fuzzing = ["dep:arbitrary"]
