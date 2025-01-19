@@ -312,6 +312,8 @@ impl PeerMessageDecoder {
         self.data.extend_from_slice(incoming);
     }
 
+    // Used in fuzzing for example
+    #[allow(dead_code)]
     pub fn remaining(&self) -> usize {
         self.data.remaining()
     }
