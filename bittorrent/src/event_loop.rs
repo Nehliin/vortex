@@ -524,6 +524,10 @@ impl EventLoop {
             EventType::ConnectionStopped { connection_idx } => {
                 let mut connection = self.connections.remove(connection_idx);
                 connection.release_pieces(torrent_state);
+                // Don't count disconnected peers
+                if !connection.is_choking {
+                    torrent_state.num_unchoked -= 1;
+                }
                 log::debug!(
                     "Pending operations cancelled, disconnecting: {}",
                     connection.peer_id
