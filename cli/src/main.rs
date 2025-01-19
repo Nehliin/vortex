@@ -36,7 +36,7 @@ impl PeerProvider for PeerListProvider {
             peer_list.ip_list.push(peer);
             match peer {
                 SocketAddr::V4(socket_addr_v4) => peer_list.sender.send(socket_addr_v4).unwrap(),
-                SocketAddr::V6(socket_addr_v6) => log::warn!("Skipping ipv6 addr"),
+                SocketAddr::V6(_) => log::warn!("Skipping ipv6 addr"),
             }
         }
     }
@@ -60,8 +60,9 @@ fn main() {
         ip_list: Default::default(),
     };
     let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
-    let peer_list_map =
-        Arc::new((Mutex::new([(info_hash, torrent_peer_list)].into_iter().collect())));
+    let peer_list_map = Arc::new(Mutex::new(
+        [(info_hash, torrent_peer_list)].into_iter().collect(),
+    ));
     let peer_list_provider = PeerListProvider(peer_list_map);
 
     std::thread::spawn(move || {

@@ -137,7 +137,7 @@ impl Rpc for FindNodes {
     }
 }
 
-#[derive(Debug)]
+#[allow(dead_code)]
 pub struct FindNodesResponse {
     pub id: NodeId,
     pub nodes: Vec<Node>,
@@ -228,7 +228,7 @@ pub enum GetPeersResponseBody {
     Peers(Vec<SocketAddr>),
 }
 
-#[derive(Debug)]
+#[allow(dead_code)]
 pub struct GetPeersResponse {
     pub id: NodeId,
     pub token: ByteBuf,
@@ -313,7 +313,7 @@ impl Rpc for AnnouncePeer {
     }
 }
 
-#[derive(Debug)]
+#[allow(dead_code)]
 pub struct AnnounceResponse {
     pub id: NodeId,
 }
