@@ -108,7 +108,7 @@ impl TorrentState {
             piece_selector: PieceSelector::new(&torrent),
             torrent_info: torrent,
             num_unchoked: 0,
-            max_unchoked: 4,
+            max_unchoked: 8,
             file_store,
             is_complete: false,
         }

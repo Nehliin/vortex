@@ -182,7 +182,7 @@ impl EventLoop {
             let mut last_tick = Instant::now();
             loop {
                 let args = types::SubmitArgs::new().timespec(CQE_WAIT_TIME);
-                match submitter.submit_with_args(16, &args) {
+                match submitter.submit_with_args(8, &args) {
                     Ok(_) => (),
                     Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
                         log::warn!("Ring busy")
@@ -287,7 +287,7 @@ impl EventLoop {
                             .build()
                             .flags(io_uring::squeue::Flags::IO_LINK)
                             .user_data(user_data.as_u64());
-                    let timeout = Timespec::new().sec(3);
+                    let timeout = Timespec::new().sec(10);
                     let user_data = UserData::new(event_idx, None);
                     let timeout_op = opcode::LinkTimeout::new(&timeout)
                         .build()
