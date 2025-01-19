@@ -19,6 +19,6 @@ fn main() {
     let elapsed = download_time.elapsed();
     log::info!("Download complete in: {}s", elapsed.as_secs());
     let expected = std::fs::read("bittorrent/assets/test-file-1").unwrap();
-    let actual = std::fs::read("bittorrent/downloaded/test-file-1").unwrap();
+    let actual = std::fs::read("bittorrent/downloaded/test-file-1/test-file-1").unwrap();
     assert_eq!(actual, expected);
 }

@@ -71,17 +71,28 @@ impl FileStore {
                 }]
             });
 
+            let torrent_directory = PathBuf::from(root).join(&torrent_info.name);
+            // Create new directory to store all files
+            if let Err(err) = std::fs::create_dir_all(&torrent_directory) {
+                // Do not error if they folders already exists
+                if err.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(err);
+                }
+            }
+
             for torrent_file in files {
                 let num_pieces = (torrent_file.length as u64 + start_offset as u64) / piece_length;
                 let offset = (torrent_file.length as u64 + start_offset as u64) % piece_length;
-
-                let mut path_buf = PathBuf::from(root);
-                path_buf.push(&torrent_file.path);
-                if let Some(parent_dir) = path_buf.parent() {
-                    // TODO: consider caching already created directories
-                    std::fs::create_dir_all(parent_dir)?;
+                let file_path = torrent_directory.as_path().join(torrent_file.path);
+                if let Some(parent_dir) = file_path.parent() {
+                    if let Err(err) = std::fs::create_dir_all(parent_dir) {
+                        // Do not error if they folders already exists
+                        if err.kind() != io::ErrorKind::AlreadyExists {
+                            return Err(err);
+                        }
+                    }
                 }
-                let file = MmapFile::create(&path_buf, torrent_file.length as usize)?;
+                let file = MmapFile::create(&file_path, torrent_file.length as usize)?;
 
                 let torrent_file = TorrentFile {
                     start_piece,
@@ -232,14 +243,15 @@ mod tests {
         }
     }
 
-    fn test_multifile(folder_prefix: &str, piece_len: usize, file_data: HashMap<String, Vec<u8>>) {
-        let torrent_tmp_dir = TempDir::new(&format!("{folder_prefix}_torrent"));
-        let download_tmp_dir = TempDir::new(&format!("{folder_prefix}_download_dir"));
+    fn test_multifile(torrent_name: &str, piece_len: usize, file_data: HashMap<String, Vec<u8>>) {
+        let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
+        let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
         file_data.iter().for_each(|(path, data)| {
             torrent_tmp_dir.add_file(path, data);
         });
 
         let torrent_info = TorrentBuilder::new(&torrent_tmp_dir.path, piece_len as i64)
+            .set_name(torrent_name.to_string())
             .build()
             .unwrap();
 
@@ -275,7 +287,8 @@ mod tests {
 
         for file in files.iter() {
             let path = file.path.to_str().unwrap();
-            let written_data = std::fs::read(download_tmp_dir.path.join(path)).unwrap();
+            let written_data =
+                std::fs::read(download_tmp_dir.path.join(&torrent_info.name).join(path)).unwrap();
             let data = file_data.get(path).unwrap();
             assert_eq!(written_data.len(), data.len());
             assert_eq!(&written_data, data);
