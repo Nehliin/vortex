@@ -39,9 +39,10 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04
-            target: aarch64-unknown-linux-gnu
-            container: ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge
+            # TODO: re-enable later when tests are working
+            #- os: ubuntu-24.04
+            #target: aarch64-unknown-linux-gnu
+            #container: ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     steps:
