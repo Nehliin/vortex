@@ -25,6 +25,8 @@ use crate::{
     Error, TorrentState,
 };
 
+const HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+
 #[derive(Debug)]
 pub enum EventType {
     Accept,
@@ -56,7 +58,7 @@ fn event_error_handler<Q: SubmissionQueue>(
             match event {
                 EventType::Recv { socket } => {
                     let fd = socket.as_raw_fd();
-                    io_utils::recv(sq, user_data, fd, bgid);
+                    io_utils::recv(sq, user_data, fd, bgid, HANDSHAKE_TIMEOUT_SECS);
                     Ok(())
                 }
                 EventType::ConnectedRecv { connection_idx } => {
@@ -71,10 +73,21 @@ fn event_error_handler<Q: SubmissionQueue>(
         }
         libc::ETIME => {
             let event = events.remove(user_data.event_idx as _);
-            let EventType::Connect { socket, addr } = event else {
-                panic!("Timed out something other than a connect: {event:?}");
+            let socket = match event {
+                EventType::Connect { socket, addr } => {
+                    log::debug!("Connect timed out!: {}", addr);
+                    socket
+                }
+                EventType::Recv { socket } => {
+                    log::debug!(
+                        "Handshake timed out!: {:?}",
+                        socket.peer_addr().expect("must have connected")
+                    );
+                    socket
+                }
+                _ => panic!("Timed out unexpected event: {event:?}"),
             };
-            log::debug!("Connect timed out!: {addr}");
+
             socket.shutdown(std::net::Shutdown::Both)?;
             Ok(())
         }
@@ -245,7 +258,6 @@ impl EventLoop {
                     }
                 }
                 self.connect_to_new_peers(&mut sq)?;
-                sq.sync();
                 if torrent_state.is_complete {
                     log::info!("Torrent complete!");
                     return Ok(());
@@ -261,7 +273,7 @@ impl EventLoop {
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
     ) -> Result<(), Error> {
-        loop {
+        let result = loop {
             match self.peer_provider.try_recv() {
                 Ok(addr) => {
                     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
@@ -292,11 +304,12 @@ impl EventLoop {
                         sq.push_backlog(timeout_op);
                     }
                 }
-                Err(TryRecvError::Disconnected) => return Err(Error::PeerProviderDisconnect),
-                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break Err(Error::PeerProviderDisconnect),
+                Err(TryRecvError::Empty) => break Ok(()),
             }
-        }
-        Ok(())
+        };
+        sq.sync();
+        result
     }
 
     fn event_handler<Q: SubmissionQueue>(
@@ -381,7 +394,13 @@ impl EventLoop {
                 // Multishot isn't used here to simplify error handling
                 // when the read is invalid or otherwise doesn't lead to
                 // a full connection which does have graceful shutdown mechanisms
-                io_utils::recv(sq, user_data, fd, self.read_ring.bgid());
+                io_utils::recv(
+                    sq,
+                    user_data,
+                    fd,
+                    self.read_ring.bgid(),
+                    HANDSHAKE_TIMEOUT_SECS,
+                );
             }
             EventType::ConnectedWrite { connection_idx: _ } => {
                 // neither replaced nor modified

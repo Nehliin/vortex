@@ -3,7 +3,7 @@ use std::{collections::VecDeque, io, os::fd::RawFd, ptr::null_mut};
 use io_uring::{
     opcode,
     squeue::PushError,
-    types::{self, CancelBuilder},
+    types::{self, CancelBuilder, Timespec},
     Submitter,
 };
 use slab::Slab;
@@ -158,14 +158,33 @@ pub fn recv<Q: SubmissionQueue>(
     user_data: UserData,
     fd: RawFd,
     bgid: Bgid,
+    timeout_secs: u64,
 ) {
     log::debug!("Starting recv");
     let read_op = opcode::Recv::new(types::Fd(fd), null_mut(), 0)
         .buf_group(bgid)
         .build()
         .user_data(user_data.as_u64())
-        .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-    sq.push(read_op);
+        .flags(io_uring::squeue::Flags::BUFFER_SELECT | io_uring::squeue::Flags::IO_LINK);
+
+    let timeout = Timespec::new().sec(timeout_secs);
+    let user_data = UserData::new(user_data.event_idx as _, None);
+    let timeout_op = opcode::LinkTimeout::new(&timeout)
+        .build()
+        .user_data(user_data.as_u64());
+    // If the queue doesn't fit both events they need
+    // to be sent to the backlog so they can be submitted
+    // together and not with a arbitrary delay inbetween.
+    // That would mess up the timeout
+    if sq.remaining() >= 2 {
+        sq.push(read_op);
+        sq.push(timeout_op);
+        // Need to sync so timeout isn't dropped prematurely?
+        sq.sync();
+    } else {
+        sq.push_backlog(read_op);
+        sq.push_backlog(timeout_op);
+    }
 }
 
 pub fn recv_multishot<Q: SubmissionQueue>(
