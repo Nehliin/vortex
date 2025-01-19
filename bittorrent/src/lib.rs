@@ -3,10 +3,10 @@ use std::{
     net::{SocketAddrV4, TcpListener},
     os::fd::AsRawFd,
     sync::mpsc::Receiver,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use event_loop::{EventType, EventLoop};
+use event_loop::{tick, EventLoop, EventType};
 use file_store::FileStore;
 use io_uring::{
     opcode,
@@ -14,8 +14,7 @@ use io_uring::{
     IoUring,
 };
 use io_utils::UserData;
-use peer_connection::{DisconnectReason, PeerConnection};
-use piece_selector::{Piece, PieceSelector};
+use piece_selector::PieceSelector;
 use sha1::Digest;
 use slab::Slab;
 use thiserror::Error;
@@ -152,119 +151,5 @@ impl TorrentState {
 
     pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
-    }
-}
-
-fn tick(
-    tick_delta: &Duration,
-    connections: &mut Slab<PeerConnection>,
-    torrent_state: &mut TorrentState,
-) {
-    log::info!("Tick!: {}", tick_delta.as_secs_f32());
-    // 1. Calculate bandwidth (deal with initial start up)
-    // 2. Go through them in order
-    // 3. select pieces
-    for (id, connection) in connections
-        .iter_mut()
-        // Filter out connections that are pending diconnect
-        .filter(|(_, conn)| conn.pending_disconnect.is_none())
-    {
-        if connection.last_seen.elapsed() > Duration::from_secs(120) {
-            log::warn!("Timeout due to inactivity: {}", connection.peer_id);
-            connection.pending_disconnect = Some(DisconnectReason::Idle);
-            continue;
-        }
-        // TODO: If we are not using fast extension this might be triggered by a snub
-        if let Some(time) = connection.last_received_subpiece {
-            if time.elapsed() > connection.request_timeout() {
-                // error just to make more visible
-                log::error!("TIMEOUT: {}", connection.peer_id);
-                connection.on_request_timeout(torrent_state);
-            }
-        }
-
-        if !connection.peer_choking {
-            // slow start win size increase is handled in update_stats
-            if !connection.slow_start {
-                // From the libtorrent impl, request queue time = 3
-                let new_queue_capacity =
-                    3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
-                connection.desired_queue_size = new_queue_capacity as usize;
-                log::debug!("Updated desired queue size: {new_queue_capacity}");
-                connection.desired_queue_size = connection.desired_queue_size.clamp(0, 500);
-            }
-            connection.desired_queue_size = connection.desired_queue_size.max(1);
-        }
-        log::info!(
-            "[Peer {}, id: {id}]: throughput: {} bytes/s, queue: {}/{}, time between subpieces: {}ms, currently_downloading: {}",
-            connection.peer_id,
-            connection.throughput,
-            connection.queued.len(),
-            connection.desired_queue_size,
-            connection.moving_rtt.mean().as_millis(),
-            connection.currently_downloading.len()
-        );
-        if !connection.peer_choking
-            && connection.slow_start
-            && connection.throughput > 0
-            && connection.throughput < connection.prev_throughput + 5000
-        {
-            log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
-            connection.slow_start = false;
-        }
-        connection.prev_throughput = connection.throughput;
-        connection.throughput = 0;
-        // TODO: add to throughput total stats
-    }
-
-    // Request new pieces and fill up request queues
-    let mut peer_bandwidth: Vec<_> = connections
-        .iter_mut()
-        .filter_map(|(key, peer)| {
-            // Skip connections that are pending disconnect
-            if peer.pending_disconnect.is_none() {
-                Some((key, peer.remaining_request_queue_spots()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
-    for (peer_key, mut bandwidth) in peer_bandwidth {
-        let peer = &mut connections[peer_key];
-
-        while {
-            let bandwitdth_available_for_new_piece =
-                bandwidth > (torrent_state.piece_selector.avg_num_subpieces() as usize / 2);
-            let first_piece = peer.currently_downloading.is_empty();
-            (bandwitdth_available_for_new_piece || first_piece) && !peer.peer_choking
-        } {
-            if let Some(next_piece) = torrent_state.piece_selector.next_piece(peer_key) {
-                if peer.is_choking {
-                    // TODO highly unclear if unchoke is desired here
-                    //if let Err(err) = peer.unchoke() {
-                    //   log::error!("{err}");
-                    //disconnects.push(peer_key);
-                    break;
-                    //} else {
-                    //   self.num_unchoked += 1;
-                    //}
-                }
-                peer.currently_downloading.push(Piece::new(
-                    next_piece,
-                    torrent_state.piece_selector.piece_len(next_piece),
-                ));
-                // Remove all subpieces from available bandwidth
-                bandwidth -= (torrent_state.piece_selector.num_subpieces(next_piece) as usize)
-                    .min(bandwidth);
-                torrent_state
-                    .piece_selector
-                    .mark_inflight(next_piece as usize);
-            } else {
-                break;
-            }
-        }
-        peer.fill_request_queue();
     }
 }
