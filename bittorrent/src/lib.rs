@@ -138,7 +138,7 @@ impl TorrentState {
             //});
             if self.piece_selector.completed_all() {
                 let file_store = std::mem::replace(&mut self.file_store, FileStore::dummy());
-                file_store.close().unwrap();
+                file_store.sync().unwrap();
                 self.is_complete = true;
             }
             true
