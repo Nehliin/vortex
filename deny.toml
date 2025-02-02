@@ -15,7 +15,8 @@ skip = [
     # Windows stuff shouldn't be used so I assume it's feature gated out regardles
     { name = "windows-sys", version = "*"},
     { name = "thiserror-impl" },
-    { name = "thiserror" }
+    { name = "thiserror" },
+    {name = "smallvec", version = "2.0.0-alpha.10"}
 ]
 # Going to be removed regardless
 skip-tree = [{name = "tokio-uring"}]
