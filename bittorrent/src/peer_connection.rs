@@ -392,7 +392,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                 self.currently_downloading.push(piece);
             } else {
                 log::debug!("[Peer {}] Piece completed", self.peer_id);
-                return Some(piece.to_readable());
+                return Some(piece.into_readable());
             }
         } else {
             log::error!(

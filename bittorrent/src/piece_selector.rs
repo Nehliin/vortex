@@ -255,7 +255,7 @@ impl<'f_store> Piece<'f_store> {
         }
     }
 
-    pub fn to_readable(self) -> ReadablePieceFileView<'f_store> {
+    pub fn into_readable(self) -> ReadablePieceFileView<'f_store> {
         self.piece_view.into_readable()
     }
 
