@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
 
-use crate::peer_protocol::PeerId;
+use crate::{
+    file_store::{ReadablePieceFileView, WritablePieceFileView},
+    peer_protocol::PeerId,
+};
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -145,11 +148,14 @@ impl PieceSelector {
         self.inflight_pieces.set(index, false);
     }
 
-    // TODO: Get rid of this?
     #[inline]
     pub fn mark_inflight(&mut self, index: usize) {
-        debug_assert!(!self.completed_pieces[index]);
-        self.inflight_pieces.set(index, true);
+        // We never pick a completed piece since there might exist
+        // an ReadablePieceFileView alive for that (it also makes no sense to redownload)
+        assert!(!self.completed_pieces[index]);
+        let mut bit = self.inflight_pieces.get_mut(index).unwrap();
+        let old = bit.replace(true);
+        assert!(!old);
     }
 
     #[inline]
@@ -212,22 +218,25 @@ impl PieceSelector {
     }
 }
 
-// TODO flatten this
 #[derive(Debug)]
-pub struct Piece {
+pub struct CompletedPiece {
+    pub index: usize,
+    pub hash_matched: std::io::Result<bool>,
+}
+
+// TODO flatten this
+pub struct Piece<'f_store> {
     pub index: i32,
     // Contains only completed subpieces
     pub completed_subpieces: BitBox,
     // Contains both completed and inflight subpieces
     pub inflight_subpieces: BitBox,
     pub last_subpiece_length: i32,
-    // TODO used uninit memory here instead
-    pub memory: Vec<u8>,
+    pub piece_view: WritablePieceFileView<'f_store>,
 }
 
-impl Piece {
-    pub fn new(index: i32, lenght: u32) -> Self {
-        let memory = vec![0; lenght as usize];
+impl<'f_store> Piece<'f_store> {
+    pub fn new(index: i32, lenght: u32, piece_view: WritablePieceFileView<'f_store>) -> Self {
         let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
             SUBPIECE_SIZE
         } else {
@@ -242,8 +251,12 @@ impl Piece {
             completed_subpieces,
             inflight_subpieces,
             last_subpiece_length,
-            memory,
+            piece_view,
         }
+    }
+
+    pub fn into_readable(self) -> ReadablePieceFileView<'f_store> {
+        self.piece_view.into_readable()
     }
 
     pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], peer_id: PeerId) {
@@ -260,8 +273,8 @@ impl Piece {
         } else {
             debug_assert_eq!(data.len() as i32, SUBPIECE_SIZE);
         }
+        self.piece_view.write_subpiece(begin as usize, data);
         self.completed_subpieces.set(subpiece_index as usize, true);
-        self.memory[begin as usize..begin as usize + data.len()].copy_from_slice(data);
     }
 
     #[inline]

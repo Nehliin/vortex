@@ -20,6 +20,8 @@ rand = { workspace = true }
 lava_torrent = { workspace = true } 
 thiserror = { workspace = true }
 sha1 = { workspace = true }
+smallvec= { version = "2.0.0-alpha.10" , features = ["std"]}
+rayon = "1"
 
 [features]
 fuzzing = ["dep:arbitrary"]

@@ -5,6 +5,8 @@ use std::{
 
 use file::MmapFile;
 use lava_torrent::torrent::v1::Torrent;
+use sha1::Digest;
+use smallvec::SmallVec;
 
 mod file;
 
@@ -14,46 +16,169 @@ struct TorrentFile {
     start_piece: i32,
     // Offset within the start piece
     start_offset: i32,
-    // Index of the piece this file ends in
+    // Index of the piece this file ends in. If it hits a piece boundary it will be the next piece
     end_piece: i32,
     // Offset within the end piece
     end_offset: i32,
     // File handle
-    file: file::MmapFile,
+    file_handle: file::MmapFile,
 }
 
-impl TorrentFile {
-    /// Caluclates the byte offset within the file for a given piece index and
-    /// piece length
-    #[inline]
-    fn offset(&self, index: i32, piece_length: u64) -> u64 {
-        // Convert the piece index to index relative to file start
-        let file_index = (index - self.start_piece) as u64;
-        let mut file_offset = file_index * piece_length;
-        if file_index > 0 {
-            // if this isn't the first file index the offset needs
-            // to be removed
-            file_offset -= self.start_offset as u64;
+/// View of all the files the Piece overlaps with
+pub struct WritablePieceFileView<'a> {
+    index: i32,
+    avg_piece_size: u64,
+    files: SmallVec<&'a TorrentFile, 5>,
+}
+
+impl<'a> WritablePieceFileView<'a> {
+    /// Writes the subpiece to disk.
+    pub fn write_subpiece(&mut self, subpiece_offset: usize, data: &[u8]) {
+        let mut subpiece_written: usize = 0;
+        for file in self.files.iter_mut() {
+            // Where in the _file_ does the piece start
+            let file_index = (self.index - file.start_piece) as i64;
+            // The offset might be negative here if the piece starts before the file
+            let file_offset = file_index * self.avg_piece_size as i64 - file.start_offset as i64;
+            // Where in the _file_ does the subpiece start
+            let subpiece_offset = file_offset + subpiece_offset as i64;
+
+            // Where should the writing start from (taking into account the already written parts)
+            // NOTE: the write head should never be negative since we loop across all files in order
+            // that are part of the piece. We should thus have already written the relevant parts
+            // of the subpiece from the previous files to ensure we start at minimum on 0
+            let current_write_head = subpiece_offset + subpiece_written as i64;
+            assert!(current_write_head >= 0);
+            let current_write_head = current_write_head as usize;
+            // if we are past this file, move on to the next
+            if current_write_head >= file.file_handle.len() {
+                continue;
+            }
+
+            let max_possible_write =
+                (file.file_handle.len() - current_write_head).min(data.len() - subpiece_written);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(subpiece_written),
+                    file.file_handle.ptr().add(current_write_head).as_ptr() as _,
+                    max_possible_write,
+                );
+            }
+            subpiece_written += max_possible_write;
+            // Break early if we've written the entire subpiece
+            if subpiece_written >= data.len() {
+                break;
+            }
         }
-        file_offset
+        // Must have written all data
+        assert_eq!(subpiece_written, data.len());
+    }
+
+    pub fn into_readable(self) -> ReadablePieceFileView<'a> {
+        ReadablePieceFileView {
+            index: self.index,
+            avg_piece_size: self.avg_piece_size,
+            files: self.files,
+        }
     }
 }
 
-// TODO: Consider getting rid of default impl
+pub struct ReadablePieceFileView<'a> {
+    pub index: i32,
+    avg_piece_size: u64,
+    files: SmallVec<&'a TorrentFile, 5>,
+}
+
+impl ReadablePieceFileView<'_> {
+    /// Calculate the offset of the subpiece relative to the file start
+    #[inline]
+    fn subpiece_offset(&self, subpiece_offset: usize, file: &TorrentFile) -> i64 {
+        // Where in the _file_ does the piece start
+        let file_index = (self.index - file.start_piece) as i64;
+        // The offset might be negative here if the piece starts before the file
+        let file_offset = file_index * self.avg_piece_size as i64 - file.start_offset as i64;
+        // Where in the _file_ does the subpiece start
+        file_offset + subpiece_offset as i64
+    }
+
+    pub fn read_subpiece(&self, subpiece_offset: usize, buffer: &mut [u8]) {
+        let mut subpiece_read: usize = 0;
+        for file in self.files.iter() {
+            // Where in the _file_ does the subpiece start
+            let subpiece_offset = self.subpiece_offset(subpiece_offset, file);
+            // Where should the reading start from (taking into account the already read parts)
+            // NOTE: the read head should never be negative since we loop across all files in order
+            // that are part of the piece. We should thus have already read the relevant pieces
+            // from the previous files to ensure we start at minimum on 0
+            let current_read_head = subpiece_offset + subpiece_read as i64;
+            assert!(current_read_head >= 0);
+            let current_read_head = current_read_head as usize;
+            // if we are past this file, move on to the next
+            if current_read_head >= file.file_handle.len() {
+                continue;
+            }
+            // what is the maximum that can be read
+            let max_possible_read =
+                (file.file_handle.len() - current_read_head).min(buffer.len() - subpiece_read);
+            let file_buffer = file.file_handle.get();
+            buffer[subpiece_read..subpiece_read + max_possible_read].copy_from_slice(
+                &file_buffer[current_read_head..current_read_head + max_possible_read],
+            );
+            subpiece_read += max_possible_read;
+            // Break early if the subpiece has been completely read
+            if subpiece_read >= buffer.len() {
+                break;
+            }
+        }
+        // Must have read all data
+        assert_eq!(subpiece_read, buffer.len());
+    }
+
+    /// Sync the relevant file pieces to disk and compare against expected hash
+    pub fn sync_and_check_hash(&self, expected_piece_hash: &[u8]) -> io::Result<bool> {
+        let mut hasher = sha1::Sha1::new();
+        let mut total_read = 0;
+        for file in self.files.iter() {
+            // Where does the piece start relative to the file
+            let piece_start_offset = self.subpiece_offset(0, file);
+            let file_offset = piece_start_offset + total_read as i64;
+            // we should always have read the files in order so that
+            // total read ensures this offset to be greater than 0
+            assert!(file_offset >= 0);
+            let to_read = if self.index == file.end_piece {
+                // Either the piece ends within this file, then we should read
+                // to that piece offset - how much we've already read
+                // (end_offset is the offset relative to the entire the piece)
+                file.end_offset as usize - total_read
+            } else {
+                // Or the piece continues past this file (or ends exactly at the end of this file),
+                // in that case we read the remainder of the piece up the maximum of the file length
+                (self.avg_piece_size as usize - total_read).min(file.file_handle.len())
+            };
+            // Nothing to read, the file ends at a piece boundary
+            if to_read == 0 {
+                continue;
+            }
+            let file_data = file.file_handle.get();
+            let file_data_start = file_offset as usize;
+            let file_data_end = file_offset as usize + to_read;
+            file.file_handle.sync(file_data_start, file_data_end)?;
+            let relevant_piece_data: &[u8] = &file_data[file_data_start..file_data_end];
+            hasher.update(relevant_piece_data);
+            total_read += to_read;
+        }
+        Ok(hasher.finalize().as_slice() == expected_piece_hash)
+    }
+}
+
+// TODO: consider tracking readable/writable views
 #[derive(Debug)]
 pub struct FileStore {
-    piece_length: u64,
+    avg_piece_size: u64,
     files: Vec<TorrentFile>,
 }
 
 impl FileStore {
-    pub fn dummy() -> Self {
-        Self {
-            piece_length: 0,
-            files: Default::default(),
-        }
-    }
-
     pub fn new(root: impl AsRef<Path>, torrent_info: &Torrent) -> io::Result<Self> {
         fn new_impl(root: &Path, torrent_info: &Torrent) -> io::Result<FileStore> {
             let mut result = Vec::new();
@@ -92,14 +217,14 @@ impl FileStore {
                         }
                     }
                 }
-                let file = MmapFile::create(&file_path, torrent_file.length as usize)?;
+                let file_handle = MmapFile::create(&file_path, torrent_file.length as usize)?;
 
                 let torrent_file = TorrentFile {
                     start_piece,
                     start_offset,
                     end_piece: start_piece + num_pieces as i32,
                     end_offset: offset as i32,
-                    file,
+                    file_handle,
                 };
                 start_piece = torrent_file.end_piece;
                 start_offset = torrent_file.end_offset;
@@ -107,89 +232,51 @@ impl FileStore {
             }
             Ok(FileStore {
                 files: result,
-                piece_length,
+                avg_piece_size: piece_length,
             })
         }
         new_impl(root.as_ref(), torrent_info)
     }
 
-    pub fn write_piece(&mut self, index: i32, piece_data: &[u8]) -> io::Result<()> {
-        let files = self
-            .files
-            .iter_mut()
-            .filter(|file| file.start_piece <= index && index <= file.end_piece);
-        for file in files {
-            let file_offset = file.offset(index, self.piece_length);
-            let data_start_offset = if index == file.start_piece {
-                file.start_offset as usize
-            } else {
-                0
-            };
-            let relevant_piece_data = if index == file.end_piece {
-                &piece_data[data_start_offset..file.end_offset as usize]
-            } else {
-                &piece_data[data_start_offset..]
-            };
-            let file_data = file.file.get_mut();
-
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    relevant_piece_data.as_ptr(),
-                    file_data.as_mut_ptr().add(file_offset as usize),
-                    relevant_piece_data.len(),
-                )
-            }
-        }
-        Ok(())
-    }
-
-    // invariant here is that the piece has been completed before, it's not up
-    // to the store to control that.
-    pub fn read_piece(&self, index: i32) -> io::Result<Vec<u8>> {
-        let files = self
+    // Invariant: Must ensure only one writable_piece_view exists at any given time
+    // exclusivly for an index. I.e read + write to the same index is forbidden
+    pub unsafe fn writable_piece_view<'a>(
+        &'a self,
+        index: i32,
+    ) -> io::Result<WritablePieceFileView<'a>> {
+        let files: SmallVec<&'a TorrentFile, 5> = self
             .files
             .iter()
-            .filter(|file| file.start_piece <= index && index <= file.end_piece);
-        // Total read is used instead of explicitly keeping track of piece lenght per
-        // index. One could use the same calulation as is done in piece_selector but
-        // didn't want to duplicate that logic here.
-        let mut total_read = 0;
-        let mut piece_data: Vec<u8> = vec![0; self.piece_length as usize];
-        for file in files {
-            let file_offset = file.offset(index, self.piece_length);
-            let data_start_offset = if index == file.start_piece {
-                file.start_offset as usize
-            } else {
-                0
-            };
-            let relevant_piece_data = if index == file.end_piece {
-                &mut piece_data[data_start_offset..file.end_offset as usize]
-            } else {
-                &mut piece_data[data_start_offset..]
-            };
-            let file_data = file.file.get();
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    file_data.as_ptr().add(file_offset as usize),
-                    relevant_piece_data.as_mut_ptr(),
-                    relevant_piece_data.len(),
-                )
-            }
-            total_read += relevant_piece_data.len();
+            .filter(|file| file.start_piece <= index && index <= file.end_piece)
+            .collect();
+        if files.is_empty() {
+            return Err(io::ErrorKind::NotFound.into());
         }
-        piece_data.truncate(total_read);
-        if piece_data.is_empty() {
-            Err(io::ErrorKind::InvalidInput.into())
-        } else {
-            Ok(piece_data)
-        }
+        Ok(WritablePieceFileView {
+            index,
+            avg_piece_size: self.avg_piece_size,
+            files,
+        })
     }
 
-    pub fn sync(self) -> io::Result<()> {
-        for torrent_file in self.files {
-            torrent_file.file.sync()?;
+    // Invariant: Must ensure that no other writable_piece_views exist of this index
+    pub unsafe fn readable_piece_view<'a>(
+        &'a self,
+        index: i32,
+    ) -> io::Result<ReadablePieceFileView<'a>> {
+        let files: SmallVec<&'a TorrentFile, 5> = self
+            .files
+            .iter()
+            .filter(|file| file.start_piece <= index && index <= file.end_piece)
+            .collect();
+        if files.is_empty() {
+            return Err(io::ErrorKind::NotFound.into());
         }
-        Ok(())
+        Ok(ReadablePieceFileView {
+            index,
+            avg_piece_size: self.avg_piece_size,
+            files,
+        })
     }
 }
 
@@ -198,7 +285,7 @@ mod tests {
     use std::collections::HashMap;
 
     use lava_torrent::torrent::v1::TorrentBuilder;
-    use rand::Rng;
+    use rand::{seq::SliceRandom, Rng};
     use sha1::{Digest, Sha1};
 
     use super::*;
@@ -232,18 +319,46 @@ mod tests {
         }
     }
 
-    fn read_file_by_piece(root: impl AsRef<Path>, torrent_info: &Torrent) {
+    fn read_file_by_subpiece(root: impl AsRef<Path>, torrent_info: &Torrent, subpiece_size: usize) {
         let store = FileStore::new(root, torrent_info).unwrap();
         for (index, piece_hash) in torrent_info.pieces.iter().enumerate() {
-            let piece_data = store.read_piece(index as i32).unwrap();
+            let remainder = torrent_info.length as usize % torrent_info.piece_length as usize;
+            // last piece?
+            let piece_len = if index == (torrent_info.pieces.len() - 1) && remainder != 0 {
+                remainder
+            } else {
+                torrent_info.piece_length as usize
+            };
+            let mut piece_buffer = vec![0; piece_len];
+            let view = unsafe { store.readable_piece_view(index as _) }.unwrap();
+            let num_subpieces = piece_len / subpiece_size;
+            let mut subpiece_indicies: Vec<usize> = (0..num_subpieces).collect();
+            let mut rng = rand::thread_rng();
+            subpiece_indicies.shuffle(&mut rng);
+            for subpiece_index in subpiece_indicies {
+                let subpiece_offset = subpiece_index * subpiece_size;
+                view.read_subpiece(
+                    subpiece_offset as _,
+                    &mut piece_buffer[subpiece_offset..subpiece_offset + subpiece_size],
+                );
+            }
+            if piece_len % subpiece_size != 0 {
+                let subpiece_offset = num_subpieces * subpiece_size;
+                view.read_subpiece(subpiece_offset as _, &mut piece_buffer[subpiece_offset..]);
+            }
             let mut hasher = Sha1::new();
-            hasher.update(piece_data);
+            hasher.update(piece_buffer);
             let actual_hash = hasher.finalize();
             assert_eq!(actual_hash.as_slice(), piece_hash);
         }
     }
 
-    fn test_multifile(torrent_name: &str, piece_len: usize, file_data: HashMap<String, Vec<u8>>) {
+    fn test_multifile(
+        torrent_name: &str,
+        piece_len: usize,
+        subpiece_size: usize,
+        file_data: HashMap<String, Vec<u8>>,
+    ) {
         let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
         let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
         file_data.iter().for_each(|(path, data)| {
@@ -270,20 +385,35 @@ mod tests {
             .copied()
             .collect();
         let download_tmp_dir_path = download_tmp_dir.path.clone();
-        let mut file_store = FileStore::new(&download_tmp_dir_path, &torrent_info).unwrap();
+        let file_store = FileStore::new(&download_tmp_dir_path, &torrent_info).unwrap();
 
-        for (index, _) in torrent_info.pieces.iter().enumerate() {
-            let (piece, remainder) = all_data.split_at(piece_len.min(all_data.len()));
-            file_store.write_piece(index as i32, piece).unwrap();
+        for (index, piece_hash) in torrent_info.pieces.iter().enumerate() {
+            let current_piece_len = piece_len.min(all_data.len());
+            let mut view = unsafe { file_store.writable_piece_view(index as _).unwrap() };
+            let (piece, remainder) = all_data.split_at(current_piece_len);
+            let piece = piece.to_vec();
+            let num_subpieces = piece.len() / subpiece_size;
+            let mut subpiece_indicies: Vec<usize> = (0..num_subpieces).collect();
+            let mut rng = rand::thread_rng();
+            subpiece_indicies.shuffle(&mut rng);
+            for subpiece_index in subpiece_indicies {
+                let subpiece_offset = subpiece_index * subpiece_size;
+                let subpiece_data = &piece[subpiece_offset..(subpiece_offset + subpiece_size)];
+                view.write_subpiece(subpiece_offset as _, subpiece_data);
+            }
+            if piece.len() % subpiece_size != 0 {
+                let subpiece_offset = num_subpieces * subpiece_size;
+                let subpiece_data = &piece[subpiece_offset..];
+                view.write_subpiece(subpiece_offset, subpiece_data);
+            }
+            let readable = view.into_readable();
+            let hash_matches = readable.sync_and_check_hash(piece_hash).unwrap();
+            assert!(hash_matches);
             all_data = remainder.to_vec();
         }
         assert!(all_data.is_empty());
-        // Sync so they can be opened up later on
-        // and should ensure everything is synced properly
-        for file in file_store.files {
-            file.file.sync().unwrap();
-        }
-        read_file_by_piece(&download_tmp_dir_path, &torrent_info);
+
+        read_file_by_subpiece(&download_tmp_dir_path, &torrent_info, subpiece_size);
 
         for file in files.iter() {
             let path = file.path.to_str().unwrap();
@@ -303,7 +433,7 @@ mod tests {
                 (format!("test/file_{i}.txt"), data)
             })
             .collect();
-        test_multifile("basic_multifile_alinged", 256, files)
+        test_multifile("basic_multifile_alinged", 256, 32, files)
     }
 
     #[test]
@@ -318,7 +448,27 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        test_multifile("small_multifile_misalinged", 256, files)
+        test_multifile("small_multifile_misalinged", 256, 32, files)
+    }
+
+    #[test]
+    fn small_multifile_misalinged_files_and_subpiece() {
+        let files: HashMap<String, Vec<u8>> = [
+            ("f1.txt".to_owned(), vec![1_u8; 64]),
+            ("f2.txt".to_owned(), vec![2_u8; 100]),
+            ("f3.txt".to_owned(), vec![3_u8; 50]),
+            ("f4.txt".to_owned(), vec![4_u8; 20]),
+            ("f5.txt".to_owned(), vec![5_u8; 10]),
+            ("f6.txt".to_owned(), vec![6_u8; 268]),
+        ]
+        .into_iter()
+        .collect();
+        test_multifile(
+            "small_multifile_misalinged_files_and_subpiece",
+            256,
+            35,
+            files,
+        )
     }
 
     #[test]
@@ -333,7 +483,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        test_multifile("multifile_not_multiple_of_piece_size", 256, files)
+        test_multifile("multifile_not_multiple_of_piece_size", 256, 32, files)
     }
 
     #[test]
@@ -346,7 +496,20 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        test_multifile("multifile_misalinged_v2", 64, files)
+        test_multifile("multifile_misalinged_v2", 64, 8, files)
+    }
+
+    #[test]
+    fn multifile_misalinged_v3() {
+        let files: HashMap<String, Vec<u8>> = [
+            ("f1.txt".to_owned(), vec![1_u8; 84]),
+            ("f2.txt".to_owned(), vec![2_u8; 114]),
+            ("f3.txt".to_owned(), vec![3_u8; 134]),
+            ("f4.txt".to_owned(), vec![4_u8; 24]),
+        ]
+        .into_iter()
+        .collect();
+        test_multifile("multifile_misalinged_v3", 64, 8, files)
     }
 
     #[test]
@@ -357,7 +520,7 @@ mod tests {
                 (format!("test/file_{i}.txt"), data)
             })
             .collect();
-        test_multifile("multifile_misalinged", 256, files);
+        test_multifile("multifile_misalinged", 256, 64, files);
     }
 
     #[test]
@@ -368,7 +531,23 @@ mod tests {
             .collect();
         let files: HashMap<String, Vec<u8>> =
             [("test_single.txt".to_owned(), data)].into_iter().collect();
-        test_multifile("basic_single_file_aligned", 256, files);
+        test_multifile("basic_single_file_aligned", 256, 8, files);
+    }
+
+    #[test]
+    fn basic_single_file_aligned_unaligned_subpiece() {
+        let data: Vec<u8> = (0..)
+            .map(|_| rand::thread_rng().gen::<u8>())
+            .take(1024)
+            .collect();
+        let files: HashMap<String, Vec<u8>> =
+            [("test_single.txt".to_owned(), data)].into_iter().collect();
+        test_multifile(
+            "basic_single_file_aligned_unaligned_subpiece",
+            256,
+            10,
+            files,
+        );
     }
 
     #[test]
@@ -379,7 +558,28 @@ mod tests {
             .collect();
         let files: HashMap<String, Vec<u8>> =
             [("test_single.txt".to_owned(), data)].into_iter().collect();
-        test_multifile("single_file_misaligned", 256, files);
+        test_multifile("single_file_misaligned", 256, 32, files);
+    }
+
+    #[test]
+    fn single_file_misaligned_v2() {
+        let piece_size = 256;
+        let subpiece_size = 32;
+        let length = 282;
+        let subpieces = length / subpiece_size;
+        let mut data: Vec<u8> = (0..subpieces)
+            .flat_map(|i| vec![i as u8; subpiece_size])
+            .collect();
+        data.append(&mut vec![subpieces as u8; length % subpiece_size]);
+        assert_eq!(data.len(), length);
+        let files: HashMap<String, Vec<u8>> =
+            [("test_single.txt".to_owned(), data)].into_iter().collect();
+        test_multifile(
+            "single_file_misaligned_v2",
+            piece_size,
+            subpiece_size,
+            files,
+        );
     }
 
     #[test]
@@ -397,6 +597,6 @@ mod tests {
 
         let file_store = FileStore::new(&download_tmp_dir.path, &torrent_info).unwrap();
         // 500 is out of bounds
-        assert!(file_store.read_piece(500).is_err());
+        assert!(unsafe { file_store.readable_piece_view(500) }.is_err());
     }
 }
