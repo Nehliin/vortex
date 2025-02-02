@@ -2,11 +2,10 @@ use std::{
     io,
     net::{SocketAddrV4, TcpListener},
     os::fd::AsRawFd,
-    sync::mpsc::Receiver,
-    time::Instant,
+    sync::mpsc::{Receiver, Sender},
 };
 
-use event_loop::{tick, EventLoop, EventType};
+use event_loop::{EventLoop, EventType};
 use file_store::FileStore;
 use io_uring::{
     opcode,
@@ -14,8 +13,7 @@ use io_uring::{
     IoUring,
 };
 use io_utils::UserData;
-use piece_selector::PieceSelector;
-use sha1::Digest;
+use piece_selector::{CompletedPiece, PieceSelector};
 use slab::Slab;
 use thiserror::Error;
 
@@ -70,7 +68,7 @@ impl Torrent {
         let event_idx = events.insert(EventType::Accept);
         let user_data = UserData::new(event_idx, None);
 
-        let listener = TcpListener::bind(("0.0.0.0", 3456)).unwrap();
+        let listener = TcpListener::bind(("0.0.0.0", 6881)).unwrap();
         let accept_op = opcode::AcceptMulti::new(types::Fd(listener.as_raw_fd()))
             .build()
             .user_data(user_data.as_u64());
@@ -79,78 +77,81 @@ impl Torrent {
             ring.submission().push(&accept_op).unwrap();
         }
         ring.submission().sync();
-
+        let file_store = FileStore::new(
+            "/home/popuser/vortex/bittorrent/downloaded/",
+            &self.torrent_info,
+        )
+        .unwrap();
+        let torrent_state = TorrentState::new(&self.torrent_info);
         let mut event_loop = EventLoop::new(self.our_id, events, peer_provider);
-
-        let torrent_state = TorrentState::new(self.torrent_info.clone());
-
-        event_loop.run(ring, torrent_state, tick)
+        event_loop.run(ring, torrent_state, &file_store, &self.torrent_info)
     }
 }
 
 struct TorrentState {
     info_hash: [u8; 20],
     piece_selector: PieceSelector,
-    torrent_info: lava_torrent::torrent::v1::Torrent,
     num_unchoked: u32,
     max_unchoked: u32,
-    file_store: FileStore,
+    num_pieces: usize,
+    completed_piece_rc: Receiver<CompletedPiece>,
+    completed_piece_tx: Sender<CompletedPiece>,
     is_complete: bool,
 }
 
 impl TorrentState {
-    pub fn new(torrent: lava_torrent::torrent::v1::Torrent) -> Self {
+    pub fn new(torrent: &lava_torrent::torrent::v1::Torrent) -> Self {
         let info_hash = torrent.info_hash_bytes().try_into().unwrap();
-        let file_store =
-            FileStore::new("/home/popuser/vortex/bittorrent/downloaded/", &torrent).unwrap();
+
+        let (tx, rc) = std::sync::mpsc::channel();
         Self {
             info_hash,
-            piece_selector: PieceSelector::new(&torrent),
-            torrent_info: torrent,
+            piece_selector: PieceSelector::new(torrent),
+            num_pieces: torrent.pieces.len(),
             num_unchoked: 0,
             max_unchoked: 8,
-            file_store,
+            completed_piece_rc: rc,
+            completed_piece_tx: tx,
             is_complete: false,
         }
     }
 
     #[inline]
     pub fn num_pieces(&self) -> usize {
-        self.torrent_info.pieces.len()
+        self.num_pieces
     }
 
-    // Returns if the piece is valid
-    pub(crate) fn on_piece_completed(&mut self, index: i32, data: Vec<u8>) -> bool {
-        let hash_time = Instant::now();
-        let mut hasher = sha1::Sha1::new();
-        hasher.update(&data);
-        let data_hash = hasher.finalize();
-        let hash_time = hash_time.elapsed();
-        log::info!("Piece hashed in: {} microsec", hash_time.as_micros());
-        // The hash can be provided to the data storage or the peer connection
-        // when the piece is requested so it can be used for validation later on
-        let expected_hash = &self.torrent_info.pieces[index as usize];
-        if expected_hash == data_hash.as_slice() {
-            log::info!("Piece hash matched downloaded data");
-            self.piece_selector.mark_complete(index as usize);
-            self.file_store.write_piece(index, &data).unwrap();
-
-            // Purge disconnected peers TODO move to tick instead
-            //self.peer_list.connections.retain(|_, peer| {
-            //   peer.have(index).is_ok()
-            //});
-            if self.piece_selector.completed_all() {
-                let file_store = std::mem::replace(&mut self.file_store, FileStore::dummy());
-                file_store.sync().unwrap();
-                self.is_complete = true;
+    pub(crate) fn update_torrent_status(&mut self) {
+        while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
+            match completed_piece.hash_matched {
+                Ok(hash_matched) => {
+                    if hash_matched {
+                        self.piece_selector.mark_complete(completed_piece.index);
+                        log::info!(
+                            "Piece {}/{} completed!",
+                            self.piece_selector.total_completed(),
+                            self.piece_selector.pieces()
+                        );
+                        // TODO: send have messages
+                        if self.piece_selector.completed_all() {
+                            self.is_complete = true;
+                        }
+                    } else {
+                        log::error!("Piece hash didn't match expected hash!");
+                        self.piece_selector.mark_not_inflight(completed_piece.index);
+                    }
+                }
+                Err(err) => {
+                    log::error!(
+                        "Failed to sync and hash piece: {} Error: {err}",
+                        completed_piece.index
+                    );
+                }
             }
-            true
-        } else {
-            log::error!("Piece hash didn't match expected hash!");
-            self.piece_selector.mark_not_inflight(index as usize);
-            false
         }
     }
+
+    // TODO: Something like release in flight pieces?
 
     pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
