@@ -5,6 +5,8 @@ use std::{
 
 use file::MmapFile;
 use lava_torrent::torrent::v1::Torrent;
+use sha1::Digest;
+use smallvec::SmallVec;
 
 mod file;
 
@@ -14,28 +16,158 @@ struct TorrentFile {
     start_piece: i32,
     // Offset within the start piece
     start_offset: i32,
-    // Index of the piece this file ends in
+    // Index of the piece this file ends in. If it hits a piece boundary it will be the next piece
     end_piece: i32,
     // Offset within the end piece
     end_offset: i32,
     // File handle
-    file: file::MmapFile,
+    file_handle: file::MmapFile,
 }
 
-impl TorrentFile {
-    /// Caluclates the byte offset within the file for a given piece index and
-    /// piece length
-    #[inline]
-    fn offset(&self, index: i32, piece_length: u64) -> u64 {
-        // Convert the piece index to index relative to file start
-        let file_index = (index - self.start_piece) as u64;
-        let mut file_offset = file_index * piece_length;
-        if file_index > 0 {
-            // if this isn't the first file index the offset needs
-            // to be removed
-            file_offset -= self.start_offset as u64;
+/// View of all the files the Piece overlaps with
+pub struct WritablePieceFileView<'a> {
+    index: i32,
+    avg_piece_size: u64,
+    files: SmallVec<&'a TorrentFile, 5>,
+}
+
+impl<'a> WritablePieceFileView<'a> {
+    /// Writes the subpiece to disk.
+    pub fn write_subpiece(&mut self, subpiece_offset: usize, data: &[u8]) {
+        let mut subpiece_written: usize = 0;
+        for file in self.files.iter_mut() {
+            // Where in the _file_ does the piece start
+            let file_index = (self.index - file.start_piece) as i64;
+            // The offset might be negative here if the piece starts before the file
+            let file_offset = file_index * self.avg_piece_size as i64 - file.start_offset as i64;
+            // Where in the _file_ does the subpiece start
+            let subpiece_offset = file_offset + subpiece_offset as i64;
+
+            // Where should the writing start from (taking into account the already written parts)
+            // NOTE: the write head should never be negative since we loop across all files in order
+            // that are part of the piece. We should thus have already written the relevant parts
+            // of the subpiece from the previous files to ensure we start at minimum on 0
+            let current_write_head = subpiece_offset + subpiece_written as i64;
+            assert!(current_write_head >= 0);
+            let current_write_head = current_write_head as usize;
+            // if we are past this file, move on to the next
+            if current_write_head >= file.file_handle.len() {
+                continue;
+            }
+
+            let max_possible_write =
+                (file.file_handle.len() - current_write_head).min(data.len() - subpiece_written);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(subpiece_written),
+                    file.file_handle.ptr().add(current_write_head).as_ptr() as _,
+                    max_possible_write,
+                );
+            }
+            subpiece_written += max_possible_write;
+            // Break early if we've written the entire subpiece
+            if subpiece_written >= data.len() {
+                break;
+            }
         }
-        file_offset
+        // Must have written all data
+        assert_eq!(subpiece_written, data.len());
+    }
+
+    pub fn into_readable(self) -> ReadablePieceFileView<'a> {
+        ReadablePieceFileView {
+            index: self.index,
+            avg_piece_size: self.avg_piece_size,
+            files: self.files,
+        }
+    }
+}
+
+pub struct ReadablePieceFileView<'a> {
+    pub index: i32,
+    avg_piece_size: u64,
+    files: SmallVec<&'a TorrentFile, 5>,
+}
+
+impl ReadablePieceFileView<'_> {
+    /// Calculate the offset of the subpiece relative to the file start
+    #[inline]
+    fn subpiece_offset(&self, subpiece_offset: usize, file: &TorrentFile) -> i64 {
+        // Where in the _file_ does the piece start
+        let file_index = (self.index - file.start_piece) as i64;
+        // The offset might be negative here if the piece starts before the file
+        let file_offset = file_index * self.avg_piece_size as i64 - file.start_offset as i64;
+        // Where in the _file_ does the subpiece start
+        file_offset + subpiece_offset as i64
+    }
+
+    pub fn read_subpiece(&self, subpiece_offset: usize, buffer: &mut [u8]) {
+        let mut subpiece_read: usize = 0;
+        for file in self.files.iter() {
+            // Where in the _file_ does the subpiece start
+            let subpiece_offset = self.subpiece_offset(subpiece_offset, file);
+            // Where should the reading start from (taking into account the already read parts)
+            // NOTE: the read head should never be negative since we loop across all files in order
+            // that are part of the piece. We should thus have already read the relevant pieces
+            // from the previous files to ensure we start at minimum on 0
+            let current_read_head = subpiece_offset + subpiece_read as i64;
+            assert!(current_read_head >= 0);
+            let current_read_head = current_read_head as usize;
+            // if we are past this file, move on to the next
+            if current_read_head >= file.file_handle.len() {
+                continue;
+            }
+            // what is the maximum that can be read
+            let max_possible_read =
+                (file.file_handle.len() - current_read_head).min(buffer.len() - subpiece_read);
+            let file_buffer = file.file_handle.get();
+            buffer[subpiece_read..subpiece_read + max_possible_read].copy_from_slice(
+                &file_buffer[current_read_head..current_read_head + max_possible_read],
+            );
+            subpiece_read += max_possible_read;
+            // Break early if the subpiece has been completely read
+            if subpiece_read >= buffer.len() {
+                break;
+            }
+        }
+        // Must have read all data
+        assert_eq!(subpiece_read, buffer.len());
+    }
+
+    /// Sync the relevant file pieces to disk and compare against expected hash
+    pub fn sync_and_check_hash(&self, expected_piece_hash: &[u8]) -> io::Result<bool> {
+        let mut hasher = sha1::Sha1::new();
+        let mut total_read = 0;
+        for file in self.files.iter() {
+            // Where does the piece start relative to the file
+            let piece_start_offset = self.subpiece_offset(0, file);
+            let file_offset = piece_start_offset + total_read as i64;
+            // we should always have read the files in order so that
+            // total read ensures this offset to be greater than 0
+            assert!(file_offset >= 0);
+            let to_read = if self.index == file.end_piece {
+                // Either the piece ends within this file, then we should read
+                // to that piece offset - how much we've already read
+                // (end_offset is the offset relative to the entire the piece)
+                file.end_offset as usize - total_read
+            } else {
+                // Or the piece continues past this file (or ends exactly at the end of this file),
+                // in that case we read the remainder of the piece up the maximum of the file length
+                (self.avg_piece_size as usize - total_read).min(file.file_handle.len())
+            };
+            // Nothing to read, the file ends at a piece boundary
+            if to_read == 0 {
+                continue;
+            }
+            let file_data = file.file_handle.get();
+            let file_data_start = file_offset as usize;
+            let file_data_end = file_offset as usize + to_read;
+            file.file_handle.sync(file_data_start, file_data_end)?;
+            let relevant_piece_data: &[u8] = &file_data[file_data_start..file_data_end];
+            hasher.update(relevant_piece_data);
+            total_read += to_read;
+        }
+        Ok(hasher.finalize().as_slice() == expected_piece_hash)
     }
 }
 
