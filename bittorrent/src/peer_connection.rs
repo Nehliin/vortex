@@ -5,12 +5,14 @@ use std::{
 };
 
 use bytes::Bytes;
+use rayon::Scope;
 use sha1::Digest;
 use socket2::Socket;
 
 use crate::{
+    file_store::{FileStore, ReadablePieceFileView},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
-    piece_selector::{Piece, PieceSelector, Subpiece, SUBPIECE_SIZE},
+    piece_selector::{CompletedPiece, Piece, PieceSelector, Subpiece, SUBPIECE_SIZE},
     Error, TorrentState,
 };
 
@@ -128,8 +130,7 @@ pub enum DisconnectReason {
     InvalidMessage,
 }
 
-#[derive(Debug)]
-pub struct PeerConnection {
+pub struct PeerConnection<'f_store> {
     pub socket: Socket,
     pub peer_id: PeerId,
     /// This side is choking the peer
@@ -144,7 +145,7 @@ pub struct PeerConnection {
     /// The peer is interested what we have to offer
     pub peer_interested: bool,
     // TODO: do we need this both with queued?
-    pub currently_downloading: Vec<Piece>,
+    pub currently_downloading: Vec<Piece<'f_store>>,
     // Target queue size
     pub desired_queue_size: usize,
     // Currently queued requests that may be inflight
@@ -171,7 +172,7 @@ pub struct PeerConnection {
     pub accept_fast_pieces: Vec<i32>,
 }
 
-impl PeerConnection {
+impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
     pub fn new(socket: Socket, peer_id: PeerId, fast_ext: bool) -> Self {
         PeerConnection {
             socket,
@@ -261,10 +262,21 @@ impl PeerConnection {
         });
     }
 
-    fn request_piece(&mut self, index: i32, piece_selector: &mut PieceSelector) {
+    pub fn request_piece(
+        &mut self,
+        index: i32,
+        piece_selector: &mut PieceSelector,
+        file_store: &'f_store FileStore,
+    ) {
         let length = piece_selector.piece_len(index);
-        self.currently_downloading.push(Piece::new(index, length));
         piece_selector.mark_inflight(index as usize);
+        // SAFETY: we check before that the piece is not already in flight (via mark_inflight)
+        // and is not already completed which means there can't exist any other
+        // writable piece views for this index. The piece is also marked as
+        // inflight right before.
+        let piece_view = unsafe { file_store.writable_piece_view(index).unwrap() };
+        self.currently_downloading
+            .push(Piece::new(index, length, piece_view));
         self.fill_request_queue()
     }
 
@@ -348,7 +360,12 @@ impl PeerConnection {
         self.desired_queue_size - self.queued.len().min(self.desired_queue_size)
     }
 
-    fn on_subpiece(&mut self, m_index: i32, m_begin: i32, data: Bytes) -> Option<Piece> {
+    fn on_subpiece(
+        &mut self,
+        m_index: i32,
+        m_begin: i32,
+        data: Bytes,
+    ) -> Option<ReadablePieceFileView<'f_store>> {
         let position = self
             .currently_downloading
             .iter()
@@ -375,7 +392,7 @@ impl PeerConnection {
                 self.currently_downloading.push(piece);
             } else {
                 log::debug!("[Peer {}] Piece completed", self.peer_id);
-                return Some(piece);
+                return Some(piece.to_readable());
             }
         } else {
             log::error!(
@@ -482,6 +499,9 @@ impl PeerConnection {
         conn_id: usize,
         peer_message: PeerMessage,
         torrent_state: &mut TorrentState,
+        file_store: &'f_store FileStore,
+        torrent_info: &'scope lava_torrent::torrent::v1::Torrent,
+        scope: &Scope<'scope>,
     ) {
         self.outgoing_msgs_buffer.clear();
         self.last_seen = Instant::now();
@@ -504,7 +524,7 @@ impl PeerConnection {
                 if let Some(piece_idx) = torrent_state.piece_selector.next_piece(conn_id) {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
-                    self.request_piece(piece_idx, &mut torrent_state.piece_selector);
+                    self.request_piece(piece_idx, &mut torrent_state.piece_selector, file_store);
                 } else {
                     log::warn!("[Peer: {}] No more pieces available", self.peer_id);
                 }
@@ -604,12 +624,7 @@ impl PeerConnection {
                         );
                         // Mark ourselves as interested
                         self.interested(true);
-                        torrent_state.piece_selector.mark_inflight(index as usize);
-                        self.currently_downloading.push(Piece::new(
-                            index,
-                            torrent_state.piece_selector.piece_len(index),
-                        ));
-                        self.fill_request_queue();
+                        self.request_piece(index, &mut torrent_state.piece_selector, file_store);
                     }
                 }
             }
@@ -730,19 +745,20 @@ impl PeerConnection {
                             {
                                 return None;
                             }
-                            // TODO: no real need to read the entire piece here
-                            let Ok(mut piece_data) = torrent_state.file_store.read_piece(index)
+                            // TODO: cache this
+                            // SAFETY: we've check that this is completed, in that case no other
+                            // writers should exist for the piece
+                            let Ok(readable_piece_view) =
+                                (unsafe { file_store.readable_piece_view(index) })
                             else {
-                                log::error!(
-                                    "[Peer: {}] Piece request ignored/rejected, failed to read piece from store: {subpiece:?}",
-                                    self.peer_id
-                                );
                                 return None;
                             };
-                            // TODO: inefficient, extra alloc her
-                            let mut piece_data = piece_data.split_off(subpiece.offset as usize);
-                            piece_data.truncate(subpiece.size as usize);
-                            Some(piece_data)
+                            // TODO: consider using maybe uninit
+                            let mut subpiece_data =
+                                vec![0; subpiece.size as usize].into_boxed_slice();
+                            readable_piece_view
+                                .read_subpiece(subpiece.offset as usize, &mut subpiece_data);
+                            Some(subpiece_data)
                         } else {
                             log::warn!(
                                 "[Peer: {}] Piece request ignored/rejected, peer can't be unchoked",
@@ -852,15 +868,18 @@ impl PeerConnection {
                     data.len(),
                 );
                 self.update_stats(index, begin, data.len() as u32);
-                if let Some(piece) = self.on_subpiece(index, begin, data) {
-                    if torrent_state.on_piece_completed(piece.index, piece.memory) {
-                        log::info!(
-                            "[Peer: {}] Piece {}/{} completed!",
-                            self.peer_id,
-                            torrent_state.piece_selector.total_completed(),
-                            torrent_state.piece_selector.pieces()
-                        );
-                    }
+                if let Some(readable_piece_view) = self.on_subpiece(index, begin, data) {
+                    let complete_tx = torrent_state.completed_piece_tx.clone();
+                    scope.spawn(move |_| {
+                        let hash = &torrent_info.pieces[readable_piece_view.index as usize];
+                        let hash_check_result = readable_piece_view.sync_and_check_hash(hash);
+                        complete_tx
+                            .send(CompletedPiece {
+                                index: index as usize,
+                                hash_matched: hash_check_result,
+                            })
+                            .unwrap();
+                    });
                 }
             }
         }

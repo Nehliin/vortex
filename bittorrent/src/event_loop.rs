@@ -12,16 +12,19 @@ use io_uring::{
     types::{self, Timespec},
     IoUring,
 };
+use lava_torrent::torrent::v1::Torrent;
+use rayon::Scope;
 use slab::Slab;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
     buf_pool::BufferPool,
     buf_ring::{Bgid, Bid, BufferRing},
+    file_store::FileStore,
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue, UserData},
     peer_connection::{DisconnectReason, OutgoingMsg, PeerConnection},
     peer_protocol::{self, parse_handshake, write_handshake, PeerId, HANDSHAKE_SIZE},
-    piece_selector::{self, Piece, SUBPIECE_SIZE},
+    piece_selector::{self, SUBPIECE_SIZE},
     Error, TorrentState,
 };
 
@@ -143,16 +146,16 @@ fn event_error_handler<Q: SubmissionQueue>(
 
 const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(250_000_000);
 
-pub struct EventLoop {
+pub struct EventLoop<'f_store> {
     events: Slab<EventType>,
     write_pool: BufferPool,
     read_ring: BufferRing,
-    connections: Slab<PeerConnection>,
+    connections: Slab<PeerConnection<'f_store>>,
     peer_provider: Receiver<SocketAddrV4>,
     our_id: PeerId,
 }
 
-impl EventLoop {
+impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
     pub fn new(
         our_id: PeerId,
         events: Slab<EventType>,
@@ -172,11 +175,12 @@ impl EventLoop {
         &mut self,
         mut ring: IoUring,
         mut torrent_state: TorrentState,
-        mut tick: impl FnMut(&Duration, &mut Slab<PeerConnection>, &mut TorrentState),
+        file_store: &'f_store FileStore,
+        torrent_info: &'f_store Torrent,
     ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
         // lambda to be able to catch errors an always unregistering the read ring
-        let mut actual_loop = || {
+        let result = rayon::in_place_scope(|scope| {
             let (submitter, sq, mut cq) = ring.split();
             let mut sq = BackloggedSubmissionQueue::new(sq);
             let mut last_tick = Instant::now();
@@ -206,7 +210,12 @@ impl EventLoop {
 
                 let tick_delta = last_tick.elapsed();
                 if tick_delta > Duration::from_secs(1) {
-                    tick(&tick_delta, &mut self.connections, &mut torrent_state);
+                    tick(
+                        &tick_delta,
+                        &mut self.connections,
+                        file_store,
+                        &mut torrent_state,
+                    );
                     last_tick = Instant::now();
                     // TODO deal with this in the tick itself
                     for (conn_id, connection) in self.connections.iter_mut() {
@@ -243,8 +252,15 @@ impl EventLoop {
                     let user_data = UserData::from_u64(cqe.user_data());
                     let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
 
-                    if let Err(err) = self.event_handler(&mut sq, cqe, read_bid, &mut torrent_state)
-                    {
+                    if let Err(err) = self.event_handler(
+                        &mut sq,
+                        cqe,
+                        read_bid,
+                        &mut torrent_state,
+                        file_store,
+                        torrent_info,
+                        scope,
+                    ) {
                         log::error!("Error handling event: {err}");
                     }
                     // time to return any potential write buffers
@@ -258,13 +274,13 @@ impl EventLoop {
                     }
                 }
                 self.connect_to_new_peers(&mut sq)?;
+                torrent_state.update_torrent_status();
                 if torrent_state.is_complete {
                     log::info!("Torrent complete!");
                     return Ok(());
                 }
             }
-        };
-        let result = actual_loop();
+        });
         self.read_ring.unregister(&ring.submitter())?;
         result
     }
@@ -312,12 +328,16 @@ impl EventLoop {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn event_handler<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
         cqe: Entry,
         read_bid: Option<Bid>,
         torrent_state: &mut TorrentState,
+        file_store: &'f_store FileStore,
+        torrent_info: &'scope Torrent,
+        scope: &Scope<'scope>,
     ) -> io::Result<()> {
         let ret = cqe.result();
         let user_data = UserData::from_u64(cqe.user_data());
@@ -451,17 +471,20 @@ impl EventLoop {
                 // incoming recv cqe
                 let connection = &mut self.connections[connection_idx];
                 connection.stateful_decoder.append_data(remainder);
+                let completed = torrent_state.piece_selector.completed_clone();
                 conn_parse_and_handle_msgs(
                     sq,
                     connection_idx,
                     connection,
                     torrent_state,
+                    file_store,
+                    torrent_info,
                     &mut self.write_pool,
                     &mut self.events,
+                    scope,
                 );
                 // Recv has been complete, move over to multishot, same user data
                 io_utils::recv_multishot(sq, user_data, fd, self.read_ring.bgid());
-                let completed = torrent_state.piece_selector.completed_clone();
                 let message = if completed.all() {
                     peer_protocol::PeerMessage::HaveAll
                 } else if completed.not_any() {
@@ -517,8 +540,11 @@ impl EventLoop {
                     connection_idx,
                     connection,
                     torrent_state,
+                    file_store,
+                    torrent_info,
                     &mut self.write_pool,
                     &mut self.events,
+                    scope,
                 );
             }
             EventType::ConnectionStopped { connection_idx } => {
@@ -539,19 +565,30 @@ impl EventLoop {
     }
 }
 
-fn conn_parse_and_handle_msgs<Q: SubmissionQueue>(
+#[allow(clippy::too_many_arguments)]
+fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope, Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     connection_idx: usize,
-    connection: &mut PeerConnection,
+    connection: &mut PeerConnection<'f_store>,
     torrent_state: &mut TorrentState,
+    file_store: &'f_store FileStore,
+    torrent_info: &'scope Torrent,
     write_pool: &mut BufferPool,
     events: &mut Slab<EventType>,
+    scope: &Scope<'scope>,
 ) {
     let conn_fd = connection.socket.as_raw_fd();
     while let Some(parse_result) = connection.stateful_decoder.next() {
         match parse_result {
             Ok(peer_message) => {
-                connection.handle_message(connection_idx, peer_message, torrent_state);
+                connection.handle_message(
+                    connection_idx,
+                    peer_message,
+                    torrent_state,
+                    file_store,
+                    torrent_info,
+                    scope,
+                );
                 for outgoing in connection.outgoing_msgs_buffer.iter() {
                     // Buffers are returned in the event loop
                     let buffer = write_pool.get_buffer();
@@ -577,9 +614,10 @@ fn conn_parse_and_handle_msgs<Q: SubmissionQueue>(
     }
 }
 
-pub fn tick(
+fn tick<'scope, 'f_store: 'scope>(
     tick_delta: &Duration,
-    connections: &mut Slab<PeerConnection>,
+    connections: &mut Slab<PeerConnection<'scope>>,
+    file_store: &'f_store FileStore,
     torrent_state: &mut TorrentState,
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
@@ -676,16 +714,10 @@ pub fn tick(
                     //   self.num_unchoked += 1;
                     //}
                 }
-                peer.currently_downloading.push(Piece::new(
-                    next_piece,
-                    torrent_state.piece_selector.piece_len(next_piece),
-                ));
+                peer.request_piece(next_piece, &mut torrent_state.piece_selector, file_store);
                 // Remove all subpieces from available bandwidth
                 bandwidth -= (torrent_state.piece_selector.num_subpieces(next_piece) as usize)
                     .min(bandwidth);
-                torrent_state
-                    .piece_selector
-                    .mark_inflight(next_piece as usize);
             } else {
                 break;
             }
