@@ -52,8 +52,7 @@ jobs:
           target: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@just
       - run: cargo fetch --target ${{ matrix.target }}
-      - name: test - no features
-        run: cargo nextest run --workspace
-      - name: test - all features
-        run: cargo nextest run --all-features --workspace
+      - name: test 
+        run: just test

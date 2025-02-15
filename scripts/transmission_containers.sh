@@ -1,42 +1,40 @@
 #!/bin/bash
 
+set -oe
+
 # All credit for this file goes to @mandreyel, creator of cratetorrent.
 # Excellent test setup that I've stolen.
-#
-# This file sets up a test environment with specific details supplied as command
-# line arguments.
-#
-# It creates a metainfo of the given torrent file or directory and starts
-# seeding it in the given Transmission container.
 
-set -e
-
+# Returns the container's IP address in the local Docker network.
+#
+# Arguments:
+# - $1 container name
+function get_container_ip {
+    cont=$1
+    podman inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${cont}"
+}
 
 function print_help {
     echo -e "
-This makes the seed container start seeding the given file (generating its necessary metainfo).
-The seed container must be running.
-USAGE: $1 --path <path> [--seed <seed>] 
+This script starts a Transmission seed container with the specified parameters,
+if it's not already running.
+USAGE: $1 --name NAME
 OPTIONS:
-    -n|--name       The name of the torrent (currently the name of the file).
-    -p|--path       The path of the torrent file or directory to seed. This will
-                    be copied into the container's downloads complete folder.
-    --seed          The Transmission seed container's name. Must be running.
-                    Defaults to 'transmission'.
-    -h|--help       Print this help message.
+    -n|--name   The name to give to the container.
+    -h|--help   Print this help message.
     "
 }
 
 for arg in "$@"; do
     case "${arg}" in
         -n|--name)
-            torrent_name=$2
+            name=$2
         ;;
         -p|--path)
             path=$2
         ;;
-        --seed)
-            seed_container=$2
+        -t|--torrent-name)
+            torrent_name=$2
         ;;
         --h|--help)
             print_help
@@ -46,80 +44,86 @@ for arg in "$@"; do
     shift
 done
 
-if [ -z "${torrent_name}" ]; then
+if [ -z "${name}" ]; then
     echo "Error: --name must be set"
     print_help
     exit 1
 fi
 
-if [ -z "${path}" ]; then
-    echo "Error: --path must be set"
+if [ -z "${torrent_name}" ]; then
+    echo "Error: --torrent-name must be set"
     print_help
     exit 1
 fi
-
-if [ -z "${seed_container}" ]; then
-    echo "Error: --seed must be set"
-    print_help
-    exit 1
-fi
-
-
-################################################################################
-# 1. Verify seed
-################################################################################
-
-# where the necessary seed directories exist
-assets_dir="$(pwd)/assets"
-if [ ! -d "${assets_dir}" ]; then
-    echo "Error: assets directory ${assets_dir} does not exist"
-    exit 2
-fi
-
-# check that the container's directories exist
-tr_seed_dir="${assets_dir}/${seed_container}"
-if [ ! -d "${tr_seed_dir}" ]; then
-    echo "Error: seed directory ${tr_seed_dir} does not exist"
-    exit 3
-fi
-tr_config_dir="${tr_seed_dir}/config"
-tr_downloads_dir="${tr_seed_dir}/downloads"
-tr_watch_dir="${tr_seed_dir}/watch"
-for subdir in {"${tr_config_dir}","${tr_downloads_dir}","${tr_watch_dir}"}; do
-    if [ ! -d "${subdir}" ]; then
-        echo "Error: seed subdirectory ${subdir} does not exist"
-        exit 4
-    fi
-done
-
-# check if the seed is running: if not, abort
-if ! docker inspect --format '{{.State.Running}}' "${seed_container}" &> /dev/null
-then
-    echo "Error: Transmission seed container ${seed_container} is not running"
-    exit 5
-fi
-
-################################################################################
-# 2. Verify file to seed
-################################################################################
 
 if [ ! -f "${path}" ] && [ ! -d "${path}" ]; then
     echo "Error: torrent file does not exist at ${path}"
     exit 6
 fi
 
-################################################################################
-# 3. Create torrent
-################################################################################
+# where the torrent file and metainfo are saved
+assets_dir="$(pwd)/assets"
+if [ -f "${assets_dir}" ]; then
+    echo "Error: file found at assets directory path ${assets_dir} "
+    exit 2
+elif [ ! -d "${assets_dir}" ]; then
+    echo "Creating assets directory ${assets_dir}"
+    mkdir "${assets_dir}"
+fi
 
-# The source to be seeded must be inside the container. For this reason, if it
-# is not already there, we copy it in the torrent downloads complete folder.
-# This should be a cheap even for large files as we're not actually modifying
-# the source so linux should do a copy-on-write here.
+# initialize the directories of the seed, if needed
+#
+# NOTE: the paths given are on the host, not inside the container
+tr_seed_dir="${assets_dir}/${name}"
+if [ ! -d "${tr_seed_dir}" ]; then
+    echo "Creating seed ${name} directory at ${tr_seed_dir}"
+    mkdir "${tr_seed_dir}"
+fi
+tr_config_dir="${tr_seed_dir}/config"
+tr_downloads_dir="${tr_seed_dir}/downloads"
+tr_watch_dir="${tr_seed_dir}/watch"
+# create the subdirectories that we're binding into the container (must exist
+# before bind mounting)
+for subdir in {"${tr_config_dir}","${tr_downloads_dir}","${tr_watch_dir}"}; do
+    if [ ! -d "${subdir}" ]; then
+        echo "Creating seed subdirectory ${subdir}"
+        mkdir "${subdir}"
+    fi
+done
+
 torrent_path="${tr_downloads_dir}/complete/${torrent_name}"
 if [ "${path}" != "${torrent_path}" ]; then
     echo "Copying torrent from source ${path} to seed dir at ${torrent_path}"
+    mkdir -p "${tr_downloads_dir}/complete"
     cp -r "${path}" "${torrent_path}"
+fi
+
+# check if the seed is running: if not, start it
+if ! podman inspect --format '{{.State.Running}}' "${name}" &> /dev/null
+then
+    echo "Starting Transmission seed container ${name} listening on port 51413"
+    podman run \
+        --rm \
+        --name "${name}" \
+        --env PUID=$UID \
+        --env PGID=$UID \
+        --replace \
+        --mount type=bind,src="${tr_config_dir}",dst=/config \
+        --mount type=bind,src="${tr_downloads_dir}",dst=/downloads \
+        --mount type=bind,src="${tr_watch_dir}",dst=/watch \
+        -p 51413:51413 \
+        --detach \
+        linuxserver/transmission
+
+    seed_ip="$(get_container_ip "${name}")"
+    echo "Seed available on local net at IP: ${seed_ip}"
+
+    # wait for seed to come online
+    sleep 5
+
+    echo "Transmission seed ${name} started!"
+else
+    echo "Transmission seed ${name} already running!"
 fi
 
 tr_metainfo_basepath="${tr_watch_dir}/${torrent_name}"
@@ -133,7 +137,7 @@ assets_metainfo_path="${assets_dir}/${torrent_name}.torrent"
 # container.
 if [ -f "${assets_metainfo_path}" ]; then
     # the metainfo in assets is just a symlink so we need to follow it
-    cp --dereference "${assets_metainfo_path}" "${tr_metainfo_path}"
+    sudo cp --dereference "${assets_metainfo_path}" "${tr_metainfo_path}"
 
     # wait for Transmission to pick up the file
     sleep 5
@@ -148,36 +152,30 @@ else
     # It may be possible to solve this by spawning a subshell with a different EUID
     # and execute the `transmission-create` command there, but currently it is not
     # clear how to do this.
-
     echo "Creating torrent metainfo file"
-    docker exec "${seed_container}" transmission-create \
+    podman exec "${name}" transmission-create \
       -o "/watch/${torrent_name}" \
       "/downloads/complete/${torrent_name}"
-
     # change ownership of the metainfo file to the same user whose `UID` and `GID`
     # were given to the seed container
     #
     # TODO: make this work without sudo
     echo "Changing metainfo owner from root to $USER"
-    sudo chown $USER:$USER "${tr_metainfo_basepath}"
-
+    podman unshare chown $USER:$USER "${tr_metainfo_basepath}"
     # rename the torrent file to have the `.torrent` suffix, which will make the
     # Transmission daemon automatically start seeding the torrent
     echo "Adding .torrent suffix to metainfo filename"
-    mv "${tr_metainfo_basepath}" "${tr_metainfo_path}"
-
-    # wait for Transmission to pick up the file
-    sleep 5
+    sudo mv "${tr_metainfo_basepath}" "${tr_metainfo_path}"
 
     # we need to add the `.added` suffix to our path as that's what Transmission does after
     # picking up a new metainfo file
     tr_metainfo_path="${tr_metainfo_path}.added"
+    sudo chmod o+r "${tr_metainfo_path}"
     # sanity check
     if [ ! -f "${tr_metainfo_path}" ]; then
         echo "Error: could not find metainfo ${tr_metainfo_path} after starting torrent"
         exit 7
     fi
-
     # link metainfo file in the transmission watch directory to the root of the
     # assets dir for use by other scrips
     echo "Linking metainfo to assets directory root"
