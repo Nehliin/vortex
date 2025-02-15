@@ -8,7 +8,8 @@ fn basic_seeded_download() {
         .filter_level(log::LevelFilter::Trace)
         .init();
     let torrent =
-        lava_torrent::torrent::v1::Torrent::read_from_file("../assets/test-file-1.torrent").unwrap();
+        lava_torrent::torrent::v1::Torrent::read_from_file("../assets/test-file-1.torrent")
+            .unwrap();
     let our_id = generate_peer_id();
     let torrent = Torrent::new(torrent, our_id);
 
