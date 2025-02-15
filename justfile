@@ -15,7 +15,7 @@ setup-transmission file-name="test-file-1":
     ./scripts/transmission_containers.sh --name {{container-name}} --path assets/{{file-name}} --torrent-name {{file-name}}
 
 test: setup-transmission
-    cargo test
+    cargo nextest run --workspace 
 
 clean:
     sudo rm -rf assets/
