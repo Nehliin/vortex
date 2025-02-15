@@ -2,6 +2,7 @@ use std::{
     io,
     net::{SocketAddrV4, TcpListener},
     os::fd::AsRawFd,
+    path::Path,
     sync::mpsc::{Receiver, Sender},
 };
 
@@ -53,7 +54,11 @@ impl Torrent {
         }
     }
 
-    pub fn start(&self, peer_provider: Receiver<SocketAddrV4>) -> Result<(), Error> {
+    pub fn start(
+        &self,
+        peer_provider: Receiver<SocketAddrV4>,
+        downloads_path: impl AsRef<Path>,
+    ) -> Result<(), Error> {
         // check ulimit
         let mut ring: IoUring = IoUring::builder()
             .setup_single_issuer()
@@ -77,11 +82,7 @@ impl Torrent {
             ring.submission().push(&accept_op).unwrap();
         }
         ring.submission().sync();
-        let file_store = FileStore::new(
-            "/home/popuser/vortex/bittorrent/downloaded/",
-            &self.torrent_info,
-        )
-        .unwrap();
+        let file_store = FileStore::new(downloads_path, &self.torrent_info).unwrap();
         let torrent_state = TorrentState::new(&self.torrent_info);
         let mut event_loop = EventLoop::new(self.our_id, events, peer_provider);
         event_loop.run(ring, torrent_state, &file_store, &self.torrent_info)
