@@ -21,6 +21,7 @@ vortex-bittorrent = { version = "0.1.0", path = "../bittorrent" }
 vortex-dht = { version = "0.1.0", path = "../dht" }
 indicatif = "0.17.3"
 futures = "0.3"
+metrics-exporter-prometheus = "0.16"
 
 [dev-dependencies]
 num-bigint = "0.4.3"

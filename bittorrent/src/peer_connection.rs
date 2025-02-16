@@ -422,7 +422,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
         };
         if self.slow_start {
             self.desired_queue_size += 1;
-            self.desired_queue_size = self.desired_queue_size.clamp(0, 500);
+            self.desired_queue_size = self.desired_queue_size.clamp(0, 600);
         }
         self.throughput += length as u64;
         let request = self.queued.remove(pos).unwrap();
@@ -432,6 +432,23 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
             self.last_received_subpiece = Some(Instant::now());
         }
         self.moving_rtt.add_sample(&rtt);
+    }
+
+    pub fn report_metrics(&self) {
+        let gauge = metrics::gauge!("peer.req_queue_size", "peer_id" => self.peer_id.to_string());
+        gauge.set(self.queued.len() as u32);
+        let gauge = metrics::gauge!("peer.throughput.bytes", "peer_id" => self.peer_id.to_string());
+        gauge.set(self.throughput as u32);
+        let gauge =
+            metrics::gauge!("peer.desired_queue_size", "peer_id" => self.peer_id.to_string());
+        gauge.set(self.desired_queue_size as u32);
+        let gauge =
+            metrics::gauge!("peer.desired_queue_size", "peer_id" => self.peer_id.to_string());
+        gauge.set(self.desired_queue_size as u32);
+        let gauge = metrics::gauge!("peer.currently_downloading_size", "peer_id" => self.peer_id.to_string());
+        gauge.set(self.currently_downloading.len() as u32);
+        let histogram = metrics::histogram!("rtt", "peer_id" => self.peer_id.to_string());
+        histogram.record(self.moving_rtt.mean());
     }
 
     // returns if the supiece actually was marked as a failure

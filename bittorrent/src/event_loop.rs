@@ -654,19 +654,13 @@ fn tick<'scope, 'f_store: 'scope>(
                     3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
                 connection.desired_queue_size = new_queue_capacity as usize;
                 log::debug!("Updated desired queue size: {new_queue_capacity}");
-                connection.desired_queue_size = connection.desired_queue_size.clamp(0, 500);
+                connection.desired_queue_size = connection.desired_queue_size.clamp(0, 600);
             }
             connection.desired_queue_size = connection.desired_queue_size.max(1);
         }
-        log::info!(
-            "[Peer {}, id: {id}]: throughput: {} bytes/s, queue: {}/{}, time between subpieces: {}ms, currently_downloading: {}",
-            connection.peer_id,
-            connection.throughput,
-            connection.queued.len(),
-            connection.desired_queue_size,
-            connection.moving_rtt.mean().as_millis(),
-            connection.currently_downloading.len()
-        );
+
+        connection.report_metrics();
+
         if !connection.peer_choking
             && connection.slow_start
             && connection.throughput > 0
@@ -692,6 +686,8 @@ fn tick<'scope, 'f_store: 'scope>(
             }
         })
         .collect();
+
+    torrent_state.report_metrics();
 
     peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
     for (peer_key, mut bandwidth) in peer_bandwidth {

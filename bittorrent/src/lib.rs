@@ -128,7 +128,7 @@ impl TorrentState {
                 Ok(hash_matched) => {
                     if hash_matched {
                         self.piece_selector.mark_complete(completed_piece.index);
-                        log::info!(
+                        log::debug!(
                             "Piece {}/{} completed!",
                             self.piece_selector.total_completed(),
                             self.piece_selector.pieces()
@@ -156,5 +156,15 @@ impl TorrentState {
 
     pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
+    }
+
+    // TODO: Pass torrent name into these metrics
+    fn report_metrics(&self) {
+        let counter = metrics::counter!("pieces_completed");
+        counter.absolute(self.piece_selector.total_completed() as u64);
+        let gauge = metrics::gauge!("pieces_inflight");
+        gauge.set(self.piece_selector.total_inflight() as u32);
+        let gauge = metrics::gauge!("num_unchoked");
+        gauge.set(self.num_unchoked);
     }
 }

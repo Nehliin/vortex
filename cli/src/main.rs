@@ -5,6 +5,7 @@ use std::{
     time::Instant,
 };
 
+use metrics_exporter_prometheus::PrometheusBuilder;
 use parking_lot::Mutex;
 use vortex_bittorrent::{generate_peer_id, Torrent};
 //use vortex_bittorrent::{PeerListHandle, TorrentManager};
@@ -51,6 +52,7 @@ fn main() {
         .filter_module("vortex_dht", log::LevelFilter::Warn)
         .init();
 
+    
     // TODO Should start dht first
     let torrent_info =
         lava_torrent::torrent::v1::Torrent::read_from_file("tails-amd64-6.11-img.torrent").unwrap();
