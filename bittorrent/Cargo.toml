@@ -1,7 +1,8 @@
 [package]
 name = "vortex-bittorrent"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
+authors = ["Nehliin"]
 description = "An implementation of the bittorrent protocol built on top of io-uring"
 homepage = "https://github.com/Nehliin/vortex"
 repository = "https://github.com/Nehliin/vortex"

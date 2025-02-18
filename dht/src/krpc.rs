@@ -1,7 +1,7 @@
 use std::{cell::RefCell, net::SocketAddr, rc::Rc, time::Duration};
 
 use ahash::AHashMap;
-use rand::Rng;
+use rand::{distr::Alphanumeric, Rng};
 use serde_bytes::ByteBuf;
 use tokio::sync::oneshot;
 use tokio_uring::net::UdpSocket;
@@ -112,8 +112,7 @@ impl KrpcClient {
         // error out early in that case.
         // const MAX_IDS: usize = 36 ^ 2;
         // Probably doesn't need to be Alphanumeric?
-        use rand::distributions::Alphanumeric;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         loop {
             let id = ByteBuf::from([rng.sample(Alphanumeric), rng.sample(Alphanumeric)]);
             if !self.connection_table.exists(&id) {

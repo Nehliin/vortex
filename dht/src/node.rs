@@ -51,9 +51,9 @@ impl NodeId {
     /// Generates a new node id in range [min, max)
     pub fn new_in_range(min: &NodeId, max: &NodeId) -> NodeId {
         let mut delta = max - min;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for delta_byte in delta.0.iter_mut() {
-            *delta_byte = (rng.gen::<f32>() * *delta_byte as f32) as u8;
+            *delta_byte = (rng.random::<f32>() * *delta_byte as f32) as u8;
         }
         &delta + min
     }

@@ -333,7 +333,7 @@ mod tests {
             let view = unsafe { store.readable_piece_view(index as _) }.unwrap();
             let num_subpieces = piece_len / subpiece_size;
             let mut subpiece_indicies: Vec<usize> = (0..num_subpieces).collect();
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             subpiece_indicies.shuffle(&mut rng);
             for subpiece_index in subpiece_indicies {
                 let subpiece_offset = subpiece_index * subpiece_size;
@@ -394,7 +394,7 @@ mod tests {
             let piece = piece.to_vec();
             let num_subpieces = piece.len() / subpiece_size;
             let mut subpiece_indicies: Vec<usize> = (0..num_subpieces).collect();
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             subpiece_indicies.shuffle(&mut rng);
             for subpiece_index in subpiece_indicies {
                 let subpiece_offset = subpiece_index * subpiece_size;
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn basic_single_file_aligned() {
         let data: Vec<u8> = (0..)
-            .map(|_| rand::thread_rng().gen::<u8>())
+            .map(|_| rand::rng().random::<u8>())
             .take(1024)
             .collect();
         let files: HashMap<String, Vec<u8>> =
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn basic_single_file_aligned_unaligned_subpiece() {
         let data: Vec<u8> = (0..)
-            .map(|_| rand::thread_rng().gen::<u8>())
+            .map(|_| rand::rng().random::<u8>())
             .take(1024)
             .collect();
         let files: HashMap<String, Vec<u8>> =
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn single_file_misaligned() {
         let data: Vec<u8> = (0..)
-            .map(|_| rand::thread_rng().gen::<u8>())
+            .map(|_| rand::rng().random::<u8>())
             .take(1354)
             .collect();
         let files: HashMap<String, Vec<u8>> =

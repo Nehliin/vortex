@@ -1,8 +1,8 @@
 [package]
 name = "vortex-dht"
-version = "0.1.0"
-authors = ["Oskar Nehlin"]
-edition = "2021"
+version = "0.1.1"
+authors = ["Nehliin"]
+edition = "2024"
 description = "An implementation of Bittorrents distributed hash table built on top of io-uring"
 homepage = "https://github.com/Nehliin/vortex"
 repository = "https://github.com/Nehliin/vortex"
