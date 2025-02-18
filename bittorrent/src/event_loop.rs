@@ -19,7 +19,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
     buf_pool::BufferPool,
-    buf_ring::{Bgid, Bid, BufferRing},
+    buf_ring::{Bgid, BufferRing},
     file_store::FileStore,
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue, UserData},
     peer_connection::{DisconnectReason, OutgoingMsg, PeerConnection},
@@ -144,6 +144,33 @@ fn event_error_handler<Q: SubmissionQueue>(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IoEvent {
+    user_data: UserData,
+    result: Result<i32, u32>,
+    read_bid: Option<u16>,
+    is_more: bool,
+}
+
+impl From<Entry> for IoEvent {
+    fn from(cqe: Entry) -> Self {
+        let user_data = UserData::from_u64(cqe.user_data());
+        let result = if cqe.result() < 0 {
+            Err((-cqe.result()) as u32)
+        } else {
+            Ok(cqe.result())
+        };
+        let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
+        let is_more = io_uring::cqueue::more(cqe.flags());
+        Self {
+            user_data,
+            result,
+            read_bid,
+            is_more,
+        }
+    }
+}
+
 const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(250_000_000);
 
 pub struct EventLoop<'f_store> {
@@ -249,13 +276,10 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 }
 
                 for cqe in &mut cq {
-                    let user_data = UserData::from_u64(cqe.user_data());
-                    let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
-
+                    let io_event = IoEvent::from(cqe);
                     if let Err(err) = self.event_handler(
                         &mut sq,
-                        cqe,
-                        read_bid,
+                        io_event,
                         &mut torrent_state,
                         file_store,
                         torrent_info,
@@ -264,12 +288,12 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                         log::error!("Error handling event: {err}");
                     }
                     // time to return any potential write buffers
-                    if let Some(write_idx) = user_data.buffer_idx {
+                    if let Some(write_idx) = io_event.user_data.buffer_idx {
                         self.write_pool.return_buffer(write_idx as usize);
                     }
 
                     // Ensure bids are always returned
-                    if let Some(bid) = read_bid {
+                    if let Some(bid) = io_event.read_bid {
                         self.read_ring.return_bid(bid);
                     }
                 }
@@ -328,36 +352,41 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn event_handler<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
-        cqe: Entry,
-        read_bid: Option<Bid>,
+        io_event: IoEvent,
         torrent_state: &mut TorrentState,
         file_store: &'f_store FileStore,
         torrent_info: &'scope Torrent,
         scope: &Scope<'scope>,
     ) -> io::Result<()> {
-        let ret = cqe.result();
-        let user_data = UserData::from_u64(cqe.user_data());
-        if ret < 0 {
-            return event_error_handler(
-                sq,
-                -ret as _,
-                user_data,
-                &mut self.events,
-                torrent_state,
-                &mut self.connections,
-                self.read_ring.bgid(),
-            );
-        }
+        let ret = match io_event.result {
+            Ok(ret) => ret,
+            Err(error_code) => {
+                return event_error_handler(
+                    sq,
+                    error_code,
+                    io_event.user_data,
+                    &mut self.events,
+                    torrent_state,
+                    &mut self.connections,
+                    self.read_ring.bgid(),
+                );
+            }
+        };
         let mut event = EventType::Dummy;
-        std::mem::swap(&mut event, &mut self.events[user_data.event_idx as usize]);
+        std::mem::swap(
+            &mut event,
+            &mut self.events[io_event.user_data.event_idx as usize],
+        );
         match event {
             EventType::Accept => {
                 // The event is reused and not replaced
-                std::mem::swap(&mut event, &mut self.events[user_data.event_idx as usize]);
+                std::mem::swap(
+                    &mut event,
+                    &mut self.events[io_event.user_data.event_idx as usize],
+                );
                 let fd = ret;
                 let socket = unsafe { Socket::from_raw_fd(fd) };
                 if socket.peer_addr()?.is_ipv6() {
@@ -384,11 +413,11 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 let fd = socket.as_raw_fd();
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
-                    &mut self.events[user_data.event_idx as usize],
+                    &mut self.events[io_event.user_data.event_idx as usize],
                     EventType::Write { socket },
                 );
                 debug_assert!(matches!(old, EventType::Dummy));
-                let write_token = user_data.event_idx as usize;
+                let write_token = io_event.user_data.event_idx as usize;
                 let user_data = UserData::new(write_token, Some(buffer.index));
                 let write_op = opcode::Write::new(
                     types::Fd(fd),
@@ -405,11 +434,11 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 log::debug!("Wrote to unestablsihed connection");
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
-                    &mut self.events[user_data.event_idx as usize],
+                    &mut self.events[io_event.user_data.event_idx as usize],
                     EventType::Recv { socket },
                 );
                 debug_assert!(matches!(old, EventType::Dummy));
-                let read_token = user_data.event_idx as usize;
+                let read_token = io_event.user_data.event_idx as usize;
                 let user_data = UserData::new(read_token, None);
                 // Multishot isn't used here to simplify error handling
                 // when the read is invalid or otherwise doesn't lead to
@@ -425,14 +454,14 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
             EventType::ConnectedWrite { connection_idx: _ } => {
                 // neither replaced nor modified
                 // TODO: add to metrics
-                self.events.remove(user_data.event_idx as _);
+                self.events.remove(io_event.user_data.event_idx as _);
             }
             EventType::Recv { socket } => {
                 let fd = socket.as_raw_fd();
                 let len = ret as usize;
                 if len == 0 {
                     log::debug!("No more data when expecting handshake");
-                    self.events.remove(user_data.event_idx as _);
+                    self.events.remove(io_event.user_data.event_idx as _);
                     return Ok(());
                 }
                 // TODO: This could happen due to networks splitting the handshake up
@@ -440,11 +469,14 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 // small (well below MTU) I suspect that to be rare
                 if len < HANDSHAKE_SIZE {
                     log::error!("Didn't receive enough data to parse handshake");
-                    self.events.remove(user_data.event_idx as _);
+                    self.events.remove(io_event.user_data.event_idx as _);
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 // We always have a buffer associated
-                let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
+                let buffer = io_event
+                    .read_bid
+                    .map(|bid| self.read_ring.get(bid))
+                    .unwrap();
                 let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
                 let parsed_handshake =
@@ -460,7 +492,7 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 // We are now connected!
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
-                    &mut self.events[user_data.event_idx as usize],
+                    &mut self.events[io_event.user_data.event_idx as usize],
                     EventType::ConnectedRecv { connection_idx },
                 );
                 debug_assert!(matches!(old, EventType::Dummy));
@@ -484,7 +516,7 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                     scope,
                 );
                 // Recv has been complete, move over to multishot, same user data
-                io_utils::recv_multishot(sq, user_data, fd, self.read_ring.bgid());
+                io_utils::recv_multishot(sq, io_event.user_data, fd, self.read_ring.bgid());
                 let message = if completed.all() {
                     peer_protocol::PeerMessage::HaveAll
                 } else if completed.not_any() {
@@ -512,7 +544,10 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
             }
             EventType::ConnectedRecv { connection_idx } => {
                 // The event is reused and not replaced
-                std::mem::swap(&mut event, &mut self.events[user_data.event_idx as usize]);
+                std::mem::swap(
+                    &mut event,
+                    &mut self.events[io_event.user_data.event_idx as usize],
+                );
                 let connection = &mut self.connections[connection_idx];
                 let len = ret as usize;
                 if len == 0 {
@@ -520,19 +555,21 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                         "[PeerId: {}] No more data, mark as pending disconnect",
                         connection.peer_id
                     );
-                    self.events.remove(user_data.event_idx as _);
+                    self.events.remove(io_event.user_data.event_idx as _);
                     connection.pending_disconnect = Some(DisconnectReason::ClosedConnection);
                     return Ok(());
                 }
-                let is_more = io_uring::cqueue::more(cqe.flags());
-                if !is_more {
+                if !io_event.is_more {
                     let fd = connection.socket.as_raw_fd();
                     // restart the operation
-                    io_utils::recv_multishot(sq, user_data, fd, self.read_ring.bgid());
+                    io_utils::recv_multishot(sq, io_event.user_data, fd, self.read_ring.bgid());
                 }
 
                 // We always have a buffer associated
-                let buffer = read_bid.map(|bid| self.read_ring.get(bid)).unwrap();
+                let buffer = io_event
+                    .read_bid
+                    .map(|bid| self.read_ring.get(bid))
+                    .unwrap();
                 let buffer = &buffer[..len];
                 connection.stateful_decoder.append_data(buffer);
                 conn_parse_and_handle_msgs(
