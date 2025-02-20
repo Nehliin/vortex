@@ -101,7 +101,7 @@ impl Bucket {
                 // Assert it's covered by at least one bucket
                 debug_assert!(
                     node.as_ref()
-                        .map_or(true, |node| self.min <= node.id && node.id < self.max)
+                        .is_none_or(|node| self.min <= node.id && node.id < self.max)
                 )
             }
         }
