@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     net::SocketAddr,
     rc::Rc,
 };
@@ -10,7 +10,7 @@ use bytes::Bytes;
 use tokio_uring::net::UdpSocket;
 
 use crate::{
-    utp_packet::{Packet, PacketHeader, PacketType, HEADER_SIZE},
+    utp_packet::{HEADER_SIZE, Packet, PacketHeader, PacketType},
     utp_stream::{UtpStream, WeakUtpStream},
 };
 
@@ -179,7 +179,8 @@ async fn process_incomming(
                                 let entry = connections.entry(stream_key);
                                 match entry {
                                     Entry::Occupied(_) => {
-                                        log::warn!("Connection with id: {} already exists. Dropping connection",
+                                        log::warn!(
+                                            "Connection with id: {} already exists. Dropping connection",
                                             packet_header.conn_id + 1
                                         );
                                         return buf;

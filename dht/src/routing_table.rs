@@ -1,8 +1,8 @@
 use serde_derive::{Deserialize, Serialize};
-use slotmap::{new_key_type, DenseSlotMap, Key};
+use slotmap::{DenseSlotMap, Key, new_key_type};
 use time::OffsetDateTime;
 
-use crate::node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO};
+use crate::node::{ID_MAX, ID_ZERO, Node, NodeId, NodeStatus};
 
 pub const BUCKET_SIZE: usize = 8;
 
@@ -99,9 +99,10 @@ impl Bucket {
                 i += 1;
             } else {
                 // Assert it's covered by at least one bucket
-                debug_assert!(node
-                    .as_ref()
-                    .map_or(true, |node| self.min <= node.id && node.id < self.max))
+                debug_assert!(
+                    node.as_ref()
+                        .map_or(true, |node| self.min <= node.id && node.id < self.max)
+                )
             }
         }
         bucket

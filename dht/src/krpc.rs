@@ -1,7 +1,7 @@
 use std::{cell::RefCell, net::SocketAddr, rc::Rc, time::Duration};
 
 use ahash::AHashMap;
-use rand::{distr::Alphanumeric, Rng};
+use rand::{Rng, distr::Alphanumeric};
 use serde_bytes::ByteBuf;
 use tokio::sync::oneshot;
 use tokio_uring::net::UdpSocket;
@@ -235,7 +235,10 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
                         if let Some(response_sender) = connection_table.remove_rpc(&packet.t) {
                             let _ = response_sender.send(Ok(response));
                         } else {
-                            log::warn!("Unknown KRPC response recived, transaction id: {:?} not found in connection_table", packet.t);
+                            log::warn!(
+                                "Unknown KRPC response recived, transaction id: {:?} not found in connection_table",
+                                packet.t
+                            );
                         }
                     } else {
                         log::warn!("Invalid KRPC message received, missing response");
@@ -307,7 +310,10 @@ pub async fn setup_krpc(bind_addr: SocketAddr) -> Result<(KrpcClient, KrpcServer
                         if let Some(response_sender) = connection_table.remove_rpc(&packet.t) {
                             let _ = response_sender.send(Err(error));
                         } else {
-                            log::warn!("Unknown KRPC response recived, transaction id: {:?} not found in connection_table", packet.t);
+                            log::warn!(
+                                "Unknown KRPC response recived, transaction id: {:?} not found in connection_table",
+                                packet.t
+                            );
                         }
                     } else {
                         log::warn!("Invalid KRPC message received, missing error");

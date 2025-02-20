@@ -285,7 +285,7 @@ mod tests {
     use std::collections::HashMap;
 
     use lava_torrent::torrent::v1::TorrentBuilder;
-    use rand::{seq::SliceRandom, Rng};
+    use rand::{Rng, seq::SliceRandom};
     use sha1::{Digest, Sha1};
 
     use super::*;
