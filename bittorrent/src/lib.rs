@@ -23,9 +23,10 @@ mod buf_ring;
 mod event_loop;
 mod file_store;
 mod io_utils;
-mod peer_connection;
-mod peer_protocol;
+mod peer_comm;
 mod piece_selector;
+
+use peer_comm::*;
 
 #[cfg(feature = "fuzzing")]
 pub use peer_protocol::*;
