@@ -129,7 +129,12 @@ impl PieceSelector {
         let entry = self.peer_pieces.entry(connection_id);
         entry
             .and_modify(|pieces| pieces.set(piece_index, true))
-            .or_insert_with(|| (0..self.completed_pieces.len()).map(|_| false).collect());
+            .or_insert_with(|| {
+                let mut all_pieces: BitBox<u8, Msb0> =
+                    (0..self.completed_pieces.len()).map(|_| false).collect();
+                all_pieces.set(piece_index, true);
+                all_pieces
+            });
     }
 
     pub fn do_peer_have_piece(&mut self, connection_id: usize, piece_index: usize) -> bool {

@@ -481,19 +481,24 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 // Expect this to be the handshake response
                 let parsed_handshake =
                     parse_handshake(torrent_state.info_hash, handshake_data).unwrap();
+                let entry = self.connections.vacant_entry();
+                let conn_id = entry.key();
                 let peer_connection = PeerConnection::new(
                     socket,
                     parsed_handshake.peer_id,
+                    conn_id,
                     parsed_handshake.fast_ext,
                 );
                 let id = peer_connection.peer_id;
-                let connection_idx = self.connections.insert(peer_connection);
-                log::info!("Finished handshake! [{connection_idx}]: {id}");
+                entry.insert(peer_connection);
+                log::info!("Finished handshake! [{conn_id}]: {id}");
                 // We are now connected!
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
                     &mut self.events[io_event.user_data.event_idx as usize],
-                    EventType::ConnectedRecv { connection_idx },
+                    EventType::ConnectedRecv {
+                        connection_idx: conn_id,
+                    },
                 );
                 debug_assert!(matches!(old, EventType::Dummy));
 
@@ -501,12 +506,11 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 // than just the handshake so need to handle that here
                 // since the read_buffer will be overwritten by the next
                 // incoming recv cqe
-                let connection = &mut self.connections[connection_idx];
+                let connection = &mut self.connections[conn_id];
                 connection.stateful_decoder.append_data(remainder);
                 let completed = torrent_state.piece_selector.completed_clone();
                 conn_parse_and_handle_msgs(
                     sq,
-                    connection_idx,
                     connection,
                     torrent_state,
                     file_store,
@@ -533,7 +537,7 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 bitfield_msg.message.encode(buffer.inner);
                 let size = bitfield_msg.message.encoded_size();
                 io_utils::write_to_connection(
-                    connection_idx,
+                    conn_id,
                     fd,
                     &mut self.events,
                     sq,
@@ -574,7 +578,6 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 connection.stateful_decoder.append_data(buffer);
                 conn_parse_and_handle_msgs(
                     sq,
-                    connection_idx,
                     connection,
                     torrent_state,
                     file_store,
@@ -605,7 +608,6 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
 #[allow(clippy::too_many_arguments)]
 fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope, Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
-    connection_idx: usize,
     connection: &mut PeerConnection<'f_store>,
     torrent_state: &mut TorrentState,
     file_store: &'f_store FileStore,
@@ -619,7 +621,6 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope, Q: SubmissionQueue>(
         match parse_result {
             Ok(peer_message) => {
                 connection.handle_message(
-                    connection_idx,
                     peer_message,
                     torrent_state,
                     file_store,
@@ -632,7 +633,7 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope, Q: SubmissionQueue>(
                     outgoing.message.encode(buffer.inner);
                     let size = outgoing.message.encoded_size();
                     io_utils::write_to_connection(
-                        connection_idx,
+                        connection.conn_id,
                         conn_fd,
                         events,
                         sq,
@@ -643,7 +644,7 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope, Q: SubmissionQueue>(
                 }
             }
             Err(err) => {
-                log::error!("Failed {connection_idx} decoding message: {err}");
+                log::error!("Failed {} decoding message: {err}", connection.conn_id);
                 connection.pending_disconnect = Some(DisconnectReason::InvalidMessage);
                 break;
             }

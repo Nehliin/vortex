@@ -132,6 +132,7 @@ pub enum DisconnectReason {
 
 pub struct PeerConnection<'f_store> {
     pub socket: Socket,
+    pub conn_id: usize,
     pub peer_id: PeerId,
     /// This side is choking the peer
     pub is_choking: bool,
@@ -173,9 +174,10 @@ pub struct PeerConnection<'f_store> {
 }
 
 impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
-    pub fn new(socket: Socket, peer_id: PeerId, fast_ext: bool) -> Self {
+    pub fn new(socket: Socket, peer_id: PeerId, conn_id: usize, fast_ext: bool) -> Self {
         PeerConnection {
             socket,
+            conn_id,
             peer_id,
             is_choking: true,
             is_interested: false,
@@ -244,6 +246,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
     }
 
     fn interested(&mut self, ordered: bool) {
+        // Consider requesting pieces here if we are unchoked
+        // this might happen after an unchoke request
         self.is_interested = true;
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Interested,
@@ -496,7 +500,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
 
     pub fn handle_message(
         &mut self,
-        conn_id: usize,
         peer_message: PeerMessage,
         torrent_state: &mut TorrentState,
         file_store: &'f_store FileStore,
@@ -521,7 +524,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                 //if !self.currently_downloading.is_empty() {
                 //   return Ok(&self.outgoing_msgs_buffer);
                 //}
-                if let Some(piece_idx) = torrent_state.piece_selector.next_piece(conn_id) {
+                if let Some(piece_idx) = torrent_state.piece_selector.next_piece(self.conn_id) {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
                     self.request_piece(piece_idx, &mut torrent_state.piece_selector, file_store);
@@ -540,7 +543,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                         for index in 0..torrent_state.num_pieces() {
                             if !torrent_state
                                 .piece_selector
-                                .do_peer_have_piece(conn_id, index)
+                                .do_peer_have_piece(self.conn_id, index)
                             {
                                 let index = index as i32;
                                 if !self.accept_fast_pieces.contains(&index) {
@@ -597,9 +600,16 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                     "[Peer: {}] Peer have piece with index: {index}",
                     self.peer_id
                 );
+                let index = index as usize;
+                let had_before = torrent_state
+                    .piece_selector
+                    .do_peer_have_piece(self.conn_id, index);
                 torrent_state
                     .piece_selector
-                    .set_peer_piece(conn_id, index as usize);
+                    .set_peer_piece(self.conn_id, index);
+                if !had_before && !torrent_state.piece_selector.has_completed(index) {
+                    self.interested(false);
+                }
             }
             PeerMessage::AllowedFast { index } => {
                 if !self.fast_ext {
@@ -616,7 +626,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                         && !torrent_state.piece_selector.is_inflight(index as usize)
                         && torrent_state
                             .piece_selector
-                            .do_peer_have_piece(conn_id, index as usize)
+                            .do_peer_have_piece(self.conn_id, index as usize)
                     {
                         log::info!(
                             "[PeerId: {}] Requesting new piece {index} via Allowed fast set!",
@@ -635,8 +645,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                     ));
                     return;
                 }
-                if torrent_state.piece_selector.bitfield_received(conn_id) {
-                    log::error!(
+                if torrent_state.piece_selector.bitfield_received(self.conn_id) {
+                    log::warn!(
                         "[PeerId: {}] (HaveAll) Bitfield already received",
                         self.peer_id
                     );
@@ -646,7 +656,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                 let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
                 torrent_state
                     .piece_selector
-                    .update_peer_pieces(conn_id, bitfield.into_boxed_bitslice());
+                    .update_peer_pieces(self.conn_id, bitfield.into_boxed_bitslice());
                 // Mark ourselves as interested
                 self.interested(true);
             }
@@ -657,8 +667,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                     ));
                     return;
                 }
-                if torrent_state.piece_selector.bitfield_received(conn_id) {
-                    log::error!(
+                if torrent_state.piece_selector.bitfield_received(self.conn_id) {
+                    log::warn!(
                         "[PeerId: {}] (HaveNone) Bitfield already received",
                         self.peer_id
                     );
@@ -668,11 +678,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                 let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
                 torrent_state
                     .piece_selector
-                    .update_peer_pieces(conn_id, bitfield.into_boxed_bitslice());
+                    .update_peer_pieces(self.conn_id, bitfield.into_boxed_bitslice());
             }
             PeerMessage::Bitfield(mut field) => {
-                if torrent_state.piece_selector.bitfield_received(conn_id) && self.fast_ext {
-                    log::error!("[PeerId: {}] Bitfield already received", self.peer_id);
+                if torrent_state.piece_selector.bitfield_received(self.conn_id) && self.fast_ext {
+                    log::warn!("[PeerId: {}] Bitfield already received", self.peer_id);
                 }
                 if torrent_state.num_pieces() != field.len() {
                     if field.len() < torrent_state.num_pieces() {
@@ -698,7 +708,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                 log::info!("[Peer: {}] Bifield received", self.peer_id);
                 torrent_state
                     .piece_selector
-                    .update_peer_pieces(conn_id, field.into_boxed_bitslice());
+                    .update_peer_pieces(self.conn_id, field.into_boxed_bitslice());
                 // Mark ourselves as interested
                 self.interested(true);
             }
