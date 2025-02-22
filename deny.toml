@@ -16,7 +16,9 @@ skip = [
     { name = "windows-sys", version = "*"},
     { name = "thiserror-impl" },
     { name = "thiserror" },
-    {name = "smallvec", version = "2.0.0-alpha.10"}
+    { name = "smallvec", version = "2.0.0-alpha.10" },
+    { name = "getrandom", version = "*" },
+    { name = "zerocopy", version = "*" }
 ]
 # Going to be removed regardless
 skip-tree = [{name = "tokio-uring"}]
