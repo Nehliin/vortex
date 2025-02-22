@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "cli",
     "utp-socket",
@@ -10,12 +10,12 @@ members = [
 [workspace.dependencies]
 tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
 tokio = { version = "1.43" }
-bytes = "1.9"
+bytes = "1.10"
 anyhow = "1.0"
 ahash = "0.8"
 log = "0.4"
 parking_lot = "0.12"
-rand = "0.8"
+rand = "0.9"
 env_logger = "0.11"
 lava_torrent = "0.11"
 thiserror = "2"

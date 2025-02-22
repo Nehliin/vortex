@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 
 use crate::node::{Node, NodeId, NodeStatus};
 
-use super::{error::KrpcError, Rpc};
+use super::{Rpc, error::KrpcError};
 // TODO try to avoid allocations for ids
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]

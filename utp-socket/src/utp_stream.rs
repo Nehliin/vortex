@@ -8,12 +8,12 @@ use std::{
 };
 
 use bytes::Bytes;
-use tokio::sync::{oneshot::Receiver, Notify};
+use tokio::sync::{Notify, oneshot::Receiver};
 use tokio_uring::net::UdpSocket;
 
 use crate::{
     reorder_buffer::ReorderBuffer,
-    utp_packet::{get_microseconds, Packet, PacketHeader, PacketType, HEADER_SIZE},
+    utp_packet::{HEADER_SIZE, Packet, PacketHeader, PacketType, get_microseconds},
 };
 
 #[derive(Debug)]

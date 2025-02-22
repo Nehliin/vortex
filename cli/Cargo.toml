@@ -1,8 +1,8 @@
 [package]
 name = "vortex-cli"
 version = "0.1.0"
-authors = ["Oskar Nehlin"]
-edition = "2021"
+authors = ["Nehliin"]
+edition = "2024"
 description = "A cli for downloading torrents using the bittorrent protocol(s). Built on top of io-uring"
 homepage = "https://github.com/Nehliin/vortex"
 repository = "https://github.com/Nehliin/vortex"
@@ -17,8 +17,8 @@ lava_torrent = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "macros"] }
 log = { workspace = true }
 env_logger = { workspace = true }
-vortex-bittorrent = { version = "0.1.0", path = "../bittorrent" }
-vortex-dht = { version = "0.1.0", path = "../dht" }
+vortex-bittorrent = { path = "../bittorrent" }
+vortex-dht = { path = "../dht" }
 indicatif = "0.17.3"
 futures = "0.3"
 

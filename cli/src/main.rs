@@ -1,12 +1,12 @@
 use std::{
     net::{SocketAddr, SocketAddrV4},
     path::Path,
-    sync::{mpsc::Sender, Arc},
+    sync::{Arc, mpsc::Sender},
     time::Instant,
 };
 
 use parking_lot::Mutex;
-use vortex_bittorrent::{generate_peer_id, Torrent};
+use vortex_bittorrent::{Torrent, generate_peer_id};
 //use vortex_bittorrent::{PeerListHandle, TorrentManager};
 use vortex_dht::PeerProvider;
 

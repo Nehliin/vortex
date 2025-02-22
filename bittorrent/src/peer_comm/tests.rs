@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::PathBuf};
 use lava_torrent::torrent::v1::{Torrent, TorrentBuilder};
 use socket2::{Domain, Protocol, Socket, Type};
 
-use crate::{file_store::FileStore, generate_peer_id, piece_selector::SUBPIECE_SIZE, TorrentState};
+use crate::{TorrentState, file_store::FileStore, generate_peer_id, piece_selector::SUBPIECE_SIZE};
 
 use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};
 
@@ -96,9 +96,11 @@ fn fast_ext_have_all() {
         assert!(a.is_interested);
         assert!(a.pending_disconnect.is_none());
         for piece_id in 0..torrent_info.pieces.len() {
-            assert!(torrent_state
-                .piece_selector
-                .do_peer_have_piece(a.conn_id, piece_id));
+            assert!(
+                torrent_state
+                    .piece_selector
+                    .do_peer_have_piece(a.conn_id, piece_id)
+            );
         }
 
         // Peers that do not state they support fast_ext are disconnected
@@ -129,9 +131,11 @@ fn fast_ext_have_none() {
         assert!(torrent_state.piece_selector.bitfield_received(a.conn_id));
         assert!(a.pending_disconnect.is_none());
         for piece_id in 0..torrent_info.pieces.len() {
-            assert!(!torrent_state
-                .piece_selector
-                .do_peer_have_piece(a.conn_id, piece_id));
+            assert!(
+                !torrent_state
+                    .piece_selector
+                    .do_peer_have_piece(a.conn_id, piece_id)
+            );
         }
 
         // Peers that do not state they support fast_ext are disconnected
@@ -166,13 +170,17 @@ fn have() {
         assert!(a.is_interested);
         for piece_id in 0..torrent_info.pieces.len() {
             if piece_id == 12 {
-                assert!(torrent_state
-                    .piece_selector
-                    .do_peer_have_piece(a.conn_id, piece_id));
+                assert!(
+                    torrent_state
+                        .piece_selector
+                        .do_peer_have_piece(a.conn_id, piece_id)
+                );
             } else {
-                assert!(!torrent_state
-                    .piece_selector
-                    .do_peer_have_piece(a.conn_id, piece_id));
+                assert!(
+                    !torrent_state
+                        .piece_selector
+                        .do_peer_have_piece(a.conn_id, piece_id)
+                );
             }
         }
     });
@@ -200,13 +208,17 @@ fn have_without_intrest() {
         assert!(!a.is_interested);
         for piece_id in 0..torrent_info.pieces.len() {
             if piece_id == 12 {
-                assert!(torrent_state
-                    .piece_selector
-                    .do_peer_have_piece(a.conn_id, piece_id));
+                assert!(
+                    torrent_state
+                        .piece_selector
+                        .do_peer_have_piece(a.conn_id, piece_id)
+                );
             } else {
-                assert!(!torrent_state
-                    .piece_selector
-                    .do_peer_have_piece(a.conn_id, piece_id));
+                assert!(
+                    !torrent_state
+                        .piece_selector
+                        .do_peer_have_piece(a.conn_id, piece_id)
+                );
             }
         }
     });
