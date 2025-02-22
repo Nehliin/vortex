@@ -1,7 +1,7 @@
 use core::panic;
 use std::{io, ptr, sync::atomic::AtomicU16};
 
-use io_uring::{types, Submitter};
+use io_uring::{Submitter, types};
 
 /// An anonymous region of memory mapped using `mmap(2)`, not backed by a file
 /// but that is guaranteed to be page-aligned and zero-filled.
@@ -108,9 +108,12 @@ impl BufferRing {
                 Some(libc::EINVAL) => {
                     // using buf_ring requires kernel 5.19 or greater.
                     return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("buf_ring.register returned {}, most likely indicating this kernel is not 5.19+", e),
-                            ));
+                        io::ErrorKind::Other,
+                        format!(
+                            "buf_ring.register returned {}, most likely indicating this kernel is not 5.19+",
+                            e
+                        ),
+                    ));
                 }
                 Some(libc::EEXIST) => {
                     // Registering a duplicate bgid is not allowed. There is an `unregister`
@@ -118,12 +121,12 @@ impl BufferRing {
                     // are no outstanding operations that will still return a buffer from that
                     // one.
                     return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!(
-                                "buf_ring.register returned `{}`, indicating the attempted buffer group id {} was already registered",
-                            e,
-                            self.bgid),
-                        ));
+                        io::ErrorKind::Other,
+                        format!(
+                            "buf_ring.register returned `{}`, indicating the attempted buffer group id {} was already registered",
+                            e, self.bgid
+                        ),
+                    ));
                 }
                 _ => {
                     return Err(io::Error::new(

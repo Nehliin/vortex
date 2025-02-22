@@ -9,9 +9,8 @@ use std::{
 use event_loop::{EventLoop, EventType};
 use file_store::FileStore;
 use io_uring::{
-    opcode,
+    IoUring, opcode,
     types::{self},
-    IoUring,
 };
 use io_utils::UserData;
 use piece_selector::{CompletedPiece, PieceSelector};
@@ -31,8 +30,8 @@ use peer_comm::*;
 #[cfg(feature = "fuzzing")]
 pub use peer_protocol::*;
 
-pub use peer_protocol::generate_peer_id;
 pub use peer_protocol::PeerId;
+pub use peer_protocol::generate_peer_id;
 
 #[derive(Error, Debug)]
 pub enum Error {

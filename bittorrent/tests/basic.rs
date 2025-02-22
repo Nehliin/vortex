@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use vortex_bittorrent::{generate_peer_id, Torrent};
+use vortex_bittorrent::{Torrent, generate_peer_id};
 
 #[test]
 fn basic_seeded_download() {

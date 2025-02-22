@@ -1,7 +1,7 @@
-use serde::{de::Visitor, ser::SerializeSeq, Deserializer, Serializer};
+use serde::{Deserializer, Serializer, de::Visitor, ser::SerializeSeq};
 use serde_bytes::ByteBuf;
 
-use super::{protocol::KrpcPacket, Rpc};
+use super::{Rpc, protocol::KrpcPacket};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

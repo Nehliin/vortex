@@ -9,8 +9,9 @@ use std::{
 use anyhow::Context;
 use futures::future::join_all;
 use krpc::{
+    KrpcClient, KrpcServer,
     protocol::{FindNodesResponse, GetPeers, GetPeersResponseBody, Ping},
-    setup_krpc, KrpcClient, KrpcServer,
+    setup_krpc,
 };
 use sha1::{Digest, Sha1};
 use slotmap::Key;
@@ -19,9 +20,9 @@ use token_store::TokenStore;
 use tokio::sync::Notify;
 
 use crate::{
-    krpc::protocol::{serialize_compact_peers, AnnouncePeer, Answer, FindNodes, Query},
-    node::{Node, NodeId, NodeStatus, ID_MAX, ID_ZERO},
-    routing_table::{BucketId, RoutingTable, BUCKET_SIZE},
+    krpc::protocol::{AnnouncePeer, Answer, FindNodes, Query, serialize_compact_peers},
+    node::{ID_MAX, ID_ZERO, Node, NodeId, NodeStatus},
+    routing_table::{BUCKET_SIZE, BucketId, RoutingTable},
 };
 
 mod krpc;

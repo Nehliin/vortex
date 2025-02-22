@@ -10,10 +10,10 @@ use sha1::Digest;
 use socket2::Socket;
 
 use crate::{
+    Error, TorrentState,
     file_store::{FileStore, ReadablePieceFileView},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
-    piece_selector::{CompletedPiece, Piece, PieceSelector, Subpiece, SUBPIECE_SIZE},
-    Error, TorrentState,
+    piece_selector::{CompletedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece},
 };
 
 // Taken from
@@ -833,7 +833,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                 begin,
                 length,
             } => {
-                log::trace!("[Peer: {}] Received cancel request, index: {index}, begin: {begin}, length: {length}", self.peer_id);
+                log::trace!(
+                    "[Peer: {}] Received cancel request, index: {index}, begin: {begin}, length: {length}",
+                    self.peer_id
+                );
                 // if we are talking to a fast_ext peer we need to respond with something here,
                 // either reject or a piece
                 if self.fast_ext {

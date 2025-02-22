@@ -7,10 +7,10 @@ use std::{
 };
 
 use io_uring::{
+    IoUring,
     cqueue::Entry,
     opcode,
     types::{self, Timespec},
-    IoUring,
 };
 use lava_torrent::torrent::v1::Torrent;
 use rayon::Scope;
@@ -18,14 +18,14 @@ use slab::Slab;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
+    Error, TorrentState,
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
     file_store::FileStore,
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue, UserData},
     peer_connection::{DisconnectReason, OutgoingMsg, PeerConnection},
-    peer_protocol::{self, parse_handshake, write_handshake, PeerId, HANDSHAKE_SIZE},
+    peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
     piece_selector::{self, SUBPIECE_SIZE},
-    Error, TorrentState,
 };
 
 const HANDSHAKE_TIMEOUT_SECS: u64 = 10;

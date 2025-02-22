@@ -1,10 +1,9 @@
 use std::{collections::VecDeque, io, os::fd::RawFd, ptr::null_mut};
 
 use io_uring::{
-    opcode,
+    Submitter, opcode,
     squeue::PushError,
     types::{self, CancelBuilder, Timespec},
-    Submitter,
 };
 use slab::Slab;
 
@@ -36,7 +35,7 @@ impl SubmissionQueue for io_uring::SubmissionQueue<'_> {
     }
 
     unsafe fn push(&mut self, entry: &io_uring::squeue::Entry) -> Result<(), PushError> {
-        self.push(entry)
+        unsafe { self.push(entry) }
     }
 }
 
