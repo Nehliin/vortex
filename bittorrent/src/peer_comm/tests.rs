@@ -1,84 +1,15 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::time::Duration;
 
-use lava_torrent::torrent::v1::{Torrent, TorrentBuilder};
-use socket2::{Domain, Protocol, Socket, Type};
+use slab::Slab;
 
-use crate::{TorrentState, file_store::FileStore, generate_peer_id, piece_selector::SUBPIECE_SIZE};
+use crate::{
+    event_loop::tick,
+    peer_connection::OutgoingMsg,
+    piece_selector::SUBPIECE_SIZE,
+    test_utils::{generate_peer, setup_test},
+};
 
-use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};
-
-fn generate_peer<'a>(fast_ext: bool, conn_id: usize) -> PeerConnection<'a> {
-    let socket_a = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-    PeerConnection::new(socket_a, generate_peer_id(), conn_id, fast_ext)
-}
-
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new(path: &str) -> Self {
-        let path = format!("/tmp/{path}");
-        std::fs::create_dir_all(&path).unwrap();
-        let path: PathBuf = path.into();
-        Self {
-            path: std::fs::canonicalize(path).unwrap(),
-        }
-    }
-
-    fn add_file(&self, file_path: &str, data: &[u8]) {
-        let file_path = self.path.as_path().join(file_path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(file_path, data).unwrap();
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.path).unwrap();
-    }
-}
-
-fn setup_torrent(
-    torrent_name: &str,
-    piece_len: usize,
-    file_data: HashMap<String, Vec<u8>>,
-) -> (FileStore, Torrent) {
-    let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
-    let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
-    file_data.iter().for_each(|(path, data)| {
-        torrent_tmp_dir.add_file(path, data);
-    });
-
-    let torrent_info = TorrentBuilder::new(&torrent_tmp_dir.path, piece_len as i64)
-        .set_name(torrent_name.to_string())
-        .build()
-        .unwrap();
-
-    let download_tmp_dir_path = download_tmp_dir.path.clone();
-    let file_store = FileStore::new(&download_tmp_dir_path, &torrent_info).unwrap();
-    (file_store, torrent_info)
-}
-
-fn setup_test() -> (FileStore, Torrent, TorrentState) {
-    let files: HashMap<String, Vec<u8>> = [
-        ("f1.txt".to_owned(), vec![1_u8; 64]),
-        ("f2.txt".to_owned(), vec![2_u8; 100]),
-        ("f3.txt".to_owned(), vec![3_u8; SUBPIECE_SIZE as usize * 16]),
-    ]
-    .into_iter()
-    .collect();
-    let (file_store, torrent_info) = setup_torrent(
-        &format!("{}", rand::random::<u16>()),
-        SUBPIECE_SIZE as usize,
-        files,
-    );
-
-    let torrent_state = TorrentState::new(&torrent_info);
-    (file_store, torrent_info, torrent_state)
-}
+use super::peer_protocol::PeerMessage;
 
 #[test]
 fn fast_ext_have_all() {
@@ -157,7 +88,7 @@ fn have() {
     rayon::scope(|scope| {
         let mut a = generate_peer(true, 0);
         a.handle_message(
-            PeerMessage::Have { index: 12 },
+            PeerMessage::Have { index: 8 },
             &mut torrent_state,
             &file_store,
             &torrent_info,
@@ -168,8 +99,12 @@ fn have() {
         assert!(a.pending_disconnect.is_none());
         // We should be interestead now since we do not have the piece
         assert!(a.is_interested);
+        assert!(a.outgoing_msgs_buffer.contains(&OutgoingMsg {
+            message: PeerMessage::Interested,
+            ordered: false
+        }));
         for piece_id in 0..torrent_info.pieces.len() {
-            if piece_id == 12 {
+            if piece_id == 8 {
                 assert!(
                     torrent_state
                         .piece_selector
@@ -190,12 +125,12 @@ fn have() {
 fn have_without_intrest() {
     let (file_store, torrent_info, mut torrent_state) = setup_test();
     // Needed to avoid hitting asserts
-    torrent_state.piece_selector.mark_inflight(12);
-    torrent_state.piece_selector.mark_complete(12);
+    torrent_state.piece_selector.mark_inflight(8);
+    torrent_state.piece_selector.mark_complete(8);
     rayon::scope(|scope| {
         let mut a = generate_peer(true, 0);
         a.handle_message(
-            PeerMessage::Have { index: 12 },
+            PeerMessage::Have { index: 8 },
             &mut torrent_state,
             &file_store,
             &torrent_info,
@@ -207,7 +142,7 @@ fn have_without_intrest() {
         // We should not be interestead now since we do already have the piece
         assert!(!a.is_interested);
         for piece_id in 0..torrent_info.pieces.len() {
-            if piece_id == 12 {
+            if piece_id == 8 {
                 assert!(
                     torrent_state
                         .piece_selector
@@ -223,3 +158,205 @@ fn have_without_intrest() {
         }
     });
 }
+
+#[test]
+fn slow_start() {
+    let (file_store, torrent_info, mut torrent_state) = setup_test();
+    rayon::scope(|scope| {
+        let a = generate_peer(true, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+        assert!(connections[key].slow_start);
+        assert_eq!(connections[key].prev_throughput, 0);
+        assert_eq!(connections[key].throughput, 0);
+        assert!(connections[key].desired_queue_size > 1);
+        let old_desired_queue = connections[key].desired_queue_size;
+
+        connections[key].peer_choking = false;
+        connections[key].request_piece(1, &mut torrent_state.piece_selector, &file_store);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 1,
+                begin: 0,
+                data: vec![1; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 1,
+                begin: SUBPIECE_SIZE,
+                data: vec![2; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert_eq!(connections[key].throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert!(connections[key].slow_start);
+        assert_eq!(connections[key].prev_throughput, 0);
+        assert_eq!(connections[key].desired_queue_size, old_desired_queue + 2);
+
+        tick(
+            &Duration::from_millis(1500),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+
+        assert_eq!(connections[key].prev_throughput, 21845);
+        assert_eq!(connections[key].throughput, 0);
+        assert!(connections[key].slow_start);
+        assert_eq!(connections[key].desired_queue_size, old_desired_queue + 2);
+
+        connections[key].request_piece(2, &mut torrent_state.piece_selector, &file_store);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![1; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: SUBPIECE_SIZE,
+                data: vec![2; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+
+        assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert!(connections[key].slow_start);
+        assert_eq!(connections[key].desired_queue_size, old_desired_queue + 4);
+
+        connections[key].request_piece(3, &mut torrent_state.piece_selector, &file_store);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 3,
+                begin: 0,
+                data: vec![1; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 3,
+                begin: SUBPIECE_SIZE,
+                data: vec![2; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+
+        assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
+        // No longer slow start
+        assert!(!connections[key].slow_start);
+        assert_eq!(connections[key].desired_queue_size, old_desired_queue + 6);
+    });
+}
+
+#[test]
+fn desired_queue_size() {
+    let (file_store, torrent_info, mut torrent_state) = setup_test();
+    rayon::scope(|scope| {
+        let a = generate_peer(true, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+
+        connections[key].peer_choking = false;
+        connections[key].slow_start = false;
+        connections[key].request_piece(1, &mut torrent_state.piece_selector, &file_store);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 1,
+                begin: 0,
+                data: vec![1; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 1,
+                begin: SUBPIECE_SIZE,
+                data: vec![2; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+
+        // 2 subpieces * 3
+        assert_eq!(connections[key].desired_queue_size, 6);
+
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+
+        // Never go below 1
+        assert_eq!(connections[key].desired_queue_size, 1);
+        // TODO: Test max
+    });
+}
+
+// TODO: ensure we request as many pieces as possible to actuall fill up all available queue spots
+// when starting up connections
+#[test]
+fn request_piece() {}
+
+#[test]
+fn request_timeout() {}
+
+// test that rejecting a request doesn't cause an timeout later on
+#[test]
+fn reject_request() {}

@@ -407,7 +407,6 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
             }
             EventType::Connect { socket, addr } => {
                 log::info!("Connected to: {addr}");
-                // TODO: TIMEOUT HANDSHAKE
                 let buffer = self.write_pool.get_buffer();
                 write_handshake(self.our_id, torrent_state.info_hash, buffer.inner);
                 let fd = socket.as_raw_fd();
@@ -652,7 +651,7 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope, Q: SubmissionQueue>(
     }
 }
 
-fn tick<'scope, 'f_store: 'scope>(
+pub(crate) fn tick<'scope, 'f_store: 'scope>(
     tick_delta: &Duration,
     connections: &mut Slab<PeerConnection<'scope>>,
     file_store: &'f_store FileStore,
@@ -762,4 +761,23 @@ fn tick<'scope, 'f_store: 'scope>(
         }
         peer.fill_request_queue();
     }
+}
+
+#[cfg(test)]
+mod tests {
+
+    // use crate::test_utils::{generate_peer, setup_test};
+
+    // use super::*;
+
+    // TODO: probably should be checked in an integration test
+    //#[test]
+    //fn tick_last_seen() {}
+
+    // TODO
+    // #[test]
+    // fn tick_bandwidth_calculation() {}
+
+    // #[test]
+    // fn tick_piece_distibution() {}
 }
