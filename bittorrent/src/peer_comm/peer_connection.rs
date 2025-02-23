@@ -110,7 +110,7 @@ fn generate_fast_set(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct OutgoingMsg {
     pub message: PeerMessage,
     pub ordered: bool,
