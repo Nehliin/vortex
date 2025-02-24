@@ -23,8 +23,8 @@ impl<'a> arbitrary::Arbitrary<'a> for PeerMessage {
                 index: u.arbitrary()?,
             }),
             PeerMessage::BITFIELD => {
-                let vec = u.arbitrary::<Vec<u8>>()?;
-                let bits = BitVec::<_, Msb0>::from_slice(&vec);
+                let vec = u.arbitrary::<Vec<usize>>()?;
+                let bits = BitVec::<usize, Msb0>::from_vec(vec);
                 Ok(PeerMessage::Bitfield(bits))
             }
             PeerMessage::REQUEST => {
@@ -156,7 +156,7 @@ pub enum PeerMessage {
     NotInterested,
     Have { index: i32 },
     AllowedFast { index: i32 },
-    Bitfield(BitVec<u8, Msb0>),
+    Bitfield(BitVec<usize, Msb0>),
     HaveAll,
     HaveNone,
     Request { index: i32, begin: i32, length: i32 },
@@ -194,7 +194,7 @@ impl PeerMessage {
             PeerMessage::AllowedFast { index: _ }
             | PeerMessage::Have { index: _ }
             | PeerMessage::SuggestPiece { .. } => 5,
-            PeerMessage::Bitfield(bitfield) => 1 + bitfield.as_raw_slice().len(),
+            PeerMessage::Bitfield(bitfield) => 1 + std::mem::size_of_val(bitfield.as_raw_slice()),
             PeerMessage::Request { .. }
             | PeerMessage::RejectRequest { .. }
             | PeerMessage::Cancel { .. } => 13,
@@ -205,52 +205,46 @@ impl PeerMessage {
     }
 
     pub fn encode(&self, mut buf: &mut [u8]) {
+        // Message length, (encoded - size of len prefix)
+        buf.put_i32((self.encoded_size() - std::mem::size_of::<i32>()) as i32);
         match self {
             PeerMessage::Choke => {
-                buf.put_i32(1);
                 buf.put_u8(Self::CHOKE);
             }
             PeerMessage::Unchoke => {
-                buf.put_i32(1);
                 buf.put_u8(Self::UNCHOKE);
             }
             PeerMessage::Interested => {
-                buf.put_i32(1);
                 buf.put_u8(Self::INTERESTED);
             }
             PeerMessage::NotInterested => {
-                buf.put_i32(1);
                 buf.put_u8(Self::NOT_INTERESTED);
             }
             PeerMessage::Have { index } => {
-                buf.put_i32(5);
                 buf.put_u8(Self::HAVE);
                 buf.put_i32(*index);
             }
             PeerMessage::AllowedFast { index } => {
-                buf.put_i32(5);
                 buf.put_u8(Self::ALLOWED_FAST);
                 buf.put_i32(*index);
             }
             PeerMessage::HaveAll => {
-                buf.put_i32(1);
                 buf.put_u8(Self::HAVE_ALL);
             }
             PeerMessage::HaveNone => {
-                buf.put_i32(1);
                 buf.put_u8(Self::HAVE_NONE);
             }
             PeerMessage::Bitfield(bitfield) => {
-                buf.put_i32(1 + bitfield.as_raw_slice().len() as i32);
                 buf.put_u8(Self::BITFIELD);
-                buf.put_slice(bitfield.as_raw_slice());
+                for elem in bitfield.as_raw_slice() {
+                    buf.put_slice(&elem.to_be_bytes());
+                }
             }
             PeerMessage::Request {
                 index,
                 begin,
                 length,
             } => {
-                buf.put_i32(13);
                 buf.put_u8(Self::REQUEST);
                 buf.put_i32(*index);
                 buf.put_i32(*begin);
@@ -261,14 +255,12 @@ impl PeerMessage {
                 begin,
                 length,
             } => {
-                buf.put_i32(13);
                 buf.put_u8(Self::REJECT_REQUEST);
                 buf.put_i32(*index);
                 buf.put_i32(*begin);
                 buf.put_i32(*length);
             }
             PeerMessage::SuggestPiece { index } => {
-                buf.put_i32(5);
                 buf.put_u8(Self::SUGGEST_PIECE);
                 buf.put_i32(*index);
             }
@@ -277,14 +269,12 @@ impl PeerMessage {
                 begin,
                 length,
             } => {
-                buf.put_i32(13);
                 buf.put_u8(Self::CANCEL);
                 buf.put_i32(*index);
                 buf.put_i32(*begin);
                 buf.put_i32(*length);
             }
             PeerMessage::Piece { index, begin, data } => {
-                buf.put_i32(9 + data.len() as i32);
                 buf.put_u8(Self::PIECE);
                 buf.put_i32(*index);
                 buf.put_i32(*begin);
@@ -377,7 +367,21 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
             })
         }
         PeerMessage::BITFIELD => {
-            let bits = BitVec::<_, Msb0>::from_slice(&data[..]);
+            let chunks = data.chunks_exact(std::mem::size_of::<usize>());
+            let remainder_emtpy = chunks.remainder().is_empty();
+            let mut tail: usize = 0;
+            if !remainder_emtpy {
+                for (i, byte) in chunks.remainder().iter().enumerate() {
+                    tail |= (byte >> (i * 8)) as usize;
+                }
+            }
+            let mut transformed: Vec<usize> = chunks
+                .map(|chunk| usize::from_be_bytes(chunk.try_into().unwrap()))
+                .collect();
+            if !remainder_emtpy {
+                transformed.push(tail);
+            }
+            let bits = BitVec::<usize, Msb0>::from_vec(transformed);
             Ok(PeerMessage::Bitfield(bits))
         }
         PeerMessage::REJECT_REQUEST => {
@@ -469,5 +473,93 @@ mod tests {
         }
 
         assert_eq!(messages.as_slice(), &parsed);
+    }
+
+    #[test]
+    fn bitfield() {
+        let bitfield = [
+            0b0010_0011_u8,
+            0b0111_0011_u8,
+            255,
+            255,
+            255,
+            255,
+            255,
+            255,
+            0b0110_1001_u8,
+        ];
+        let remainder = bitfield
+            .chunks_exact(std::mem::size_of::<usize>())
+            .remainder();
+        assert_eq!(remainder.len(), 1);
+        let mut bitfield: Vec<usize> = bitfield
+            .chunks_exact(std::mem::size_of::<usize>())
+            .map(|chunk| usize::from_be_bytes(chunk.try_into().unwrap()))
+            .collect();
+
+        bitfield.push(usize::from_be_bytes([remainder[0], 0, 0, 0, 0, 0, 0, 0]));
+
+        let message = PeerMessage::Bitfield(BitVec::<usize, Msb0>::from_vec(bitfield));
+        let mut buf = vec![0; message.encoded_size()];
+        message.encode(&mut buf);
+        let mut buf: Bytes = buf.into();
+        // skip length prefix
+        buf.advance(std::mem::size_of::<i32>());
+        let bitfield = parse_message(buf).unwrap();
+
+        let PeerMessage::Bitfield(bitfield) = bitfield else {
+            panic!("wrong message type")
+        };
+
+        assert!(!bitfield[0]);
+        assert!(!bitfield[1]);
+        assert!(bitfield[2]);
+        assert!(!bitfield[3]);
+
+        assert!(!bitfield[4]);
+        assert!(!bitfield[5]);
+        assert!(bitfield[6]);
+        assert!(bitfield[7]);
+
+        assert!(!bitfield[8]);
+        assert!(bitfield[9]);
+        assert!(bitfield[10]);
+        assert!(bitfield[11]);
+
+        assert!(!bitfield[12]);
+        assert!(!bitfield[13]);
+        assert!(bitfield[14]);
+        assert!(bitfield[15]);
+
+        assert!(!bitfield[12]);
+        assert!(!bitfield[13]);
+        assert!(bitfield[14]);
+        assert!(bitfield[15]);
+
+        assert!(!bitfield[64]);
+        assert!(bitfield[65]);
+        assert!(bitfield[66]);
+        assert!(!bitfield[67]);
+
+        assert!(bitfield[68]);
+        assert!(!bitfield[69]);
+        assert!(!bitfield[70]);
+        assert!(bitfield[71]);
+    }
+
+    #[test]
+    fn empty_bitfield() {
+        let message = PeerMessage::Bitfield(BitVec::<usize, Msb0>::new());
+        let mut buf = vec![0; message.encoded_size()];
+        message.encode(&mut buf);
+        let mut buf: Bytes = buf.into();
+        // skip length prefix
+        buf.advance(std::mem::size_of::<i32>());
+        let bitfield = parse_message(buf).unwrap();
+
+        let PeerMessage::Bitfield(bitfield) = bitfield else {
+            panic!("wrong message type")
+        };
+        assert!(bitfield.is_empty());
     }
 }

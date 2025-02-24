@@ -653,7 +653,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                 }
                 let num_pieces = torrent_state.num_pieces();
                 log::info!("[Peer: {}] Have all received", self.peer_id);
-                let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
+                let bitfield = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; num_pieces);
                 torrent_state
                     .piece_selector
                     .update_peer_pieces(self.conn_id, bitfield.into_boxed_bitslice());
@@ -675,7 +675,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection<'f_store> {
                 }
                 let num_pieces = torrent_state.num_pieces();
                 log::info!("[Peer: {}] Have None received", self.peer_id);
-                let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
+                let bitfield = bitvec::bitvec!(usize, bitvec::order::Msb0; 0; num_pieces);
                 torrent_state
                     .piece_selector
                     .update_peer_pieces(self.conn_id, bitfield.into_boxed_bitslice());

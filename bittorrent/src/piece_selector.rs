@@ -32,18 +32,18 @@ pub struct Subpiece {
 
 pub(crate) struct PieceSelector {
     //    strategy: T,
-    completed_pieces: BitBox<u8, Msb0>,
+    completed_pieces: BitBox<usize, Msb0>,
     // TODO: rename to assinged pieces instead
-    inflight_pieces: BitBox<u8, Msb0>,
+    inflight_pieces: BitBox<usize, Msb0>,
     // TODO: ability to remove
-    peer_pieces: HashMap<usize, BitBox<u8, Msb0>>,
+    peer_pieces: HashMap<usize, BitBox<usize, Msb0>>,
     last_piece_length: u32,
     piece_length: u32,
 }
 
 impl PieceSelector {
     pub fn new(torrent_info: &Torrent) -> Self {
-        let completed_pieces: BitBox<u8, Msb0> =
+        let completed_pieces: BitBox<usize, Msb0> =
             torrent_info.pieces.iter().map(|_| false).collect();
         let inflight_pieces = completed_pieces.clone();
         let piece_length = torrent_info.piece_length;
@@ -118,7 +118,7 @@ impl PieceSelector {
         self.peer_pieces.contains_key(&connection_id)
     }
 
-    pub fn update_peer_pieces(&mut self, connection_id: usize, peer_pieces: BitBox<u8, Msb0>) {
+    pub fn update_peer_pieces(&mut self, connection_id: usize, peer_pieces: BitBox<usize, Msb0>) {
         let entry = self.peer_pieces.entry(connection_id);
         entry
             .and_modify(|pieces| *pieces |= &peer_pieces)
@@ -130,7 +130,7 @@ impl PieceSelector {
         entry
             .and_modify(|pieces| pieces.set(piece_index, true))
             .or_insert_with(|| {
-                let mut all_pieces: BitBox<u8, Msb0> =
+                let mut all_pieces: BitBox<usize, Msb0> =
                     (0..self.completed_pieces.len()).map(|_| false).collect();
                 all_pieces.set(piece_index, true);
                 all_pieces
@@ -175,7 +175,7 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn completed_clone(&self) -> BitBox<u8, Msb0> {
+    pub fn completed_clone(&self) -> BitBox<usize, Msb0> {
         self.completed_pieces.clone()
     }
 
