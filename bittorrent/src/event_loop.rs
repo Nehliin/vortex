@@ -244,7 +244,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                         &mut torrent_state,
                     );
                     last_tick = Instant::now();
-                    // TODO deal with this in the tick itself
+                    // Dealt with here to make tick easier to test
                     for (conn_id, connection) in self.connections.iter_mut() {
                         if let Some(reason) = &connection.pending_disconnect {
                             log::warn!("Disconnect: {} reason {reason}", connection.peer_id);

@@ -3,6 +3,7 @@ use std::time::Duration;
 use slab::Slab;
 
 use crate::{
+    TorrentState,
     event_loop::tick,
     peer_connection::OutgoingMsg,
     piece_selector::SUBPIECE_SIZE,
@@ -13,7 +14,8 @@ use super::peer_protocol::PeerMessage;
 
 #[test]
 fn fast_ext_have_all() {
-    let (file_store, torrent_info, mut torrent_state) = setup_test();
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
         let mut a = generate_peer(true, 0);
         a.handle_message(
@@ -49,7 +51,8 @@ fn fast_ext_have_all() {
 
 #[test]
 fn fast_ext_have_none() {
-    let (file_store, torrent_info, mut torrent_state) = setup_test();
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
         let mut a = generate_peer(true, 0);
         a.handle_message(
@@ -84,7 +87,8 @@ fn fast_ext_have_none() {
 
 #[test]
 fn have() {
-    let (file_store, torrent_info, mut torrent_state) = setup_test();
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
         let mut a = generate_peer(true, 0);
         a.handle_message(
@@ -123,7 +127,8 @@ fn have() {
 
 #[test]
 fn have_without_intrest() {
-    let (file_store, torrent_info, mut torrent_state) = setup_test();
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
     // Needed to avoid hitting asserts
     torrent_state.piece_selector.mark_inflight(8);
     torrent_state.piece_selector.mark_complete(8);
@@ -161,7 +166,8 @@ fn have_without_intrest() {
 
 #[test]
 fn slow_start() {
-    let (file_store, torrent_info, mut torrent_state) = setup_test();
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
         let a = generate_peer(true, 0);
         let mut connections = Slab::new();
@@ -175,11 +181,12 @@ fn slow_start() {
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].prev_throughput, 0);
         assert_eq!(connections[key].throughput, 0);
-        assert!(connections[key].desired_queue_size > 1);
-        let old_desired_queue = connections[key].desired_queue_size;
+        assert!(connections[key].target_inflight > 1);
+        let old_desired_queue = connections[key].target_inflight;
 
         connections[key].peer_choking = false;
-        connections[key].request_piece(1, &mut torrent_state.piece_selector, &file_store);
+        let mut subpieces = torrent_state.request_new_piece(1, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
             PeerMessage::Piece {
                 index: 1,
@@ -205,7 +212,7 @@ fn slow_start() {
         assert_eq!(connections[key].throughput, (SUBPIECE_SIZE * 2) as u64);
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].prev_throughput, 0);
-        assert_eq!(connections[key].desired_queue_size, old_desired_queue + 2);
+        assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
 
         tick(
             &Duration::from_millis(1500),
@@ -217,9 +224,10 @@ fn slow_start() {
         assert_eq!(connections[key].prev_throughput, 21845);
         assert_eq!(connections[key].throughput, 0);
         assert!(connections[key].slow_start);
-        assert_eq!(connections[key].desired_queue_size, old_desired_queue + 2);
+        assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
 
-        connections[key].request_piece(2, &mut torrent_state.piece_selector, &file_store);
+        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
             PeerMessage::Piece {
                 index: 2,
@@ -252,9 +260,10 @@ fn slow_start() {
 
         assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
         assert!(connections[key].slow_start);
-        assert_eq!(connections[key].desired_queue_size, old_desired_queue + 4);
+        assert_eq!(connections[key].target_inflight, old_desired_queue + 4);
 
-        connections[key].request_piece(3, &mut torrent_state.piece_selector, &file_store);
+        let mut subpieces = torrent_state.request_new_piece(3, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
             PeerMessage::Piece {
                 index: 3,
@@ -288,13 +297,14 @@ fn slow_start() {
         assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
         // No longer slow start
         assert!(!connections[key].slow_start);
-        assert_eq!(connections[key].desired_queue_size, old_desired_queue + 6);
+        assert_eq!(connections[key].target_inflight, old_desired_queue + 6);
     });
 }
 
 #[test]
 fn desired_queue_size() {
-    let (file_store, torrent_info, mut torrent_state) = setup_test();
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
         let a = generate_peer(true, 0);
         let mut connections = Slab::new();
@@ -302,7 +312,8 @@ fn desired_queue_size() {
 
         connections[key].peer_choking = false;
         connections[key].slow_start = false;
-        connections[key].request_piece(1, &mut torrent_state.piece_selector, &file_store);
+        let mut subpieces = torrent_state.request_new_piece(1, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
             PeerMessage::Piece {
                 index: 1,
@@ -334,7 +345,7 @@ fn desired_queue_size() {
         );
 
         // 2 subpieces * 3
-        assert_eq!(connections[key].desired_queue_size, 6);
+        assert_eq!(connections[key].target_inflight, 6);
 
         tick(
             &Duration::from_secs(1),
@@ -344,19 +355,19 @@ fn desired_queue_size() {
         );
 
         // Never go below 1
-        assert_eq!(connections[key].desired_queue_size, 1);
+        assert_eq!(connections[key].target_inflight, 1);
         // TODO: Test max
     });
 }
 
 // TODO: ensure we request as many pieces as possible to actuall fill up all available queue spots
 // when starting up connections
-#[test]
-fn request_piece() {}
+// #[test]
+// fn request_piece() {}
 
-#[test]
-fn request_timeout() {}
+// #[test]
+// fn request_timeout() {}
 
-// test that rejecting a request doesn't cause an timeout later on
-#[test]
-fn reject_request() {}
+// // test that rejecting a request doesn't cause an timeout later on
+// #[test]
+// fn reject_request() {}
