@@ -43,12 +43,12 @@ pub enum EventType {
     Dummy,
 }
 
-fn event_error_handler<Q: SubmissionQueue>(
+fn event_error_handler<'f_store, Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     error_code: u32,
     user_data: UserData,
     events: &mut Slab<EventType>,
-    torrent_state: &mut TorrentState,
+    torrent_state: &mut TorrentState<'f_store>,
     connections: &mut Slab<PeerConnection>,
     bgid: Bgid,
 ) -> io::Result<()> {
@@ -173,16 +173,16 @@ impl From<Entry> for IoEvent {
 
 const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(250_000_000);
 
-pub struct EventLoop<'f_store> {
+pub struct EventLoop {
     events: Slab<EventType>,
     write_pool: BufferPool,
     read_ring: BufferRing,
-    connections: Slab<PeerConnection<'f_store>>,
+    connections: Slab<PeerConnection>,
     peer_provider: Receiver<SocketAddrV4>,
     our_id: PeerId,
 }
 
-impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
+impl<'scope, 'f_store: 'scope> EventLoop {
     pub fn new(
         our_id: PeerId,
         events: Slab<EventType>,
@@ -201,7 +201,7 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
     pub fn run(
         &mut self,
         mut ring: IoUring,
-        mut torrent_state: TorrentState,
+        mut torrent_state: TorrentState<'f_store>,
         file_store: &'f_store FileStore,
         torrent_info: &'f_store Torrent,
     ) -> Result<(), Error> {
@@ -246,21 +246,6 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                     last_tick = Instant::now();
                     // TODO deal with this in the tick itself
                     for (conn_id, connection) in self.connections.iter_mut() {
-                        for msg in connection.outgoing_msgs_buffer.iter_mut() {
-                            let conn_fd = connection.socket.as_raw_fd();
-                            let buffer = self.write_pool.get_buffer();
-                            msg.message.encode(buffer.inner);
-                            let size = msg.message.encoded_size();
-                            io_utils::write_to_connection(
-                                conn_id,
-                                conn_fd,
-                                &mut self.events,
-                                &mut sq,
-                                buffer.index,
-                                &buffer.inner[..size],
-                                msg.ordered,
-                            );
-                        }
                         if let Some(reason) = &connection.pending_disconnect {
                             log::warn!("Disconnect: {} reason {reason}", connection.peer_id);
                             io_utils::stop_connection(
@@ -270,7 +255,6 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                                 &mut self.events,
                             );
                         }
-                        connection.outgoing_msgs_buffer.clear();
                     }
                     sq.sync();
                 }
@@ -297,6 +281,25 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                         self.read_ring.return_bid(bid);
                     }
                 }
+                for (conn_id, connection) in self.connections.iter_mut() {
+                    for msg in connection.outgoing_msgs_buffer.iter_mut() {
+                        let conn_fd = connection.socket.as_raw_fd();
+                        let buffer = self.write_pool.get_buffer();
+                        msg.message.encode(buffer.inner);
+                        let size = msg.message.encoded_size();
+                        io_utils::write_to_connection(
+                            conn_id,
+                            conn_fd,
+                            &mut self.events,
+                            &mut sq,
+                            buffer.index,
+                            &buffer.inner[..size],
+                            msg.ordered,
+                        );
+                    }
+                    connection.outgoing_msgs_buffer.clear();
+                }
+                sq.sync();
                 self.connect_to_new_peers(&mut sq)?;
                 torrent_state.update_torrent_status();
                 if torrent_state.is_complete {
@@ -356,7 +359,7 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
         io_event: IoEvent,
-        torrent_state: &mut TorrentState,
+        torrent_state: &mut TorrentState<'f_store>,
         file_store: &'f_store FileStore,
         torrent_info: &'scope Torrent,
         scope: &Scope<'scope>,
@@ -509,13 +512,10 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 connection.stateful_decoder.append_data(remainder);
                 let completed = torrent_state.piece_selector.completed_clone();
                 conn_parse_and_handle_msgs(
-                    sq,
                     connection,
                     torrent_state,
                     file_store,
                     torrent_info,
-                    &mut self.write_pool,
-                    &mut self.events,
                     scope,
                 );
                 // Recv has been complete, move over to multishot, same user data
@@ -576,13 +576,10 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
                 let buffer = &buffer[..len];
                 connection.stateful_decoder.append_data(buffer);
                 conn_parse_and_handle_msgs(
-                    sq,
                     connection,
                     torrent_state,
                     file_store,
                     torrent_info,
-                    &mut self.write_pool,
-                    &mut self.events,
                     scope,
                 );
             }
@@ -604,18 +601,13 @@ impl<'scope, 'f_store: 'scope> EventLoop<'scope> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope, Q: SubmissionQueue>(
-    sq: &mut BackloggedSubmissionQueue<Q>,
-    connection: &mut PeerConnection<'f_store>,
-    torrent_state: &mut TorrentState,
+fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
+    connection: &mut PeerConnection,
+    torrent_state: &mut TorrentState<'f_store>,
     file_store: &'f_store FileStore,
     torrent_info: &'scope Torrent,
-    write_pool: &mut BufferPool,
-    events: &mut Slab<EventType>,
     scope: &Scope<'scope>,
 ) {
-    let conn_fd = connection.socket.as_raw_fd();
     while let Some(parse_result) = connection.stateful_decoder.next() {
         match parse_result {
             Ok(peer_message) => {
@@ -626,21 +618,6 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope, Q: SubmissionQueue>(
                     torrent_info,
                     scope,
                 );
-                for outgoing in connection.outgoing_msgs_buffer.iter() {
-                    // Buffers are returned in the event loop
-                    let buffer = write_pool.get_buffer();
-                    outgoing.message.encode(buffer.inner);
-                    let size = outgoing.message.encoded_size();
-                    io_utils::write_to_connection(
-                        connection.conn_id,
-                        conn_fd,
-                        events,
-                        sq,
-                        buffer.index,
-                        &buffer.inner[..size],
-                        outgoing.ordered,
-                    )
-                }
             }
             Err(err) => {
                 log::error!("Failed {} decoding message: {err}", connection.conn_id);
@@ -649,13 +626,14 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope, Q: SubmissionQueue>(
             }
         }
     }
+    connection.fill_request_queue();
 }
 
 pub(crate) fn tick<'scope, 'f_store: 'scope>(
     tick_delta: &Duration,
-    connections: &mut Slab<PeerConnection<'scope>>,
+    connections: &mut Slab<PeerConnection>,
     file_store: &'f_store FileStore,
-    torrent_state: &mut TorrentState,
+    torrent_state: &mut TorrentState<'scope>,
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
     // 1. Calculate bandwidth (deal with initial start up)
@@ -689,20 +667,19 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
                 // From the libtorrent impl, request queue time = 3
                 let new_queue_capacity =
                     3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
-                connection.desired_queue_size = new_queue_capacity as usize;
+                connection.target_inflight = new_queue_capacity as usize;
                 log::debug!("Updated desired queue size: {new_queue_capacity}");
-                connection.desired_queue_size = connection.desired_queue_size.clamp(0, 500);
+                connection.target_inflight = connection.target_inflight.clamp(0, 500);
             }
-            connection.desired_queue_size = connection.desired_queue_size.max(1);
+            connection.target_inflight = connection.target_inflight.max(1);
         }
         log::info!(
-            "[Peer {}, id: {id}]: throughput: {} bytes/s, queue: {}/{}, time between subpieces: {}ms, currently_downloading: {}",
+            "[Peer {}, id: {id}]: throughput: {} bytes/s, queue: {}/{}, time between subpieces: {}ms",
             connection.peer_id,
             connection.throughput,
-            connection.queued.len(),
-            connection.desired_queue_size,
+            connection.inflight.len(),
+            connection.target_inflight,
             connection.moving_rtt.mean().as_millis(),
-            connection.currently_downloading.len()
         );
         if !connection.peer_choking
             && connection.slow_start
@@ -737,24 +714,15 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
         while {
             let bandwitdth_available_for_new_piece =
                 bandwidth > (torrent_state.piece_selector.avg_num_subpieces() as usize / 2);
-            let first_piece = peer.currently_downloading.is_empty();
-            (bandwitdth_available_for_new_piece || first_piece) && !peer.peer_choking
+            let nothing_queued = peer.queued.is_empty();
+            (bandwitdth_available_for_new_piece || nothing_queued) && !peer.peer_choking
         } {
             if let Some(next_piece) = torrent_state.piece_selector.next_piece(peer_key) {
-                if peer.is_choking {
-                    // TODO highly unclear if unchoke is desired here
-                    //if let Err(err) = peer.unchoke() {
-                    //   log::error!("{err}");
-                    //disconnects.push(peer_key);
-                    break;
-                    //} else {
-                    //   self.num_unchoked += 1;
-                    //}
-                }
-                peer.request_piece(next_piece, &mut torrent_state.piece_selector, file_store);
+                let mut queue = torrent_state.request_new_piece(next_piece, file_store);
+                let queue_len = queue.len();
+                peer.append_and_fill(&mut queue);
                 // Remove all subpieces from available bandwidth
-                bandwidth -= (torrent_state.piece_selector.num_subpieces(next_piece) as usize)
-                    .min(bandwidth);
+                bandwidth -= (queue_len).min(bandwidth);
             } else {
                 break;
             }

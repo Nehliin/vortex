@@ -1,12 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
 
-use crate::{
-    file_store::{ReadablePieceFileView, WritablePieceFileView},
-    peer_protocol::PeerId,
-};
+use crate::file_store::{ReadablePieceFileView, WritablePieceFileView};
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -85,7 +82,6 @@ impl PieceSelector {
         if procentage_left > 0.95 {
             for _ in 0..5 {
                 let index = (rand::random::<f32>() * self.completed_pieces.len() as f32) as usize;
-                //log::debug!("Picking random piece to download, index: {index}");
                 if available_pieces[index] {
                     return Some(index as i32);
                 }
@@ -212,15 +208,6 @@ impl PieceSelector {
     pub fn avg_num_subpieces(&self) -> u32 {
         self.piece_length / SUBPIECE_SIZE as u32
     }
-
-    #[inline]
-    pub fn num_subpieces(&self, index: i32) -> u32 {
-        if index == (self.completed_pieces.len() as i32 - 1) {
-            self.last_piece_length / SUBPIECE_SIZE as u32
-        } else {
-            self.piece_length / SUBPIECE_SIZE as u32
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -235,10 +222,9 @@ pub struct Piece<'f_store> {
     pub index: i32,
     // Contains only completed subpieces
     pub completed_subpieces: BitBox,
-    // Contains both completed and inflight subpieces
-    pub inflight_subpieces: BitBox,
     pub last_subpiece_length: i32,
     pub piece_view: WritablePieceFileView<'f_store>,
+    pub ref_count: u8,
 }
 
 impl<'f_store> Piece<'f_store> {
@@ -251,28 +237,49 @@ impl<'f_store> Piece<'f_store> {
         let subpieces =
             (lenght / SUBPIECE_SIZE as u32) + u32::from(last_subpiece_length != SUBPIECE_SIZE);
         let completed_subpieces: BitBox = (0..subpieces).map(|_| false).collect();
-        let inflight_subpieces = completed_subpieces.clone();
         Self {
             index,
             completed_subpieces,
-            inflight_subpieces,
             last_subpiece_length,
             piece_view,
+            ref_count: 0,
         }
+    }
+
+    /// Increases the ref count of this piece and returns all remaining subpieces
+    /// to download
+    pub fn allocate_remaining_subpieces(&mut self) -> VecDeque<Subpiece> {
+        let mut deque = VecDeque::with_capacity(self.completed_subpieces.len());
+        let last_subpiece_index = self.completed_subpieces.len() - 1;
+        // Do we need to adjust the piece size of the last subpiece?
+        let mut last_is_last_index = false;
+
+        for subpiece_index in self.completed_subpieces.iter_zeros() {
+            deque.push_back(Subpiece {
+                index: self.index,
+                offset: SUBPIECE_SIZE * subpiece_index as i32,
+                size: SUBPIECE_SIZE,
+            });
+            last_is_last_index = subpiece_index == last_subpiece_index;
+        }
+        if last_is_last_index {
+            // will never panic
+            let last_subpiece = deque.back_mut().unwrap();
+            last_subpiece.size = self.last_subpiece_length;
+        }
+        self.ref_count += 1;
+        deque
     }
 
     pub fn into_readable(self) -> ReadablePieceFileView<'f_store> {
         self.piece_view.into_readable()
     }
 
-    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], peer_id: PeerId) {
+    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
-        log::trace!(
-            "[Peer: {}] Subpiece index received: {subpiece_index}",
-            peer_id
-        );
+        log::trace!("Subpiece index received: {subpiece_index}",);
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {
             debug_assert_eq!(data.len() as i32, self.last_subpiece_length);
@@ -281,20 +288,6 @@ impl<'f_store> Piece<'f_store> {
         }
         self.piece_view.write_subpiece(begin as usize, data);
         self.completed_subpieces.set(subpiece_index as usize, true);
-    }
-
-    #[inline]
-    pub fn on_subpiece_failed(&mut self, index: i32, begin: i32) {
-        // This subpice is part of the currently downloading piece
-        assert_eq!(self.index, index);
-        let subpiece_index = begin / SUBPIECE_SIZE;
-        self.inflight_subpieces.set(subpiece_index as usize, false);
-    }
-
-    // Perhaps this can return the subpice or a peer request directly?
-    #[inline]
-    pub fn next_unstarted_subpice(&self) -> Option<usize> {
-        self.inflight_subpieces.first_zero()
     }
 
     #[inline]

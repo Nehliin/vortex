@@ -1,19 +1,21 @@
 use std::{
-    io,
+    collections::VecDeque,
+    io::{self},
     net::{SocketAddrV4, TcpListener},
     os::fd::AsRawFd,
     path::Path,
     sync::mpsc::{Receiver, Sender},
 };
 
+use bytes::Bytes;
 use event_loop::{EventLoop, EventType};
-use file_store::FileStore;
+use file_store::{FileStore, ReadablePieceFileView};
 use io_uring::{
     IoUring, opcode,
     types::{self},
 };
 use io_utils::UserData;
-use piece_selector::{CompletedPiece, PieceSelector};
+use piece_selector::{CompletedPiece, Piece, PieceSelector, Subpiece};
 use slab::Slab;
 use thiserror::Error;
 
@@ -89,7 +91,7 @@ impl Torrent {
     }
 }
 
-struct TorrentState {
+struct TorrentState<'f_store> {
     info_hash: [u8; 20],
     piece_selector: PieceSelector,
     num_unchoked: u32,
@@ -97,10 +99,11 @@ struct TorrentState {
     num_pieces: usize,
     completed_piece_rc: Receiver<CompletedPiece>,
     completed_piece_tx: Sender<CompletedPiece>,
+    currently_downloading: Vec<Piece<'f_store>>,
     is_complete: bool,
 }
 
-impl TorrentState {
+impl<'f_store> TorrentState<'f_store> {
     pub fn new(torrent: &lava_torrent::torrent::v1::Torrent) -> Self {
         let info_hash = torrent.info_hash_bytes().try_into().unwrap();
 
@@ -113,6 +116,7 @@ impl TorrentState {
             max_unchoked: 8,
             completed_piece_rc: rc,
             completed_piece_tx: tx,
+            currently_downloading: Default::default(),
             is_complete: false,
         }
     }
@@ -152,6 +156,72 @@ impl TorrentState {
         }
     }
 
+    fn on_subpiece(
+        &mut self,
+        m_index: i32,
+        m_begin: i32,
+        data: Bytes,
+    ) -> Option<ReadablePieceFileView<'f_store>> {
+        let position = self
+            .currently_downloading
+            .iter()
+            .position(|piece| piece.index == m_index);
+        if let Some(position) = position {
+            let mut piece = self.currently_downloading.swap_remove(position);
+            piece.on_subpiece(m_index, m_begin, &data[..]);
+            if !piece.is_complete() {
+                // still downloading
+                self.currently_downloading.push(piece);
+            } else {
+                // TODO: consider MOVEING everything from handle message here
+                log::debug!("Piece {m_index} completed");
+                return Some(piece.into_readable());
+            }
+        } else {
+            // TODO: This might happen in end game mode when multiple peers race to complete the
+            // piece. Haven't implemented it yet though
+            log::error!("Recieved unexpected piece message, index: {m_index}",);
+        }
+        None
+    }
+
+    fn request_new_piece(
+        &mut self,
+        index: i32,
+        file_store: &'f_store FileStore,
+    ) -> VecDeque<Subpiece> {
+        let length = self.piece_selector.piece_len(index);
+        self.piece_selector.mark_inflight(index as usize);
+        // SAFETY: we check before that the piece is not already in flight (via mark_inflight)
+        // and is not already completed which means there can't exist any other
+        // writable piece views for this index. The piece is also marked as
+        // inflight right before.
+        let piece_view = unsafe { file_store.writable_piece_view(index).unwrap() };
+        let mut piece = Piece::new(index, length, piece_view);
+        let subpieces = piece.allocate_remaining_subpieces();
+        self.currently_downloading.push(piece);
+        subpieces
+    }
+
+    // TODO: deal with marking inflight?
+    fn deallocate_piece(&mut self, index: i32) {
+        let position = self
+            .currently_downloading
+            .iter()
+            .position(|piece| piece.index == index);
+
+        if let Some(position) = position {
+            let mut piece = self.currently_downloading.swap_remove(position);
+            piece.ref_count -= 1;
+            if piece.ref_count == 0 {
+                self.piece_selector.mark_not_inflight(index as usize);
+            } else {
+                // someone is still downloading this
+                self.currently_downloading.push(piece);
+            }
+        }
+    }
+
     // TODO: Something like release in flight pieces?
 
     pub fn should_unchoke(&self) -> bool {
@@ -165,13 +235,13 @@ mod test_utils {
     use std::{collections::HashMap, path::PathBuf};
 
     use crate::{
-        TorrentState, file_store::FileStore, generate_peer_id, peer_connection::PeerConnection,
+        file_store::FileStore, generate_peer_id, peer_connection::PeerConnection,
         piece_selector::SUBPIECE_SIZE,
     };
     use lava_torrent::torrent::v1::{Torrent, TorrentBuilder};
     use socket2::{Domain, Protocol, Socket, Type};
 
-    pub fn generate_peer<'a>(fast_ext: bool, conn_id: usize) -> PeerConnection<'a> {
+    pub fn generate_peer(fast_ext: bool, conn_id: usize) -> PeerConnection {
         let socket_a = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
         PeerConnection::new(socket_a, generate_peer_id(), conn_id, fast_ext)
     }
@@ -226,7 +296,7 @@ mod test_utils {
         (file_store, torrent_info)
     }
 
-    pub fn setup_test() -> (FileStore, Torrent, TorrentState) {
+    pub fn setup_test() -> (FileStore, Torrent) {
         let files: HashMap<String, Vec<u8>> = [
             ("f1.txt".to_owned(), vec![1_u8; 64]),
             ("f2.txt".to_owned(), vec![2_u8; 100]),
@@ -239,8 +309,6 @@ mod test_utils {
             (SUBPIECE_SIZE * 2) as usize,
             files,
         );
-
-        let torrent_state = TorrentState::new(&torrent_info);
-        (file_store, torrent_info, torrent_state)
+        (file_store, torrent_info)
     }
 }
