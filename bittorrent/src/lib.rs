@@ -173,14 +173,14 @@ impl<'f_store> TorrentState<'f_store> {
                 // still downloading
                 self.currently_downloading.push(piece);
             } else {
-                // TODO: consider MOVEING everything from handle message here
+                // TODO: consider moving everything from handle message here
                 log::debug!("Piece {m_index} completed");
                 return Some(piece.into_readable());
             }
         } else {
             // TODO: This might happen in end game mode when multiple peers race to complete the
             // piece. Haven't implemented it yet though
-            log::error!("Recieved unexpected piece message, index: {m_index}",);
+            log::error!("Recived unexpected piece message, index: {m_index}",);
         }
         None
     }
