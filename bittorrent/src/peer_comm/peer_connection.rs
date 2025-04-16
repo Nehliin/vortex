@@ -280,7 +280,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     pub fn fill_request_queue(&mut self) {
-        while self.inflight.len() < self.target_inflight  {
+        while self.inflight.len() < self.target_inflight {
             if let Some(subpiece) = self.queued.pop_front() {
                 Self::push_subpiece_request(
                     &mut self.outgoing_msgs_buffer,
@@ -371,32 +371,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.moving_rtt.add_sample(&rtt);
     }
 
-    // // returns if the supiece actually was marked as a failure
-    // fn try_mark_subpiece_failed(&mut self, subpiece: Subpiece) -> bool {
-    //     if let Some(piece) = self
-    //         .currently_downloading
-    //         .iter_mut()
-    //         .find(|piece| piece.index == subpiece.index)
-    //     {
-    //         let subpiece_index = subpiece.offset / SUBPIECE_SIZE;
-    //         if piece.completed_subpieces[subpiece_index as usize] {
-    //             log::error!(
-    //                 "[PeerId {}]: Subpiece is already completed, can't mark as failed {}, {}",
-    //                 self.peer_id,
-    //                 subpiece.index,
-    //                 subpiece.offset
-    //             );
-    //             return false;
-    //         }
-    //         piece.on_subpiece_failed(subpiece.index, subpiece.offset);
-    //         true
-    //         // self.pending_disconnect = true;
-    //     } else {
-    //         false
-    //         // This might race with it completing so this isn't really an error
-    //     }
-    // }
-
     pub fn on_request_timeout(&mut self, torrent_state: &mut TorrentState) {
         let Some(subpiece) = self.inflight.pop_back() else {
             // Probably caused by the request being rejected or the timeout happen because
@@ -409,7 +383,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             self.last_received_subpiece = None;
             return;
         };
-        //if self.try_mark_subpiece_failed(subpiece) {
         log::warn!(
             "[PeerId {}]: Subpiece timed out: {}, {}",
             self.peer_id,
@@ -420,7 +393,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.release_pieces(torrent_state);
         // TODO: time out recovery
         self.target_inflight = 1;
-        //}
     }
 
     #[inline]
@@ -752,7 +724,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         "[PeerId {}]: Subpiece request rejected: {index}, {begin}",
                         self.peer_id,
                     );
-                    self.inflight.remove(i);
+                    let removed = self.inflight.remove(i).unwrap();
+                    // TODO: maybe deallocate piece in the future?
+                    self.queued.push_back(removed);
                 } else {
                     log::error!(
                         "[PeerId {}]: Subpiece request rejected twice: {index}, {begin}",

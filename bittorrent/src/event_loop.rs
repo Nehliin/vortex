@@ -43,12 +43,12 @@ pub enum EventType {
     Dummy,
 }
 
-fn event_error_handler<'f_store, Q: SubmissionQueue>(
+fn event_error_handler<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     error_code: u32,
     user_data: UserData,
     events: &mut Slab<EventType>,
-    torrent_state: &mut TorrentState<'f_store>,
+    torrent_state: &mut TorrentState<'_>,
     connections: &mut Slab<PeerConnection>,
     bgid: Bgid,
 ) -> io::Result<()> {
