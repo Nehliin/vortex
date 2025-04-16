@@ -24,6 +24,7 @@ struct TorrentFile {
     file_handle: file::MmapFile,
 }
 
+#[derive(Debug)]
 /// View of all the files the Piece overlaps with
 pub struct WritablePieceFileView<'a> {
     index: i32,

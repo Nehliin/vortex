@@ -229,6 +229,7 @@ pub struct CompletedPiece {
     pub hash_matched: std::io::Result<bool>,
 }
 
+#[derive(Debug)]
 // TODO flatten this
 pub struct Piece<'f_store> {
     pub index: i32,
