@@ -99,7 +99,7 @@ if [ "${path}" != "${torrent_path}" ]; then
 fi
 
 # check if the seed is running: if not, start it
-if ! podman inspect --format '{{.State.Running}}' "${name}" &> /dev/null
+if [[ "$(podman inspect --format '{{.State.Running}}' "${name}" 2>/dev/null)" != "true" ]];
 then
     echo "Starting Transmission seed container ${name} listening on port 51413"
     podman run \
