@@ -12,8 +12,8 @@ license = "BSD-3-Clause"
 anyhow = { workspace = true }
 rand = { workspace = true }
 bytes = { workspace = true }
-tokio-uring = { workspace = true, features = ["bytes"]}
-tokio = { workspace = true, features = ["time", "sync", "macros"] }
+tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
+tokio = { version = "1.44", features = ["time", "sync", "macros"] }
 log = { workspace = true }
 libc = "0.2"
 

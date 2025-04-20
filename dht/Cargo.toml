@@ -9,7 +9,7 @@ repository = "https://github.com/Nehliin/vortex"
 license = "BSD-3-Clause"
 
 [dependencies]
-tokio-uring = { workspace = true }
+tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
 anyhow = { workspace = true }
 # Focus is not on this encoding
 serde_bencoded = "0.3.1"
@@ -22,7 +22,7 @@ ahash = { workspace = true }
 rand = { workspace = true }
 time = { version = "0.3", features = ["serde", "local-offset"]}
 bytes = { workspace = true, features = ["serde"]}
-tokio = { workspace = true, features = ["time", "sync"] }
+tokio = { version = "1.44", features = ["time", "sync"] }
 sha1 = { workspace = true }
 log = { workspace = true }
 slotmap = { version = "1.0.6", features = ["serde"]}
