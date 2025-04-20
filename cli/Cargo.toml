@@ -9,18 +9,15 @@ repository = "https://github.com/Nehliin/vortex"
 license = "BSD-3-Clause"
 
 [dependencies]
-tokio-uring = { workspace = true }
 anyhow = { workspace = true }
 ahash = { workspace = true }
 parking_lot = { workspace = true }
 lava_torrent = { workspace = true }
-tokio = { workspace = true, features = ["time", "sync", "macros"] }
 log = { workspace = true }
 env_logger = { workspace = true }
 vortex-bittorrent = { path = "../bittorrent" }
-vortex-dht = { path = "../dht" }
-indicatif = "0.17.3"
-futures = "0.3"
+# NOTE: The 5.4.0 version doesn't seem to have been posted to GIT so do not update unless the code is public
+mainline = { version = "=5.3.1", default-features = false, features = ["node"]}
 
 [dev-dependencies]
 num-bigint = "0.4.3"

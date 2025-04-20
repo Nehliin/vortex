@@ -1,94 +1,74 @@
 use std::{
-    net::{SocketAddr, SocketAddrV4},
-    path::Path,
-    sync::{Arc, mpsc::Sender},
-    time::Instant,
+    net::SocketAddrV4,
+    path::PathBuf,
+    sync::mpsc::Sender,
+    time::{Duration, Instant},
 };
 
-use parking_lot::Mutex;
+use mainline::{Dht, Id};
 use vortex_bittorrent::{Torrent, generate_peer_id};
-//use vortex_bittorrent::{PeerListHandle, TorrentManager};
-use vortex_dht::PeerProvider;
 
 struct TorrentPeerList {
     sender: Sender<SocketAddrV4>,
     // TODO: need to remove stuff when disconnecting
-    ip_list: Vec<SocketAddr>,
+    ip_list: ahash::HashSet<SocketAddrV4>,
 }
-// TODO: This will become the layer of indirection
-// so that incoming peers will be sent to the right torrent manager
-#[derive(Clone)]
-struct PeerListProvider(Arc<Mutex<ahash::AHashMap<[u8; 20], TorrentPeerList>>>);
 
-impl PeerProvider for PeerListProvider {
-    fn get_peers(&self, info_hash: [u8; 20]) -> Option<Vec<std::net::SocketAddr>> {
-        log::info!("Fetching peers");
-        self.0
-            .lock()
-            .get(&info_hash)
-            .map(|peer_list| peer_list.ip_list.clone())
-    }
-
-    fn insert_peer(&self, info_hash: [u8; 20], peer: std::net::SocketAddr) {
-        if let Some(peer_list) = self.0.lock().get_mut(&info_hash) {
-            log::info!("Inserting peer that was announced!");
-
-            peer_list.ip_list.push(peer);
-            match peer {
-                SocketAddr::V4(socket_addr_v4) => peer_list.sender.send(socket_addr_v4).unwrap(),
-                SocketAddr::V6(_) => log::warn!("Skipping ipv6 addr"),
-            }
+impl TorrentPeerList {
+    fn insert_peer(&mut self, peer: SocketAddrV4) {
+        if self.ip_list.contains(&peer) {
+            return;
         }
+        self.ip_list.insert(peer);
+        self.sender.send(peer).unwrap();
     }
 }
 
 fn main() {
-    //    let log_file = std::fs::File::create("log.txt").unwrap();
     let mut log_builder = env_logger::builder();
-    log_builder
-        // .target(env_logger::Target::Pipe(Box::new(log_file)))
-        .filter_level(log::LevelFilter::Info)
-        .filter_module("vortex_dht", log::LevelFilter::Warn)
-        .init();
+    log_builder.filter_level(log::LevelFilter::Info).init();
 
     // TODO Should start dht first
     let torrent_info =
-        lava_torrent::torrent::v1::Torrent::read_from_file("tails-amd64-6.11-img.torrent").unwrap();
+        lava_torrent::torrent::v1::Torrent::read_from_file("debian.torrent").unwrap();
     let (tx, rc) = std::sync::mpsc::channel();
-    let torrent_peer_list = TorrentPeerList {
-        sender: tx,
-        ip_list: Default::default(),
-    };
-    let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
-    let peer_list_map = Arc::new(Mutex::new(
-        [(info_hash, torrent_peer_list)].into_iter().collect(),
-    ));
-    let peer_list_provider = PeerListProvider(peer_list_map);
+
+    let info_hash = torrent_info.info_hash_bytes();
+    let info_hash = Id::from_bytes(&info_hash).unwrap();
 
     std::thread::spawn(move || {
-        tokio_uring::start(async move {
-            let dht =
-                vortex_dht::Dht::new("0.0.0.0:1337".parse().unwrap(), peer_list_provider.clone())
-                    .await
-                    .unwrap();
+        let mut builder = Dht::builder();
+        let mut torrent_peer_list = TorrentPeerList {
+            sender: tx,
+            ip_list: Default::default(),
+        };
+        let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
+        if dht_boostrap_nodes.exists() {
+            let list = std::fs::read_to_string(&dht_boostrap_nodes).unwrap();
+            let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
+            builder.extra_bootstrap(&cached_nodes);
+        }
 
-            let start_timer = Instant::now();
-            dht.start().await.unwrap();
-            log::info!("DHT startup time: {}", start_timer.elapsed().as_secs());
-            let find_peers_timer = Instant::now();
-            let mut peers_reciver = dht.find_peers(info_hash.as_ref());
-            dht.save(Path::new("routing_table.json")).await.unwrap();
-            while let Some(peers) = peers_reciver.recv().await {
-                log::info!(
-                    "DHT find peers time: {}",
-                    find_peers_timer.elapsed().as_secs()
-                );
-                for peer_addr in peers {
-                    log::info!("Attempting connection to {}", peer_addr);
-                    peer_list_provider.insert_peer(info_hash, peer_addr);
+        let dht_client = builder.build().unwrap();
+        log::info!("Bootstrapping!");
+        dht_client.bootstrapped();
+        log::info!("Bootstrapping done!");
+        dht_client.announce_peer(info_hash, None).unwrap();
+
+        loop {
+            // query
+            let all_peers = dht_client.get_peers(info_hash);
+            for peers in all_peers {
+                log::info!("Got {} peers", peers.len());
+                for peer in peers {
+                    torrent_peer_list.insert_peer(peer);
                 }
             }
-        });
+            let bootstrap_nodes = dht_client.to_bootstrap();
+            let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
+            std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes()).unwrap();
+            std::thread::sleep(Duration::from_secs(30));
+        }
     });
 
     let id = generate_peer_id();

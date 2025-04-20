@@ -8,8 +8,6 @@ members = [
 ]
 
 [workspace.dependencies]
-tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring", branch = "master", features = ["bytes"]}
-tokio = { version = "1.44" }
 bytes = "1.10"
 anyhow = "1.0"
 ahash = "0.8"
