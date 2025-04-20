@@ -76,6 +76,4 @@ fn main() {
     let start_time = Instant::now();
     torrrent.start(rc, "downloaded").unwrap();
     log::info!("DOWNLOADED in {}", start_time.elapsed().as_secs());
-
-
 }
