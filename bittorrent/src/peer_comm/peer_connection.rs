@@ -416,6 +416,14 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             PeerMessage::Choke => {
                 log::error!("[Peer: {}] Peer is choking us!", self.peer_id);
                 self.peer_choking = true;
+                // Interpret all sent pieces as rejected
+                if !self.fast_ext {
+                    // Append them to queue so the release_pieces logic can release the inflight
+                    // pieces as well
+                    self.queued.append(&mut self.inflight);
+                    self.inflight.clear();
+                }
+                self.release_pieces(torrent_state);
             }
             PeerMessage::Unchoke => {
                 self.peer_choking = false;

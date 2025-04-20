@@ -143,8 +143,8 @@ impl PieceSelector {
     // TODO: Get rid of this?
     #[inline]
     pub fn mark_complete(&mut self, index: usize) {
-        debug_assert!(self.inflight_pieces[index]);
-        debug_assert!(!self.completed_pieces[index]);
+        assert!(self.inflight_pieces[index]);
+        assert!(!self.completed_pieces[index]);
         self.completed_pieces.set(index, true);
         self.inflight_pieces.set(index, false);
     }
@@ -161,7 +161,7 @@ impl PieceSelector {
 
     #[inline]
     pub fn mark_not_inflight(&mut self, index: usize) {
-        debug_assert!(self.inflight_pieces[index]);
+        assert!(self.inflight_pieces[index]);
         self.inflight_pieces.set(index, false);
     }
 
