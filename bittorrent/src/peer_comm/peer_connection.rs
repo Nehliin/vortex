@@ -421,7 +421,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     // Append them to queue so the release_pieces logic can release the inflight
                     // pieces as well
                     self.queued.append(&mut self.inflight);
-                    self.inflight.clear(); 
+                    self.inflight.clear();
                 }
                 self.release_pieces(torrent_state);
             }

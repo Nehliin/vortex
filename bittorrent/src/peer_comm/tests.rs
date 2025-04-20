@@ -503,7 +503,7 @@ fn peer_choke_recv_does_not_support_fast() {
         assert_eq!(connections[key].queued.len(), 0);
         // 1 piece completed (pending hashing), one was released
         assert_eq!(torrent_state.currently_downloading.len(), 0);
-        // index = 1 is not inflight over the network but pending hashing and thus is 
+        // index = 1 is not inflight over the network but pending hashing and thus is
         // still marked inflight
         for i in 2..7 {
             // No longer inflight!
