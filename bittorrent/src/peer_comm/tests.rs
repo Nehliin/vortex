@@ -360,6 +360,158 @@ fn desired_queue_size() {
     });
 }
 
+// Test that we deal with peers that support the fast extension correctly
+// when receving chokes
+#[test]
+fn peer_choke_recv_supports_fast() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let a = generate_peer(true, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+
+        connections[key].peer_choking = false;
+        connections[key].slow_start = false;
+        for i in 1..7 {
+            let mut subpieces = torrent_state.request_new_piece(i, &file_store);
+            connections[key].append_and_fill(&mut subpieces);
+        }
+        assert_eq!(torrent_state.currently_downloading.len(), 6);
+        assert_eq!(connections[key].target_inflight, 4);
+        assert_eq!(connections[key].queued.len(), 8);
+        assert_eq!(connections[key].inflight.len(), 4);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 1,
+                begin: 0,
+                data: vec![1; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 1,
+                begin: SUBPIECE_SIZE,
+                data: vec![2; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+
+        tick(
+            &Duration::from_millis(650),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+
+        // Want an odd number here to test releasing in flight pieces
+        assert_eq!(connections[key].target_inflight, 9);
+        assert_eq!(connections[key].inflight.len(), 9);
+        assert_eq!(connections[key].queued.len(), 1);
+        assert!(torrent_state.piece_selector.is_inflight(6));
+
+        connections[key].handle_message(
+            PeerMessage::Choke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key].is_choking);
+        assert_eq!(connections[key].target_inflight, 9);
+        assert_eq!(connections[key].inflight.len(), 9);
+        assert_eq!(connections[key].queued.len(), 0);
+        // 1 piece completed (pending hashing), one was released
+        assert_eq!(torrent_state.currently_downloading.len(), 4);
+        // No longer inflight!
+        assert!(!torrent_state.piece_selector.is_inflight(6));
+    });
+}
+
+#[test]
+fn peer_choke_recv_does_not_support_fast() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let a = generate_peer(false, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+
+        connections[key].peer_choking = false;
+        connections[key].slow_start = false;
+        for i in 1..7 {
+            let mut subpieces = torrent_state.request_new_piece(i, &file_store);
+            connections[key].append_and_fill(&mut subpieces);
+        }
+        assert_eq!(torrent_state.currently_downloading.len(), 6);
+        assert_eq!(connections[key].target_inflight, 4);
+        assert_eq!(connections[key].queued.len(), 8);
+        assert_eq!(connections[key].inflight.len(), 4);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 1,
+                begin: 0,
+                data: vec![1; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 1,
+                begin: SUBPIECE_SIZE,
+                data: vec![2; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+
+        tick(
+            &Duration::from_millis(650),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+
+        // Want an odd number here to test releasing in flight pieces
+        assert_eq!(connections[key].target_inflight, 9);
+        assert_eq!(connections[key].inflight.len(), 9);
+        assert_eq!(connections[key].queued.len(), 1);
+        assert!(torrent_state.piece_selector.is_inflight(6));
+
+        connections[key].handle_message(
+            PeerMessage::Choke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key].is_choking);
+        assert_eq!(connections[key].target_inflight, 9);
+        assert_eq!(connections[key].inflight.len(), 0);
+        assert_eq!(connections[key].queued.len(), 0);
+        // 1 piece completed (pending hashing), one was released
+        assert_eq!(torrent_state.currently_downloading.len(), 0);
+        // index = 1 is not inflight over the network but pending hashing and thus is 
+        // still marked inflight
+        for i in 2..7 {
+            // No longer inflight!
+            assert!(!torrent_state.piece_selector.is_inflight(i));
+        }
+    });
+}
+
 // TODO: ensure we request as many pieces as possible to actuall fill up all available queue spots
 // when starting up connections
 // #[test]

@@ -161,7 +161,6 @@ impl PieceSelector {
 
     #[inline]
     pub fn mark_not_inflight(&mut self, index: usize) {
-        debug_assert!(self.inflight_pieces[index]);
         self.inflight_pieces.set(index, false);
     }
 
