@@ -9,18 +9,14 @@ repository = "https://github.com/Nehliin/vortex"
 license = "BSD-3-Clause"
 
 [dependencies]
-tokio-uring = { workspace = true }
 anyhow = { workspace = true }
 ahash = { workspace = true }
 parking_lot = { workspace = true }
 lava_torrent = { workspace = true }
-tokio = { workspace = true, features = ["time", "sync", "macros"] }
 log = { workspace = true }
 env_logger = { workspace = true }
 vortex-bittorrent = { path = "../bittorrent" }
-vortex-dht = { path = "../dht" }
-indicatif = "0.17.3"
-futures = "0.3"
+mainline = "5"
 
 [dev-dependencies]
 num-bigint = "0.4.3"
