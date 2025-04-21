@@ -263,6 +263,16 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         });
     }
 
+    fn not_interested(&mut self, ordered: bool) {
+        // Consider requesting pieces here if we are unchoked
+        // this might happen after an unchoke request
+        self.is_interested = false;
+        self.outgoing_msgs_buffer.push(OutgoingMsg {
+            message: PeerMessage::NotInterested,
+            ordered,
+        });
+    }
+
     fn choke(&mut self, torrent_state: &mut TorrentState, ordered: bool) {
         if !self.is_choking {
             torrent_state.num_unchoked -= 1;
@@ -516,7 +526,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 torrent_state
                     .piece_selector
                     .set_peer_piece(self.conn_id, index);
-                if !had_before && !torrent_state.piece_selector.has_completed(index) {
+                if !had_before
+                    && !torrent_state.piece_selector.has_completed(index)
+                    && !torrent_state.piece_selector.is_inflight(index)
+                {
                     self.interested(false);
                 }
             }
@@ -567,8 +580,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 torrent_state
                     .piece_selector
                     .update_peer_pieces(self.conn_id, bitfield.into_boxed_bitslice());
-                // Mark ourselves as interested
-                self.interested(true);
+                if !torrent_state.is_complete {
+                    // Mark ourselves as interested
+                    self.interested(true);
+                }
             }
             PeerMessage::HaveNone => {
                 if !self.fast_ext {
@@ -586,6 +601,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 let num_pieces = torrent_state.num_pieces();
                 log::info!("[Peer: {}] Have None received", self.peer_id);
                 let bitfield = bitvec::bitvec!(usize, bitvec::order::Msb0; 0; num_pieces);
+                self.not_interested(false);
                 torrent_state
                     .piece_selector
                     .update_peer_pieces(self.conn_id, bitfield.into_boxed_bitslice());
@@ -615,14 +631,19 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     );
                     field.truncate(torrent_state.num_pieces());
                 }
+                let field = field.into_boxed_bitslice();
                 log::info!("[Peer: {}] Bifield received", self.peer_id);
                 torrent_state
                     .piece_selector
-                    .update_peer_pieces(self.conn_id, field.into_boxed_bitslice());
+                    .update_peer_pieces(self.conn_id, field.clone());
+
+                let new_available_pieces = torrent_state.piece_selector.new_available_pieces(field);
+                // Mark ourselves as interested if there are pieces we would like request
+                if new_available_pieces.any() {
+                    self.interested(true);
+                }
                 // TODO: if unchocked already we should request stuff (in case they are recvd out
                 // of order)
-                // Mark ourselves as interested
-                self.interested(true);
             }
             PeerMessage::SuggestPiece { index } => {
                 if !self.fast_ext {

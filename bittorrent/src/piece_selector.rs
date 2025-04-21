@@ -55,6 +55,13 @@ impl PieceSelector {
         }
     }
 
+    pub fn new_available_pieces(&self, mut field: BitBox<usize, Msb0>) -> BitBox<usize, Msb0> {
+        let mut tmp = self.completed_pieces.clone();
+        tmp |= &self.inflight_pieces;
+        field &= !tmp;
+        field
+    }
+
     pub fn next_piece(&self, connection_id: usize) -> Option<i32> {
         let pieces_left = self.completed_pieces.count_zeros();
         if pieces_left == 0 {
@@ -62,12 +69,8 @@ impl PieceSelector {
             return None;
         }
 
-        // TODO: avoid clone
-        let mut available_pieces = self.peer_pieces.get(&connection_id)?.clone();
-        // Discount completed or inflight pieces
-        let mut tmp = self.completed_pieces.clone();
-        tmp |= &self.inflight_pieces;
-        available_pieces &= !tmp;
+        let available_pieces =
+            self.new_available_pieces(self.peer_pieces.get(&connection_id)?.clone());
 
         if available_pieces.not_any() {
             log::warn!(
