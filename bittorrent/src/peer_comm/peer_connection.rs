@@ -431,8 +431,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     // Not interested so don't do anything
                     return;
                 }
-                // TODO: This should not request piece but just stuff which may or may not be a
-                // piece
                 if let Some(piece_idx) = torrent_state.piece_selector.next_piece(self.conn_id) {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);

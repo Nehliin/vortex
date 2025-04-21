@@ -248,6 +248,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     for (conn_id, connection) in self.connections.iter_mut() {
                         if let Some(reason) = &connection.pending_disconnect {
                             log::warn!("Disconnect: {} reason {reason}", connection.peer_id);
+                            // Event handler for this deals with releasing pieces and decrements
+                            // num unchoked
                             io_utils::stop_connection(
                                 &mut sq,
                                 conn_id,
