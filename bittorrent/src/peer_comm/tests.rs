@@ -512,6 +512,58 @@ fn peer_choke_recv_does_not_support_fast() {
     });
 }
 
+#[test]
+fn unchoke_recv() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let a = generate_peer(false, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+
+        assert!(connections[key].peer_choking);
+        connections[key].is_interested = false;
+        connections[key].handle_message(
+            PeerMessage::Unchoke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(!connections[key].peer_choking);
+        // No intrest so nothing is downloaded
+        assert!(connections[key].queued.is_empty());
+        assert!(connections[key].inflight.is_empty());
+        assert!(torrent_state.currently_downloading.is_empty());
+
+        let a = generate_peer(true, 1);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key].peer_choking);
+        assert!(connections[key].is_interested);
+        connections[key].handle_message(
+            PeerMessage::Unchoke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(!connections[key].peer_choking);
+        // Peer is interesting so we start downloading
+        assert!(!(connections[key].queued.is_empty() && connections[key].inflight.is_empty()));
+        assert!(!torrent_state.currently_downloading.is_empty());
+    });
+}
+
+// TODO: num_unchoked after disconnecting (tick maybe should return num disconnected? for easy testing)
+
 // TODO: ensure we request as many pieces as possible to actuall fill up all available queue spots
 // when starting up connections
 // #[test]
