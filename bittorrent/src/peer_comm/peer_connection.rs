@@ -77,7 +77,6 @@ impl MovingRttAverage {
     }
 }
 
-// TODO: don't send pieces the peer already have
 fn generate_fast_set(
     set_size: u32,
     num_pieces: u32,
@@ -137,7 +136,7 @@ pub struct PeerConnection {
     /// This side is choking the peer
     pub is_choking: bool,
     /// This side is interested what the peer has to offer
-    pub is_interested: bool,
+    pub is_interesting: bool,
     /// Have we sent allowed fast set yet too the peer
     pub sent_allowed_fast: bool,
     pub fast_ext: bool,
@@ -180,7 +179,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             conn_id,
             peer_id,
             is_choking: true,
-            is_interested: false,
+            is_interesting: false,
             sent_allowed_fast: false,
             peer_choking: true,
             peer_interested: false,
@@ -256,17 +255,15 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     fn interested(&mut self, ordered: bool) {
         // Consider requesting pieces here if we are unchoked
         // this might happen after an unchoke request
-        self.is_interested = true;
+        self.is_interesting = true;
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Interested,
             ordered,
         });
     }
 
-    fn not_interested(&mut self, ordered: bool) {
-        // Consider requesting pieces here if we are unchoked
-        // this might happen after an unchoke request
-        self.is_interested = false;
+    pub fn not_interested(&mut self, ordered: bool) {
+        self.is_interesting = false;
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::NotInterested,
             ordered,
@@ -437,7 +434,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             }
             PeerMessage::Unchoke => {
                 self.peer_choking = false;
-                if !self.is_interested {
+                if !self.is_interesting {
                     // Not interested so don't do anything
                     return;
                 }
@@ -458,21 +455,17 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 if !self.sent_allowed_fast && self.fast_ext {
                     self.sent_allowed_fast = true;
                     const ALLOWED_FAST_SET_SIZE: usize = 6;
+                    // TODO: don't send pieces the peer already have
                     if ALLOWED_FAST_SET_SIZE >= torrent_state.num_pieces() {
                         for index in 0..torrent_state.num_pieces() {
-                            if !torrent_state
-                                .piece_selector
-                                .do_peer_have_piece(self.conn_id, index)
-                            {
-                                let index = index as i32;
-                                if !self.accept_fast_pieces.contains(&index) {
-                                    self.accept_fast_pieces.push(index);
-                                }
-                                self.outgoing_msgs_buffer.push(OutgoingMsg {
-                                    message: PeerMessage::AllowedFast { index },
-                                    ordered: false,
-                                });
+                            let index = index as i32;
+                            if !self.accept_fast_pieces.contains(&index) {
+                                self.accept_fast_pieces.push(index);
                             }
+                            self.outgoing_msgs_buffer.push(OutgoingMsg {
+                                message: PeerMessage::AllowedFast { index },
+                                ordered: false,
+                            });
                         }
                     } else {
                         generate_fast_set(
@@ -520,16 +513,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     self.peer_id
                 );
                 let index = index as usize;
-                let had_before = torrent_state
+                let is_interesting = torrent_state
                     .piece_selector
-                    .do_peer_have_piece(self.conn_id, index);
-                torrent_state
-                    .piece_selector
-                    .set_peer_piece(self.conn_id, index);
-                if !had_before
-                    && !torrent_state.piece_selector.has_completed(index)
-                    && !torrent_state.piece_selector.is_inflight(index)
-                {
+                    .peer_have_piece(self.conn_id, index);
+                if is_interesting && !self.is_interesting {
                     self.interested(false);
                 }
             }
@@ -544,11 +531,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     log::warn!("[PeerId: {}] Invalid allowed fast message", self.peer_id);
                 } else if !self.allowed_fast_pieces.contains(&index) {
                     self.allowed_fast_pieces.push(index);
-                    if !torrent_state.piece_selector.has_completed(index as usize)
+                    let is_interesting_piece = torrent_state
+                        .piece_selector
+                        .interesting_peer_pieces(self.conn_id);
+                    if is_interesting_piece[index as usize]
                         && !torrent_state.piece_selector.is_inflight(index as usize)
-                        && torrent_state
-                            .piece_selector
-                            .do_peer_have_piece(self.conn_id, index as usize)
                     {
                         log::info!(
                             "[PeerId: {}] Requesting new piece {index} via Allowed fast set!",
