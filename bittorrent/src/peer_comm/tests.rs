@@ -12,8 +12,9 @@ use crate::{
 
 use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};
 
+#[track_caller]
 fn sent_and_marked_interested(peer: &PeerConnection) {
-    assert!(peer.is_interested);
+    assert!(peer.is_interesting);
     assert!(
         peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
             message: PeerMessage::Interested,
@@ -25,13 +26,27 @@ fn sent_and_marked_interested(peer: &PeerConnection) {
     );
 }
 
+#[track_caller]
+fn sent_and_marked_not_interested(peer: &PeerConnection) {
+    assert!(!peer.is_interesting);
+    assert!(
+        peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
+            message: PeerMessage::NotInterested,
+            ordered: false,
+        }) || peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
+            message: PeerMessage::NotInterested,
+            ordered: true,
+        })
+    );
+}
+
 #[test]
 fn fast_ext_have_all() {
     let (file_store, torrent_info) = setup_test();
     let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
         let mut a = generate_peer(true, 0);
-        assert!(!a.is_interested);
+        assert!(!a.is_interesting);
         a.handle_message(
             PeerMessage::HaveAll,
             &mut torrent_state,
@@ -46,7 +61,7 @@ fn fast_ext_have_all() {
             assert!(
                 torrent_state
                     .piece_selector
-                    .do_peer_have_piece(a.conn_id, piece_id)
+                    .interesting_peer_pieces(a.conn_id)[piece_id]
             );
         }
 
@@ -64,7 +79,7 @@ fn fast_ext_have_all() {
         // Do not mark as interestead if we've already completed the torrent
         let mut a = generate_peer(true, 3);
         torrent_state.is_complete = true;
-        assert!(!a.is_interested);
+        assert!(!a.is_interesting);
         a.handle_message(
             PeerMessage::HaveAll,
             &mut torrent_state,
@@ -73,7 +88,7 @@ fn fast_ext_have_all() {
             scope,
         );
         assert!(torrent_state.piece_selector.bitfield_received(a.conn_id));
-        assert!(!a.is_interested);
+        assert!(!a.is_interesting);
     });
 }
 
@@ -83,7 +98,7 @@ fn fast_ext_have_none() {
     let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
         let mut a = generate_peer(true, 0);
-        a.is_interested = true;
+        a.is_interesting = true;
         a.handle_message(
             PeerMessage::HaveNone,
             &mut torrent_state,
@@ -92,21 +107,15 @@ fn fast_ext_have_none() {
             scope,
         );
         // we are not interestead in peers that have nothing
-        assert!(!a.is_interested);
-        assert!(a.outgoing_msgs_buffer.contains(&OutgoingMsg {
-            message: PeerMessage::NotInterested,
-            ordered: false
-        }));
+        sent_and_marked_not_interested(&a);
         assert!(torrent_state.piece_selector.bitfield_received(a.conn_id));
         assert!(a.pending_disconnect.is_none());
-        for piece_id in 0..torrent_info.pieces.len() {
-            assert!(
-                !torrent_state
-                    .piece_selector
-                    .do_peer_have_piece(a.conn_id, piece_id)
-            );
-        }
-
+        assert!(
+            !torrent_state
+                .piece_selector
+                .interesting_peer_pieces(a.conn_id)
+                .any()
+        );
         // Peers that do not state they support fast_ext are disconnected
         let mut b = generate_peer(false, 1);
         b.handle_message(
@@ -142,23 +151,23 @@ fn have() {
             message: PeerMessage::Interested,
             ordered: false
         }));
+        a.outgoing_msgs_buffer.clear();
         for piece_id in 0..torrent_info.pieces.len() {
             if piece_id == 8 {
                 assert!(
                     torrent_state
                         .piece_selector
-                        .do_peer_have_piece(a.conn_id, piece_id)
+                        .interesting_peer_pieces(a.conn_id)[piece_id]
                 );
             } else {
                 assert!(
                     !torrent_state
                         .piece_selector
-                        .do_peer_have_piece(a.conn_id, piece_id)
+                        .interesting_peer_pieces(a.conn_id)[piece_id]
                 );
             }
         }
-        a.is_interested = false;
-        // Does not mark as interestead
+        // Does not send interested again
         a.handle_message(
             PeerMessage::Have { index: 8 },
             &mut torrent_state,
@@ -166,12 +175,12 @@ fn have() {
             &torrent_info,
             scope,
         );
-        assert!(!a.is_interested);
+        assert!(a.outgoing_msgs_buffer.is_empty());
         let mut subpieces = torrent_state.request_new_piece(8, &file_store);
         a.append_and_fill(&mut subpieces);
 
         let mut b = generate_peer(true, 1);
-        assert!(!b.is_interested);
+        assert!(!b.is_interesting);
         assert!(torrent_state.piece_selector.is_inflight(8));
         // Does not mark as interestead since the piece is inflight
         b.handle_message(
@@ -184,13 +193,13 @@ fn have() {
         assert!(
             torrent_state
                 .piece_selector
-                .do_peer_have_piece(b.conn_id, 8)
+                .interesting_peer_pieces(a.conn_id)[8]
         );
     });
 }
 
 #[test]
-fn have_without_intrest() {
+fn have_without_interest() {
     let (file_store, torrent_info) = setup_test();
     let mut torrent_state = TorrentState::new(&torrent_info);
     // Needed to avoid hitting asserts
@@ -209,22 +218,13 @@ fn have_without_intrest() {
         assert!(torrent_state.piece_selector.bitfield_received(a.conn_id));
         assert!(a.pending_disconnect.is_none());
         // We should not be interestead now since we do already have the piece
-        assert!(!a.is_interested);
-        for piece_id in 0..torrent_info.pieces.len() {
-            if piece_id == 8 {
-                assert!(
-                    torrent_state
-                        .piece_selector
-                        .do_peer_have_piece(a.conn_id, piece_id)
-                );
-            } else {
-                assert!(
-                    !torrent_state
-                        .piece_selector
-                        .do_peer_have_piece(a.conn_id, piece_id)
-                );
-            }
-        }
+        assert!(!a.is_interesting);
+        assert!(
+            !torrent_state
+                .piece_selector
+                .interesting_peer_pieces(a.conn_id)
+                .any()
+        );
     });
 }
 
@@ -586,7 +586,7 @@ fn unchoke_recv() {
         let key = connections.insert(a);
 
         assert!(connections[key].peer_choking);
-        connections[key].is_interested = false;
+        connections[key].is_interesting = false;
         connections[key].handle_message(
             PeerMessage::Unchoke,
             &mut torrent_state,
@@ -611,7 +611,7 @@ fn unchoke_recv() {
             scope,
         );
         assert!(connections[key].peer_choking);
-        assert!(connections[key].is_interested);
+        assert!(connections[key].is_interesting);
         connections[key].handle_message(
             PeerMessage::Unchoke,
             &mut torrent_state,
@@ -628,15 +628,13 @@ fn unchoke_recv() {
 
 // TODO: num_unchoked after disconnecting (tick maybe should return num disconnected? for easy testing)
 
-// dop om till bara bitfield test o sakerstall att have none INTE ger intrestead
-// ha nytt test for uppdatera statet nar man mottar piece
 #[test]
 fn bitfield_recv() {
     let (file_store, torrent_info) = setup_test();
     let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
         let mut a = generate_peer(true, 0);
-        assert!(!a.is_interested);
+        assert!(!a.is_interesting);
         assert!(!torrent_state.piece_selector.bitfield_received(a.conn_id));
         let num_pieces = torrent_state.num_pieces();
         let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; num_pieces);
@@ -658,13 +656,13 @@ fn bitfield_recv() {
                 assert!(
                     !torrent_state
                         .piece_selector
-                        .do_peer_have_piece(a.conn_id, i)
+                        .interesting_peer_pieces(a.conn_id)[i]
                 );
             } else {
                 assert!(
                     torrent_state
                         .piece_selector
-                        .do_peer_have_piece(a.conn_id, i)
+                        .interesting_peer_pieces(a.conn_id)[i]
                 );
                 // MOCK that the pieces have been requested/completed by a
                 if i % 2 == 0 {
@@ -677,7 +675,7 @@ fn bitfield_recv() {
         }
 
         let mut b = generate_peer(true, 1);
-        assert!(!b.is_interested);
+        assert!(!b.is_interesting);
         assert!(!torrent_state.piece_selector.bitfield_received(b.conn_id));
         let num_pieces = torrent_state.num_pieces();
         let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; num_pieces);
@@ -691,11 +689,11 @@ fn bitfield_recv() {
             scope,
         );
         // Still not interestead since no new pieces can be downloaded received
-        assert!(!b.is_interested);
+        assert!(!b.is_interesting);
         assert!(torrent_state.piece_selector.bitfield_received(b.conn_id));
 
         let mut c = generate_peer(true, 2);
-        assert!(!c.is_interested);
+        assert!(!c.is_interesting);
         assert!(!torrent_state.piece_selector.bitfield_received(c.conn_id));
         let num_pieces = torrent_state.num_pieces();
         let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; num_pieces);
@@ -710,6 +708,103 @@ fn bitfield_recv() {
         // New piece can be downloaded
         sent_and_marked_interested(&c);
         assert!(torrent_state.piece_selector.bitfield_received(c.conn_id));
+    });
+}
+
+// TODO test we do not resend the not_interested message
+#[test]
+fn interest_is_updated_when_recv_piece() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let a = generate_peer(true, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+
+        assert!(!connections[key].is_interesting);
+        assert!(
+            !torrent_state
+                .piece_selector
+                .bitfield_received(connections[key].conn_id)
+        );
+        let num_pieces = torrent_state.num_pieces();
+        let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 0; num_pieces);
+        field.set(2, true);
+        field.set(4, true);
+        connections[key].handle_message(
+            PeerMessage::Bitfield(field),
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        // We are interestead since we do not have the pieces
+        sent_and_marked_interested(&connections[key]);
+        assert!(
+            torrent_state
+                .piece_selector
+                .bitfield_received(connections[key].conn_id)
+        );
+
+        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
+        let mut subpieces = torrent_state.request_new_piece(4, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
+        assert_eq!(connections[key].inflight.len(), 4);
+        assert!(connections[key].queued.is_empty());
+
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        // To ensure we do not miss the completion event
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections);
+        assert!(connections[key].is_interesting);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 4,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 4,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        // To ensure we do not miss the completion event
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections);
+        sent_and_marked_not_interested(&connections[key]);
     });
 }
 
