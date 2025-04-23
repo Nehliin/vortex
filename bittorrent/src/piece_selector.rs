@@ -58,7 +58,7 @@ impl PieceSelector {
         }
     }
 
-    pub fn new_available_pieces(&self, mut field: BitBox<usize, Msb0>) -> BitBox<usize, Msb0> {
+    fn new_available_pieces(&self, mut field: BitBox<usize, Msb0>) -> BitBox<usize, Msb0> {
         let mut tmp = self.completed_pieces.clone();
         tmp |= &self.inflight_pieces;
         field &= !tmp;

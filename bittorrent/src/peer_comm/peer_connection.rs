@@ -624,9 +624,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     .piece_selector
                     .update_peer_pieces(self.conn_id, field.clone());
 
-                let new_available_pieces = torrent_state.piece_selector.new_available_pieces(field);
+                let interesting_pieces = torrent_state
+                    .piece_selector
+                    .interesting_peer_pieces(self.conn_id);
                 // Mark ourselves as interested if there are pieces we would like request
-                if new_available_pieces.any() {
+                if interesting_pieces.any() {
                     self.interested(true);
                 }
                 // TODO: if unchocked already we should request stuff (in case they are recvd out
