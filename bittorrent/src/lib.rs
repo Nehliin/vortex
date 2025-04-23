@@ -27,7 +27,7 @@ mod io_utils;
 mod peer_comm;
 mod piece_selector;
 
-use peer_comm::*;
+use peer_comm::{peer_connection::PeerConnection, *};
 
 #[cfg(feature = "fuzzing")]
 pub use peer_protocol::*;
@@ -126,17 +126,27 @@ impl<'f_store> TorrentState<'f_store> {
         self.num_pieces
     }
 
-    pub(crate) fn update_torrent_status(&mut self) {
+    // TODO: Put this in the event loop directly instead when that is easier to test
+    pub(crate) fn update_torrent_status(&mut self, connections: &mut Slab<PeerConnection>) {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             match completed_piece.hash_matched {
                 Ok(hash_matched) => {
                     if hash_matched {
                         self.piece_selector.mark_complete(completed_piece.index);
+                        for (conn_id, peer) in connections.iter_mut() {
+                            if !self.piece_selector.interesting_peer_pieces(conn_id).any()
+                                && peer.is_interesting
+                            {
+                                // We are no longer interestead in this peer
+                                peer.not_interested(false);
+                            }
+                        }
                         log::info!(
                             "Piece {}/{} completed!",
                             self.piece_selector.total_completed(),
                             self.piece_selector.pieces()
                         );
+
                         // TODO: send have messages
                         if self.piece_selector.completed_all() {
                             self.is_complete = true;
