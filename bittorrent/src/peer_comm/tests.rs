@@ -664,13 +664,9 @@ fn bitfield_recv() {
                         .piece_selector
                         .interesting_peer_pieces(a.conn_id)[i]
                 );
-                // MOCK that the pieces have been requested/completed by a
-                if i % 2 == 0 {
-                    torrent_state.piece_selector.mark_inflight(i);
-                    torrent_state.piece_selector.mark_complete(i);
-                } else {
-                    torrent_state.piece_selector.mark_inflight(i);
-                }
+                // MOCK that the pieces have been completed by a
+                torrent_state.piece_selector.mark_inflight(i);
+                torrent_state.piece_selector.mark_complete(i);
             }
         }
 

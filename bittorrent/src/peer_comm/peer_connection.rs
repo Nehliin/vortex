@@ -566,7 +566,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 let bitfield = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; num_pieces);
                 torrent_state
                     .piece_selector
-                    .update_peer_pieces(self.conn_id, bitfield.into_boxed_bitslice());
+                    .peer_bitfield(self.conn_id, bitfield.into_boxed_bitslice());
                 if !torrent_state.is_complete {
                     // Mark ourselves as interested
                     self.interested(true);
@@ -591,7 +591,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 self.not_interested(false);
                 torrent_state
                     .piece_selector
-                    .update_peer_pieces(self.conn_id, bitfield.into_boxed_bitslice());
+                    .peer_bitfield(self.conn_id, bitfield.into_boxed_bitslice());
             }
             PeerMessage::Bitfield(mut field) => {
                 if torrent_state.piece_selector.bitfield_received(self.conn_id) && self.fast_ext {
@@ -620,15 +620,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 }
                 let field = field.into_boxed_bitslice();
                 log::info!("[Peer: {}] Bifield received", self.peer_id);
-                torrent_state
+                let is_interesting = torrent_state
                     .piece_selector
-                    .update_peer_pieces(self.conn_id, field.clone());
+                    .peer_bitfield(self.conn_id, field.clone());
 
-                let interesting_pieces = torrent_state
-                    .piece_selector
-                    .interesting_peer_pieces(self.conn_id);
                 // Mark ourselves as interested if there are pieces we would like request
-                if interesting_pieces.any() {
+                if !self.is_interesting && is_interesting {
                     self.interested(true);
                 }
                 // TODO: if unchocked already we should request stuff (in case they are recvd out

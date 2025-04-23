@@ -120,11 +120,18 @@ impl PieceSelector {
         self.interesting_peer_pieces.contains_key(&connection_id)
     }
 
-    pub fn update_peer_pieces(&mut self, connection_id: usize, peer_pieces: BitBox<usize, Msb0>) {
-        let entry = self.interesting_peer_pieces.entry(connection_id);
-        entry
-            .and_modify(|pieces| *pieces |= &peer_pieces)
-            .or_insert(peer_pieces);
+    // Updates the interesting peer pieces and returns if the peer has any interesting pieces
+    pub fn peer_bitfield(
+        &mut self,
+        connection_id: usize,
+        peer_pieces: BitBox<usize, Msb0>,
+    ) -> bool {
+        let not_completed = !self.completed_pieces.clone();
+        let interesting_pieces = peer_pieces & not_completed;
+        let is_interesting = interesting_pieces.any();
+        self.interesting_peer_pieces
+            .insert(connection_id, interesting_pieces);
+        is_interesting
     }
 
     // Updates the interesting peer pieces tracking and returns if the piece index was interesting
