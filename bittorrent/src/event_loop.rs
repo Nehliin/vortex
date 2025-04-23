@@ -283,6 +283,9 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                         self.read_ring.return_bid(bid);
                     }
                 }
+
+                torrent_state.update_torrent_status(&mut self.connections);
+
                 for (conn_id, connection) in self.connections.iter_mut() {
                     for msg in connection.outgoing_msgs_buffer.iter_mut() {
                         let conn_fd = connection.socket.as_raw_fd();
@@ -303,7 +306,6 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 }
                 sq.sync();
                 self.connect_to_new_peers(&mut sq)?;
-                torrent_state.update_torrent_status();
                 if torrent_state.is_complete {
                     log::info!("Torrent complete!");
                     return Ok(());
