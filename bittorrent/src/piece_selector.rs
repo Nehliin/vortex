@@ -149,9 +149,9 @@ impl PieceSelector {
         is_interesting
     }
 
-    // All interesting peer pieces
-    pub fn interesting_peer_pieces(&self, connection_id: usize) -> &BitBox<usize, Msb0> {
-        &self.interesting_peer_pieces[&connection_id]
+    // All interesting peer pieces if a bitfield has been received
+    pub fn interesting_peer_pieces(&self, connection_id: usize) -> Option<&BitBox<usize, Msb0>> {
+        self.interesting_peer_pieces.get(&connection_id)
     }
 
     #[inline]
