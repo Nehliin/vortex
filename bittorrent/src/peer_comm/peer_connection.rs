@@ -659,6 +659,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         );
                         None
                     } else {
+                        if !self.peer_interested {
+                            self.peer_interested = true;
+                        }
                         let should_unchoke = torrent_state.should_unchoke();
                         if should_unchoke && self.is_choking {
                             self.unchoke(torrent_state, true);

@@ -804,6 +804,36 @@ fn interest_is_updated_when_recv_piece() {
     });
 }
 
+#[test]
+fn assume_intrest_when_request_recv() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let mut a = generate_peer(true, 0);
+        a.handle_message(
+            PeerMessage::HaveAll,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(!a.peer_interested);
+        a.handle_message(
+            PeerMessage::Request {
+                index: 2,
+                begin: 0,
+                length: SUBPIECE_SIZE,
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        // Assume the peer is interestead we recv a request from them
+        assert!(a.peer_interested);
+    });
+}
+
 // TODO: ensure we request as many pieces as possible to actuall fill up all available queue spots
 // when starting up connections
 // #[test]
