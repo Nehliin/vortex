@@ -134,12 +134,15 @@ impl<'f_store> TorrentState<'f_store> {
                     if hash_matched {
                         self.piece_selector.mark_complete(completed_piece.index);
                         for (conn_id, peer) in connections.iter_mut() {
-                            if !self.piece_selector.interesting_peer_pieces(conn_id).any()
-                                && peer.is_interesting
+                            if let Some(bitfield) =
+                                self.piece_selector.interesting_peer_pieces(conn_id)
                             {
-                                // We are no longer interestead in this peer
-                                peer.not_interested(false);
+                                if !bitfield.any() && peer.is_interesting {
+                                    // We are no longer interestead in this peer
+                                    peer.not_interested(false);
+                                }
                             }
+                            peer.have(completed_piece.index as i32, false);
                         }
                         log::info!(
                             "Piece {}/{} completed!",
@@ -147,7 +150,6 @@ impl<'f_store> TorrentState<'f_store> {
                             self.piece_selector.pieces()
                         );
 
-                        // TODO: send have messages
                         if self.piece_selector.completed_all() {
                             self.is_complete = true;
                         }
