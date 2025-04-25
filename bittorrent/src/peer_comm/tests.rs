@@ -199,6 +199,34 @@ fn have() {
 }
 
 #[test]
+fn have_invalid_indicies() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let mut a = generate_peer(true, 0);
+        a.handle_message(
+            PeerMessage::Have { index: -1 },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(a.pending_disconnect.is_some());
+        let mut b = generate_peer(false, 0);
+        b.handle_message(
+            PeerMessage::Have {
+                index: torrent_state.num_pieces as i32,
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(b.pending_disconnect.is_some());
+    });
+}
+
+#[test]
 fn have_without_interest() {
     let (file_store, torrent_info) = setup_test();
     let mut torrent_state = TorrentState::new(&torrent_info);

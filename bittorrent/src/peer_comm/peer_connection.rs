@@ -508,6 +508,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 self.choke(torrent_state, false);
             }
             PeerMessage::Have { index } => {
+                if 0 > index || index >= torrent_state.num_pieces as i32 {
+                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+                        "Invalid have index received",
+                    ));
+                    return;
+                }
                 log::info!(
                     "[Peer: {}] Peer have piece with index: {index}",
                     self.peer_id
