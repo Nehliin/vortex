@@ -661,11 +661,25 @@ fn bitfield_recv() {
     let (file_store, torrent_info) = setup_test();
     let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
+        {
+            let mut b = generate_peer(true, 0);
+            assert!(b.pending_disconnect.is_none());
+            let invalid_field =
+                bitvec::bitvec!(usize, bitvec::order::Msb0; 1; torrent_state.num_pieces() - 1);
+            b.handle_message(
+                PeerMessage::Bitfield(invalid_field),
+                &mut torrent_state,
+                &file_store,
+                &torrent_info,
+                scope,
+            );
+            assert!(b.pending_disconnect.is_some());
+        }
+
         let mut a = generate_peer(true, 0);
         assert!(!a.is_interesting);
         assert!(!torrent_state.piece_selector.bitfield_received(a.conn_id));
-        let num_pieces = torrent_state.num_pieces();
-        let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; num_pieces);
+        let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; torrent_state.num_pieces());
         field.set(2, false);
         field.set(4, false);
         a.handle_message(
@@ -679,7 +693,7 @@ fn bitfield_recv() {
         sent_and_marked_interested(&a);
         assert!(torrent_state.piece_selector.bitfield_received(a.conn_id));
 
-        for i in 0..num_pieces {
+        for i in 0..torrent_state.num_pieces() {
             if i == 2 || i == 4 {
                 assert!(
                     !torrent_state
