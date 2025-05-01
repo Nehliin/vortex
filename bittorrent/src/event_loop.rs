@@ -654,7 +654,7 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
     // 1. Calculate bandwidth (deal with initial start up)
     // 2. Go through them in order
     // 3. select pieces
-    for (id, connection) in connections
+    for (_, connection) in connections
         .iter_mut()
         // Filter out connections that are pending diconnect
         .filter(|(_, conn)| conn.pending_disconnect.is_none())
