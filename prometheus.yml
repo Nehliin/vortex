@@ -1,0 +1,9 @@
+global:
+  # Remember that this needs to be configured in the grafana settings as well!
+  scrape_interval: 250ms 
+
+scrape_configs:
+  - job_name: 'vortex'
+    static_configs:
+      - targets: ['host.containers.internal:9000']
+

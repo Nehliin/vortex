@@ -6,6 +6,7 @@ use std::{
 };
 
 use mainline::{Dht, Id};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use vortex_bittorrent::{Torrent, generate_peer_id};
 
 struct TorrentPeerList {
@@ -28,6 +29,8 @@ fn main() {
     let mut log_builder = env_logger::builder();
     log_builder.filter_level(log::LevelFilter::Info).init();
 
+    let builder = PrometheusBuilder::new();
+    builder.install().unwrap();
     // TODO Should start dht first
     let torrent_info =
         lava_torrent::torrent::v1::Torrent::read_from_file("debian.torrent").unwrap();

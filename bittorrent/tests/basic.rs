@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use metrics_exporter_prometheus::PrometheusBuilder;
 use vortex_bittorrent::{Torrent, generate_peer_id};
 
 #[test]
@@ -7,6 +8,8 @@ fn basic_seeded_download() {
     env_logger::builder()
         .filter_level(log::LevelFilter::Trace)
         .init();
+    let builder = PrometheusBuilder::new();
+    builder.install().unwrap();
     let torrent =
         lava_torrent::torrent::v1::Torrent::read_from_file("../assets/test-file-1.torrent")
             .unwrap();

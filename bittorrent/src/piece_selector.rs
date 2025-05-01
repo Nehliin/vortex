@@ -213,6 +213,11 @@ impl PieceSelector {
     }
 
     #[inline]
+    pub fn total_inflight(&self) -> usize {
+        self.inflight_pieces.count_ones()
+    }
+
+    #[inline]
     pub fn piece_len(&self, index: i32) -> u32 {
         if index == (self.completed_pieces.len() as i32 - 1) {
             self.last_piece_length

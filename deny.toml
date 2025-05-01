@@ -17,6 +17,7 @@ skip = [
     { name = "thiserror-impl" },
     { name = "thiserror" },
     { name = "smallvec", version = "2.0.0-alpha.10" },
+    { name = "itertools", version = "*" },
     { name = "getrandom", version = "*" },
     { name = "zerocopy", version = "*" }
 ]
@@ -27,7 +28,6 @@ skip-tree = [{name = "tokio-uring"}]
 version = 2
 # We want really high confidence when inferring licenses from text
 confidence-threshold = 0.93
-allow = ["Apache-2.0", "BSD-3-Clause", "MIT", "Unicode-3.0"]
+allow = ["Apache-2.0", "BSD-3-Clause", "MIT", "Unicode-3.0", "ISC", "OpenSSL", "Zlib"]
 exceptions = [
-    { allow = ["Zlib"], name = "slotmap" },
 ]

@@ -385,6 +385,21 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.moving_rtt.add_sample(&rtt);
     }
 
+    pub fn report_metrics(&self) {
+        let gauge = metrics::gauge!("peer.throughput.bytes", "peer_id" => self.peer_id.to_string());
+        // Prev throughput is used since the mertics are reported at the end of TICK and
+        // throughput have been reset and stored here at that point
+        gauge.set(self.prev_throughput as u32);
+        let gauge = metrics::gauge!("peer.target_inflight", "peer_id" => self.peer_id.to_string());
+        gauge.set(self.target_inflight as u32);
+        let gauge = metrics::gauge!("peer.queued", "peer_id" => self.peer_id.to_string());
+        gauge.set(self.queued.len() as u32);
+        let gauge = metrics::gauge!("peer.inflight", "peer_id" => self.peer_id.to_string());
+        gauge.set(self.inflight.len() as u32);
+        let histogram = metrics::histogram!("rtt", "peer_id" => self.peer_id.to_string());
+        histogram.record(self.moving_rtt.mean());
+    }
+
     pub fn on_request_timeout(&mut self, torrent_state: &mut TorrentState) {
         let Some(subpiece) = self.inflight.pop_back() else {
             // Probably caused by the request being rejected or the timeout happen because
