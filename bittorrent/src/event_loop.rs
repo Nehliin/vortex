@@ -688,7 +688,6 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
             connection.target_inflight = connection.target_inflight.max(1);
         }
 
-
         if !connection.peer_choking
             && connection.slow_start
             && connection.throughput > 0
