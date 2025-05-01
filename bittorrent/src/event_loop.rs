@@ -633,6 +633,17 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection.fill_request_queue();
 }
 
+fn report_metrics(torrent_state: &TorrentState<'_>, connections: &Slab<PeerConnection>) {
+    let counter = metrics::counter!("pieces_completed");
+    counter.absolute(torrent_state.piece_selector.total_completed() as u64);
+    let gauge = metrics::gauge!("pieces_inflight");
+    gauge.set(torrent_state.piece_selector.total_inflight() as u32);
+    let gauge = metrics::gauge!("num_unchoked");
+    gauge.set(torrent_state.num_unchoked);
+    let gauge = metrics::gauge!("num_connections");
+    gauge.set(connections.len() as u32);
+}
+
 pub(crate) fn tick<'scope, 'f_store: 'scope>(
     tick_delta: &Duration,
     connections: &mut Slab<PeerConnection>,
@@ -672,19 +683,12 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
                 let new_queue_capacity =
                     3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
                 connection.target_inflight = new_queue_capacity as usize;
-                log::debug!("Updated desired queue size: {new_queue_capacity}");
                 connection.target_inflight = connection.target_inflight.clamp(0, 500);
             }
             connection.target_inflight = connection.target_inflight.max(1);
         }
-        log::info!(
-            "[Peer {}, id: {id}]: throughput: {} bytes/s, queue: {}/{}, time between subpieces: {}ms",
-            connection.peer_id,
-            connection.throughput,
-            connection.inflight.len(),
-            connection.target_inflight,
-            connection.moving_rtt.mean().as_millis(),
-        );
+
+
         if !connection.peer_choking
             && connection.slow_start
             && connection.throughput > 0
@@ -732,7 +736,10 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
             }
         }
         peer.fill_request_queue();
+        peer.report_metrics();
     }
+
+    report_metrics(torrent_state, connections);
 }
 
 #[cfg(test)]

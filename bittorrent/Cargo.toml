@@ -23,9 +23,11 @@ thiserror = { workspace = true }
 sha1 = { workspace = true }
 smallvec= { version = "2.0.0-alpha.10" , features = ["std"]}
 rayon = "1"
+metrics = "0.24"
 
 [features]
 fuzzing = ["dep:arbitrary"]
 
 [dev-dependencies]
+metrics-exporter-prometheus = "0.17"
 env_logger = { workspace = true }

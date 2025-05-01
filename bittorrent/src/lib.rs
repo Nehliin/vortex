@@ -144,7 +144,7 @@ impl<'f_store> TorrentState<'f_store> {
                             }
                             peer.have(completed_piece.index as i32, false);
                         }
-                        log::info!(
+                        log::debug!(
                             "Piece {}/{} completed!",
                             self.piece_selector.total_completed(),
                             self.piece_selector.pieces()
