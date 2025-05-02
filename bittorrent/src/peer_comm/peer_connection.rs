@@ -432,6 +432,14 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             && subpiece.size <= SUBPIECE_SIZE
     }
 
+    #[inline]
+    fn is_valid_piece(&self, index: i32, begin: i32, data_len: usize, num_pieces: usize) -> bool {
+        index >= 0
+            && index <= num_pieces as i32
+            && begin % SUBPIECE_SIZE == 0
+            && data_len <= SUBPIECE_SIZE as usize
+    }
+
     pub fn handle_message(
         &mut self,
         peer_message: PeerMessage,
@@ -826,6 +834,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 }
             }
             PeerMessage::Piece { index, begin, data } => {
+                if !self.is_valid_piece(index, begin, data.len(), torrent_state.num_pieces()) {
+                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+                        "Invalid piece message received",
+                    ));
+                    return;
+                }
                 // TODO: disconnect on recv piece never requested if fast_ext is enabled
                 log::trace!(
                     "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
