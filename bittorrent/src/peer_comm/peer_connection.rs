@@ -377,7 +377,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         }
         self.throughput += length as u64;
         let request = self.inflight.remove(pos).unwrap();
-        log::debug!("Subpiece completed: {}, {}", request.index, request.offset);
+        log::trace!("Subpiece completed: {}, {}", request.index, request.offset);
         let rtt = self.last_received_subpiece.take().unwrap().elapsed();
         if !self.inflight.is_empty() {
             self.last_received_subpiece = Some(Instant::now());
