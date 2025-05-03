@@ -1223,7 +1223,12 @@ fn reject_request_requests_new() {
         }));
         // New piece started
         assert_eq!(torrent_state.num_allocated(), 2);
-        assert_eq!(a.inflight.len(), 3);
+        // Last piece only have one subpiece
+        if torrent_state.pieces[8].is_some() {
+            assert_eq!(a.inflight.len(), 2);
+        } else {
+            assert_eq!(a.inflight.len(), 3);
+        }
     });
 }
 
