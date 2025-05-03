@@ -5,8 +5,9 @@ use slab::Slab;
 use crate::{
     TorrentState,
     event_loop::tick,
+    peer_comm::peer_connection::DisconnectReason,
     peer_connection::OutgoingMsg,
-    piece_selector::SUBPIECE_SIZE,
+    piece_selector::{SUBPIECE_SIZE, Subpiece},
     test_utils::{generate_peer, setup_test},
 };
 
@@ -1162,6 +1163,140 @@ fn invalid_piece() {
 // #[test]
 // fn request_timeout() {}
 
-// // test that rejecting a request doesn't cause an timeout later on
-// #[test]
-// fn reject_request() {}
+// test that rejecting a request doesn't cause an timeout later on
+#[test]
+fn reject_request_requests_new() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let mut a = generate_peer(true, 0);
+        a.handle_message(
+            PeerMessage::HaveAll,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        // Hack to prevent this from requesting things
+        a.is_interesting = false;
+        a.handle_message(
+            PeerMessage::Unchoke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        a.is_interesting = true;
+        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        a.append_and_fill(&mut subpieces);
+        assert_eq!(a.inflight.len(), 2);
+        assert!(a.inflight.contains(&Subpiece {
+            index: 2,
+            offset: 0,
+            size: SUBPIECE_SIZE,
+        }));
+        assert_eq!(torrent_state.currently_downloading.len(), 1);
+        a.handle_message(
+            PeerMessage::RejectRequest {
+                index: 2,
+                begin: 0,
+                length: SUBPIECE_SIZE,
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(!a.inflight.contains(&Subpiece {
+            index: 2,
+            offset: 0,
+            size: SUBPIECE_SIZE,
+        }));
+        // New piece started
+        assert_eq!(torrent_state.currently_downloading.len(), 2);
+        assert_eq!(a.inflight.len(), 3);
+    });
+}
+
+#[test]
+fn invalid_reject_request() {
+    let (file_store, torrent_info) = setup_test();
+    rayon::scope(|scope| {
+        let mut torrent_state = TorrentState::new(&torrent_info);
+        let mut b = generate_peer(false, 0);
+        b.handle_message(
+            PeerMessage::RejectRequest {
+                index: 2,
+                begin: 0,
+                length: SUBPIECE_SIZE,
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(matches!(
+            b.pending_disconnect,
+            Some(DisconnectReason::ProtocolError(_))
+        ));
+        let mut a = generate_peer(true, 0);
+        a.handle_message(
+            PeerMessage::HaveAll,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        // Hack to prevent this from requesting things
+        a.is_interesting = false;
+        a.handle_message(
+            PeerMessage::Unchoke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        a.is_interesting = true;
+        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        a.append_and_fill(&mut subpieces);
+        assert!(a.pending_disconnect.is_none());
+        a.handle_message(
+            PeerMessage::RejectRequest {
+                index: -2,
+                begin: 0,
+                length: SUBPIECE_SIZE,
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        a.handle_message(
+            PeerMessage::RejectRequest {
+                index: 2,
+                begin: SUBPIECE_SIZE + 1,
+                length: SUBPIECE_SIZE,
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(a.pending_disconnect.is_none());
+        // Both are invalid and ignored
+        assert_eq!(a.inflight.len(), 2);
+        a.handle_message(
+            PeerMessage::RejectRequest {
+                index: 2,
+                begin: 0,
+                length: SUBPIECE_SIZE + 1,
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert_eq!(a.inflight.len(), 2);
+        assert!(a.pending_disconnect.is_none());
+    });
+}

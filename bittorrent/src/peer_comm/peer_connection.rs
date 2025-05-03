@@ -405,7 +405,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             // Probably caused by the request being rejected or the timeout happen because
             // we had not requested anything more
             log::warn!(
-                "[PeerId: {}] Piece timed out but not found in queue",
+                "[PeerId: {}] Piece timed out but not found in inflight queue",
                 self.peer_id
             );
             // Don't timeout again
@@ -766,6 +766,18 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         self.peer_id
                     );
                 }
+                if let Some(i) = self.inflight.iter().position(|q_sub| *q_sub == subpiece) {
+                    log::warn!(
+                        "[PeerId {}]: Subpiece request rejected: {index}, {begin}",
+                        self.peer_id,
+                    );
+                    self.inflight.remove(i).unwrap();
+                } else {
+                    log::error!(
+                        "[PeerId {}]: Subpiece not inflight rejected: {index}, {begin}",
+                        self.peer_id,
+                    );
+                }
                 // TODO disconnect if receiving a reject for a never requested piece
                 if self.peer_choking {
                     // Remove from the allowed fast set if it was reported there since it
@@ -773,20 +785,13 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     if let Some(i) = self.allowed_fast_pieces.iter().position(|i| index == *i) {
                         self.allowed_fast_pieces.swap_remove(i);
                     }
-                } else if let Some(i) = self.inflight.iter().position(|q_sub| *q_sub == subpiece) {
-                    log::warn!(
-                        "[PeerId {}]: Subpiece request rejected: {index}, {begin}",
-                        self.peer_id,
-                    );
-                    let removed = self.inflight.remove(i).unwrap();
-                    // TODO: maybe deallocate piece in the future?
-                    self.queued.push_back(removed);
-                } else {
-                    log::error!(
-                        "[PeerId {}]: Subpiece request rejected twice: {index}, {begin}",
-                        self.peer_id,
-                    );
+                } else if self.inflight.len() < 2 && self.queued.is_empty() {
+                    if let Some(index) = torrent_state.piece_selector.next_piece(self.conn_id) {
+                        let mut subpieces = torrent_state.request_new_piece(index, file_store);
+                        self.append_and_fill(&mut subpieces);
+                    }
                 }
+                self.fill_request_queue();
             }
             PeerMessage::Cancel {
                 index,
