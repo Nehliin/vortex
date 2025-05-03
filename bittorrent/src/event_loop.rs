@@ -723,7 +723,7 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
             (bandwitdth_available_for_new_piece || nothing_queued) && !peer.peer_choking
         } {
             if let Some(next_piece) = torrent_state.piece_selector.next_piece(peer_key) {
-                let mut queue = torrent_state.request_new_piece(next_piece, file_store);
+                let mut queue = torrent_state.allocate_piece(next_piece, file_store);
                 let queue_len = queue.len();
                 peer.append_and_fill(&mut queue);
                 // Remove all subpieces from available bandwidth

@@ -477,7 +477,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 if let Some(piece_idx) = torrent_state.piece_selector.next_piece(self.conn_id) {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
-                    let mut subpieces = torrent_state.request_new_piece(piece_idx, file_store);
+                    let mut subpieces = torrent_state.allocate_piece(piece_idx, file_store);
                     // TODO: might be more than the peer can handle
                     self.append_and_fill(&mut subpieces);
                 } else {
@@ -544,7 +544,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 self.choke(torrent_state, false);
             }
             PeerMessage::Have { index } => {
-                if 0 > index || index >= torrent_state.num_pieces as i32 {
+                if 0 > index || index >= torrent_state.num_pieces() as i32 {
                     self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                         "Invalid have index received",
                     ));
@@ -578,7 +578,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         .interesting_peer_pieces(self.conn_id)
                     {
                         if interesting_pieces[index as usize]
-                            && !torrent_state.piece_selector.is_inflight(index as usize)
+                            && !torrent_state.piece_selector.is_allocated(index as usize)
                         {
                             log::info!(
                                 "[PeerId: {}] Requesting new piece {index} via Allowed fast set!",
@@ -586,7 +586,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             );
                             // Mark ourselves as interested
                             self.interested(true);
-                            let mut subpieces = torrent_state.request_new_piece(index, file_store);
+                            let mut subpieces = torrent_state.allocate_piece(index, file_store);
                             self.append_and_fill(&mut subpieces);
                         }
                     }
@@ -721,9 +721,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             {
                                 return None;
                             }
+                            assert!(torrent_state.pieces[subpiece.index as usize].is_none());
                             // TODO: cache this
-                            // SAFETY: we've check that this is completed, in that case no other
-                            // writers should exist for the piece
+                            // SAFETY: we've check that this is completed and the writable piece is gone
+                            // from the piece vector in that case no other writers should exist for the piece
                             let Ok(readable_piece_view) =
                                 (unsafe { file_store.readable_piece_view(index) })
                             else {
@@ -793,7 +794,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                 } else if self.inflight.len() < 2 && self.queued.is_empty() {
                     if let Some(index) = torrent_state.piece_selector.next_piece(self.conn_id) {
-                        let mut subpieces = torrent_state.request_new_piece(index, file_store);
+                        let mut subpieces = torrent_state.allocate_piece(index, file_store);
                         self.append_and_fill(&mut subpieces);
                     } else if self.inflight.is_empty() {
                         // TODO: Test this
