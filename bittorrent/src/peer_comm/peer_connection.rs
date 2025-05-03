@@ -201,7 +201,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         }
     }
 
-    pub fn release_pieces(&mut self, torrent_state: &mut TorrentState) {
+    pub fn release_all_pieces(&mut self, torrent_state: &mut TorrentState) {
         let pieces =
             self.queued
                 .iter()
@@ -288,6 +288,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         });
     }
 
+    pub fn update_target_inflight(&mut self, target_inflight: usize) {
+        self.target_inflight = target_inflight.clamp(0, 500);
+        self.target_inflight = self.target_inflight.max(1);
+    }
+
     pub fn append_and_fill(&mut self, to_append: &mut VecDeque<Subpiece>) {
         self.queued.append(to_append);
         self.fill_request_queue();
@@ -372,8 +377,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             return;
         };
         if self.slow_start {
-            self.target_inflight += 1;
-            self.target_inflight = self.target_inflight.clamp(0, 500);
+            self.update_target_inflight(self.target_inflight + 1);
         }
         self.throughput += length as u64;
         let request = self.inflight.remove(pos).unwrap();
@@ -419,7 +423,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             subpiece.offset
         );
         self.slow_start = false;
-        self.release_pieces(torrent_state);
+        self.release_all_pieces(torrent_state);
         // TODO: time out recovery
         self.target_inflight = 1;
     }
@@ -460,7 +464,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     self.queued.append(&mut self.inflight);
                     self.inflight.clear();
                 }
-                self.release_pieces(torrent_state);
+                self.release_all_pieces(torrent_state);
             }
             PeerMessage::Unchoke => {
                 self.peer_choking = false;
