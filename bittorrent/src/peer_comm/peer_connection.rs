@@ -463,6 +463,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     // pieces as well
                     self.queued.append(&mut self.inflight);
                     self.inflight.clear();
+                    // TODO: test this
+                    self.last_received_subpiece = None;
                 }
                 self.release_all_pieces(torrent_state);
             }
