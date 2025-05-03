@@ -25,6 +25,7 @@ pub struct Subpiece {
     pub index: i32,
     pub offset: i32,
     pub size: i32,
+    pub timed_out: bool,
 }
 
 pub struct PieceSelector {
@@ -280,6 +281,7 @@ impl<'f_store> Piece<'f_store> {
                 index: self.index,
                 offset: SUBPIECE_SIZE * subpiece_index as i32,
                 size: SUBPIECE_SIZE,
+                timed_out: false,
             });
             last_is_last_index = subpiece_index == last_subpiece_index;
         }

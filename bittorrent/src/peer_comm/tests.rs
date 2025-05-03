@@ -41,7 +41,6 @@ fn sent_and_marked_not_interested(peer: &PeerConnection) {
     );
 }
 
-
 #[test]
 fn fast_ext_have_all() {
     let (file_store, torrent_info) = setup_test();
@@ -1168,8 +1167,90 @@ fn invalid_piece() {
 // #[test]
 // fn request_piece() {}
 
+// TODO timeout tests + Tests that ensure we handle redundant data
 #[test]
-fn subpiece_timeout() {}
+fn snubbed_peer() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let a = generate_peer(true, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        // Hack to prevent this from requesting things
+        connections[key].is_interesting = false;
+        connections[key].handle_message(
+            PeerMessage::Unchoke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].is_interesting = true;
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
+        assert_eq!(connections[key].inflight.len(), 2);
+        assert!(connections[key].queued.is_empty());
+        assert_eq!(torrent_state.num_allocated(), 1);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key].last_received_subpiece.is_some());
+        assert!(connections[key].slow_start);
+        assert!(!connections[key].snubbed);
+        // Simulate time passing
+        connections[key].last_received_subpiece = Some(Instant::now() - Duration::from_secs(3));
+        assert_eq!(connections[key].inflight.len(), 1);
+        assert!(!connections[key].inflight[0].timed_out);
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+        assert!(!connections[key].slow_start);
+        assert!(connections[key].snubbed);
+        assert!(connections[key].inflight[0].timed_out);
+        assert!(!torrent_state.piece_selector.is_allocated(2));
+        assert_eq!(torrent_state.num_allocated(), 1);
+        assert_eq!(connections[key].target_inflight, 1);
+        assert_eq!(connections[key].inflight.len(), 2);
+        let inflight = connections[key].inflight[1];
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: inflight.index,
+                begin: inflight.offset,
+                data: vec![3; inflight.size as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+        assert!(!connections[key].snubbed);
+        assert!(connections[key].target_inflight > 1);
+    });
+}
 
 #[test]
 fn reject_request_requests_new() {
