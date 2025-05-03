@@ -793,6 +793,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     if let Some(index) = torrent_state.piece_selector.next_piece(self.conn_id) {
                         let mut subpieces = torrent_state.request_new_piece(index, file_store);
                         self.append_and_fill(&mut subpieces);
+                    } else if self.inflight.is_empty() {
+                        // TODO: Test this
+                        self.last_received_subpiece = None;
                     }
                 }
                 self.fill_request_queue();
