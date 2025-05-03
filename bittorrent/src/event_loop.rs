@@ -116,7 +116,7 @@ fn event_error_handler<Q: SubmissionQueue>(
                         "Peer [{}] Connection reset during shutdown",
                         connection.peer_id
                     );
-                    connection.release_pieces(torrent_state);
+                    connection.release_all_pieces(torrent_state);
                 }
                 EventType::Dummy | EventType::Connect { .. } | EventType::Accept => unreachable!(),
             }
@@ -589,7 +589,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
             }
             EventType::ConnectionStopped { connection_idx } => {
                 let mut connection = self.connections.remove(connection_idx);
-                connection.release_pieces(torrent_state);
+                connection.release_all_pieces(torrent_state);
                 // Don't count disconnected peers
                 if !connection.is_choking {
                     torrent_state.num_unchoked -= 1;
@@ -682,10 +682,8 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
                 // From the libtorrent impl, request queue time = 3
                 let new_queue_capacity =
                     3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
-                connection.target_inflight = new_queue_capacity as usize;
-                connection.target_inflight = connection.target_inflight.clamp(0, 500);
+                connection.update_target_inflight(new_queue_capacity as usize);
             }
-            connection.target_inflight = connection.target_inflight.max(1);
         }
 
         if !connection.peer_choking
