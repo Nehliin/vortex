@@ -77,7 +77,7 @@ impl PieceSelector {
 
         if available_pieces.not_any() {
             log::warn!(
-                "There are no available pieces, inflight_pieces: {}",
+                "There are no available pieces, allocated_pieces: {}",
                 self.allocated_pieces.count_ones()
             );
             return None;
@@ -156,7 +156,6 @@ impl PieceSelector {
 
     #[inline]
     pub fn mark_complete(&mut self, index: usize) {
-        assert!(self.allocated_pieces[index]);
         assert!(!self.completed_pieces[index]);
         self.completed_pieces.set(index, true);
         self.allocated_pieces.set(index, false);

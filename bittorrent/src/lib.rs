@@ -208,11 +208,11 @@ impl<'f_store> TorrentState<'f_store> {
         index: i32,
         file_store: &'f_store FileStore,
     ) -> VecDeque<Subpiece> {
+        self.piece_selector.mark_allocated(index as usize);
         match &mut self.pieces[index as usize] {
             Some(allocated_piece) => allocated_piece.allocate_remaining_subpieces(),
             None => {
                 let length = self.piece_selector.piece_len(index);
-                self.piece_selector.mark_allocated(index as usize);
                 // SAFETY: There only exist a single piece per index in the torrent_state
                 // piece vector which guarantees that there can never be two concurrent writable
                 // piece views for the same index
