@@ -205,10 +205,11 @@ impl<'f_store> TorrentState<'f_store> {
         // if the piece has ever been allocated it should remain in the
         // pieces vec so it's okay to unwrap here
         let piece = self.pieces[index as usize].as_mut().unwrap();
-        piece.ref_count -= 1;
-        if piece.ref_count == 0 {
+        // Will we reach 0 in the ref count?
+        if piece.ref_count == 1 {
             self.piece_selector.mark_not_allocated(index as usize);
         }
+        piece.ref_count = piece.ref_count.saturating_sub(1)
     }
 
     // TODO: Something like release in flight pieces?
