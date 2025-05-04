@@ -181,12 +181,12 @@ fn have() {
             scope,
         );
         assert!(a.outgoing_msgs_buffer.is_empty());
-        let mut subpieces = torrent_state.request_new_piece(8, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(8, &file_store);
         a.append_and_fill(&mut subpieces);
 
         let mut b = generate_peer(true, 1);
         assert!(!b.is_interesting);
-        assert!(torrent_state.piece_selector.is_inflight(8));
+        assert!(torrent_state.piece_selector.is_allocated(8));
         // Does not mark as interestead since the piece is inflight
         b.handle_message(
             PeerMessage::Have { index: 8 },
@@ -221,7 +221,7 @@ fn have_invalid_indicies() {
         let mut b = generate_peer(false, 0);
         b.handle_message(
             PeerMessage::Have {
-                index: torrent_state.num_pieces as i32,
+                index: torrent_state.num_pieces() as i32,
             },
             &mut torrent_state,
             &file_store,
@@ -237,7 +237,7 @@ fn have_without_interest() {
     let (file_store, torrent_info) = setup_test();
     let mut torrent_state = TorrentState::new(&torrent_info);
     // Needed to avoid hitting asserts
-    torrent_state.piece_selector.mark_inflight(8);
+    torrent_state.piece_selector.mark_allocated(8);
     torrent_state.piece_selector.mark_complete(8);
     rayon::scope(|scope| {
         let mut a = generate_peer(true, 0);
@@ -284,7 +284,7 @@ fn slow_start() {
         let old_desired_queue = connections[key].target_inflight;
 
         connections[key].peer_choking = false;
-        let mut subpieces = torrent_state.request_new_piece(1, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(1, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
             PeerMessage::Piece {
@@ -325,7 +325,7 @@ fn slow_start() {
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
 
-        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
             PeerMessage::Piece {
@@ -361,7 +361,7 @@ fn slow_start() {
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 4);
 
-        let mut subpieces = torrent_state.request_new_piece(3, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(3, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
             PeerMessage::Piece {
@@ -411,7 +411,7 @@ fn desired_queue_size() {
 
         connections[key].peer_choking = false;
         connections[key].slow_start = false;
-        let mut subpieces = torrent_state.request_new_piece(1, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(1, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
             PeerMessage::Piece {
@@ -473,10 +473,10 @@ fn peer_choke_recv_supports_fast() {
         connections[key].peer_choking = false;
         connections[key].slow_start = false;
         for i in 1..7 {
-            let mut subpieces = torrent_state.request_new_piece(i, &file_store);
+            let mut subpieces = torrent_state.allocate_piece(i, &file_store);
             connections[key].append_and_fill(&mut subpieces);
         }
-        assert_eq!(torrent_state.currently_downloading.len(), 6);
+        assert_eq!(torrent_state.num_allocated(), 6);
         assert_eq!(connections[key].target_inflight, 4);
         assert_eq!(connections[key].queued.len(), 8);
         assert_eq!(connections[key].inflight.len(), 4);
@@ -514,7 +514,7 @@ fn peer_choke_recv_supports_fast() {
         assert_eq!(connections[key].target_inflight, 9);
         assert_eq!(connections[key].inflight.len(), 9);
         assert_eq!(connections[key].queued.len(), 1);
-        assert!(torrent_state.piece_selector.is_inflight(6));
+        assert!(torrent_state.piece_selector.is_allocated(6));
 
         connections[key].handle_message(
             PeerMessage::Choke,
@@ -528,9 +528,9 @@ fn peer_choke_recv_supports_fast() {
         assert_eq!(connections[key].inflight.len(), 9);
         assert_eq!(connections[key].queued.len(), 0);
         // 1 piece completed (pending hashing), one was released
-        assert_eq!(torrent_state.currently_downloading.len(), 4);
+        assert_eq!(torrent_state.num_allocated(), 4);
         // No longer inflight!
-        assert!(!torrent_state.piece_selector.is_inflight(6));
+        assert!(!torrent_state.piece_selector.is_allocated(6));
     });
 }
 
@@ -546,10 +546,10 @@ fn peer_choke_recv_does_not_support_fast() {
         connections[key].peer_choking = false;
         connections[key].slow_start = false;
         for i in 1..7 {
-            let mut subpieces = torrent_state.request_new_piece(i, &file_store);
+            let mut subpieces = torrent_state.allocate_piece(i, &file_store);
             connections[key].append_and_fill(&mut subpieces);
         }
-        assert_eq!(torrent_state.currently_downloading.len(), 6);
+        assert_eq!(torrent_state.num_allocated(), 6);
         assert_eq!(connections[key].target_inflight, 4);
         assert_eq!(connections[key].queued.len(), 8);
         assert_eq!(connections[key].inflight.len(), 4);
@@ -587,7 +587,7 @@ fn peer_choke_recv_does_not_support_fast() {
         assert_eq!(connections[key].target_inflight, 9);
         assert_eq!(connections[key].inflight.len(), 9);
         assert_eq!(connections[key].queued.len(), 1);
-        assert!(torrent_state.piece_selector.is_inflight(6));
+        assert!(torrent_state.piece_selector.is_allocated(6));
 
         connections[key].handle_message(
             PeerMessage::Choke,
@@ -601,12 +601,12 @@ fn peer_choke_recv_does_not_support_fast() {
         assert_eq!(connections[key].inflight.len(), 0);
         assert_eq!(connections[key].queued.len(), 0);
         // 1 piece completed (pending hashing), one was released
-        assert_eq!(torrent_state.currently_downloading.len(), 0);
+        assert_eq!(torrent_state.num_allocated(), 0);
         // index = 1 is not inflight over the network but pending hashing and thus is
         // still marked inflight
         for i in 2..7 {
             // No longer inflight!
-            assert!(!torrent_state.piece_selector.is_inflight(i));
+            assert!(!torrent_state.piece_selector.is_allocated(i));
         }
     });
 }
@@ -633,7 +633,7 @@ fn unchoke_recv() {
         // No intrest so nothing is downloaded
         assert!(connections[key].queued.is_empty());
         assert!(connections[key].inflight.is_empty());
-        assert!(torrent_state.currently_downloading.is_empty());
+        assert_eq!(torrent_state.num_allocated(), 0);
 
         let a = generate_peer(true, 1);
         let mut connections = Slab::new();
@@ -657,7 +657,7 @@ fn unchoke_recv() {
         assert!(!connections[key].peer_choking);
         // Peer is interesting so we start downloading
         assert!(!(connections[key].queued.is_empty() && connections[key].inflight.is_empty()));
-        assert!(!torrent_state.currently_downloading.is_empty());
+        assert!(!torrent_state.pieces.is_empty());
     });
 }
 
@@ -716,7 +716,7 @@ fn bitfield_recv() {
                         .unwrap()[i]
                 );
                 // MOCK that the pieces have been completed by a
-                torrent_state.piece_selector.mark_inflight(i);
+                torrent_state.piece_selector.mark_allocated(i);
                 torrent_state.piece_selector.mark_complete(i);
             }
         }
@@ -793,9 +793,9 @@ fn interest_is_updated_when_recv_piece() {
                 .bitfield_received(connections[key].conn_id)
         );
 
-        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
         connections[key].append_and_fill(&mut subpieces);
-        let mut subpieces = torrent_state.request_new_piece(4, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(4, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         assert_eq!(connections[key].inflight.len(), 4);
         assert!(connections[key].queued.is_empty());
@@ -887,9 +887,9 @@ fn send_have_to_peers_when_piece_completes() {
             &torrent_info,
             scope,
         );
-        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
         connections[key_a].append_and_fill(&mut subpieces);
-        let mut subpieces = torrent_state.request_new_piece(4, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(4, &file_store);
         connections[key_b].append_and_fill(&mut subpieces);
 
         connections[key_a].handle_message(
@@ -1016,15 +1016,15 @@ fn piece_recv() {
             scope,
         );
 
-        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
         let prev_target_infligt = connections[key].target_inflight;
-        assert_eq!(torrent_state.currently_downloading.len(), 1);
-        assert_eq!(torrent_state.currently_downloading[0].index, 2);
+        assert_eq!(torrent_state.num_allocated(), 1);
+        assert!(torrent_state.pieces[2].is_some());
         connections[key].append_and_fill(&mut subpieces);
         assert_eq!(connections[key].inflight.len(), 2);
         assert!(connections[key].queued.is_empty());
         assert_eq!(torrent_state.piece_selector.total_inflight(), 1);
-        assert!(torrent_state.piece_selector.is_inflight(2));
+        assert!(torrent_state.piece_selector.is_allocated(2));
         assert_eq!(torrent_state.piece_selector.total_completed(), 0);
 
         let now = Instant::now();
@@ -1039,13 +1039,20 @@ fn piece_recv() {
             &torrent_info,
             scope,
         );
-        assert!(torrent_state.currently_downloading[0].completed_subpieces[0]);
+        assert!(
+            torrent_state.pieces[2]
+                .as_ref()
+                .unwrap()
+                .completed_subpieces[0]
+        );
         assert_eq!(connections[key].inflight.len(), 1);
         assert_eq!(connections[key].target_inflight, prev_target_infligt + 1);
         assert!(now - connections[key].last_seen < Duration::from_millis(1));
         assert!(now - connections[key].last_received_subpiece.unwrap() < Duration::from_millis(1));
         assert!(
-            !torrent_state.currently_downloading[0]
+            !torrent_state.pieces[2]
+                .as_ref()
+                .unwrap()
                 .completed_subpieces
                 .all()
         );
@@ -1063,12 +1070,102 @@ fn piece_recv() {
         );
         assert!(connections[key].inflight.is_empty());
         assert_eq!(connections[key].target_inflight, prev_target_infligt + 2);
-        assert!(torrent_state.currently_downloading.is_empty());
+        assert_eq!(torrent_state.num_allocated(), 0);
         // To ensure we do not miss the completion event
         std::thread::sleep(Duration::from_millis(100));
         torrent_state.update_torrent_status(&mut connections);
         assert_eq!(torrent_state.piece_selector.total_inflight(), 0);
-        assert!(!torrent_state.piece_selector.is_inflight(2));
+        assert!(!torrent_state.piece_selector.is_allocated(2));
+        assert!(torrent_state.piece_selector.has_completed(2));
+        assert_eq!(torrent_state.piece_selector.total_completed(), 1);
+    });
+}
+
+#[test]
+fn handles_duplicate_piece_recv() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let a = generate_peer(true, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        let prev_target_infligt = connections[key].target_inflight;
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert_eq!(connections[key].target_inflight, prev_target_infligt + 1);
+        assert_eq!(connections[key].inflight.len(), 1);
+        std::thread::sleep(Duration::from_millis(100));
+        // Same message again
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key].last_seen.elapsed() < Duration::from_millis(1));
+        // Timestamps for last_received_subpiece are not updated
+        assert!(
+            connections[key].last_received_subpiece.unwrap().elapsed() > Duration::from_millis(100)
+        );
+        assert_eq!(connections[key].target_inflight, prev_target_infligt + 1);
+        assert_eq!(connections[key].inflight.len(), 1);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key].inflight.is_empty());
+        assert_eq!(torrent_state.num_allocated(), 0);
+        // To ensure we do not miss the completion event
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections);
+        assert_eq!(torrent_state.piece_selector.total_inflight(), 0);
+        assert!(!torrent_state.piece_selector.is_allocated(2));
+        assert!(torrent_state.piece_selector.has_completed(2));
+        assert_eq!(torrent_state.piece_selector.total_completed(), 1);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert_eq!(torrent_state.piece_selector.total_inflight(), 0);
+        assert!(!torrent_state.piece_selector.is_allocated(2));
         assert!(torrent_state.piece_selector.has_completed(2));
         assert_eq!(torrent_state.piece_selector.total_completed(), 1);
     });
@@ -1087,7 +1184,7 @@ fn invalid_piece() {
             &torrent_info,
             scope,
         );
-        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
         a.append_and_fill(&mut subpieces);
         assert!(a.pending_disconnect.is_none());
         a.handle_message(
@@ -1112,7 +1209,7 @@ fn invalid_piece() {
             &torrent_info,
             scope,
         );
-        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
         a.append_and_fill(&mut subpieces);
         assert!(a.pending_disconnect.is_none());
         a.handle_message(
@@ -1137,7 +1234,7 @@ fn invalid_piece() {
             &torrent_info,
             scope,
         );
-        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
         a.append_and_fill(&mut subpieces);
         assert!(a.pending_disconnect.is_none());
         a.handle_message(
@@ -1160,10 +1257,91 @@ fn invalid_piece() {
 // #[test]
 // fn request_piece() {}
 
-// #[test]
-// fn request_timeout() {}
+// TODO timeout tests + Tests that ensure we handle redundant data
+#[test]
+fn snubbed_peer() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let a = generate_peer(true, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        // Hack to prevent this from requesting things
+        connections[key].is_interesting = false;
+        connections[key].handle_message(
+            PeerMessage::Unchoke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key].is_interesting = true;
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
+        assert_eq!(connections[key].inflight.len(), 2);
+        assert!(connections[key].queued.is_empty());
+        assert_eq!(torrent_state.num_allocated(), 1);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key].last_received_subpiece.is_some());
+        assert!(connections[key].slow_start);
+        assert!(!connections[key].snubbed);
+        // Simulate time passing
+        connections[key].last_received_subpiece = Some(Instant::now() - Duration::from_secs(3));
+        assert_eq!(connections[key].inflight.len(), 1);
+        assert!(!connections[key].inflight[0].timed_out);
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+        assert!(!connections[key].slow_start);
+        assert!(connections[key].snubbed);
+        assert!(connections[key].inflight[0].timed_out);
+        assert!(!torrent_state.piece_selector.is_allocated(2));
+        assert_eq!(torrent_state.num_allocated(), 1);
+        assert_eq!(connections[key].target_inflight, 1);
+        assert_eq!(connections[key].inflight.len(), 2);
+        let inflight = connections[key].inflight[1];
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: inflight.index,
+                begin: inflight.offset,
+                data: vec![3; inflight.size as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &file_store,
+            &mut torrent_state,
+        );
+        assert!(!connections[key].snubbed);
+        assert!(connections[key].target_inflight > 1);
+    });
+}
 
-// test that rejecting a request doesn't cause an timeout later on
 #[test]
 fn reject_request_requests_new() {
     let (file_store, torrent_info) = setup_test();
@@ -1187,15 +1365,16 @@ fn reject_request_requests_new() {
             scope,
         );
         a.is_interesting = true;
-        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
         a.append_and_fill(&mut subpieces);
         assert_eq!(a.inflight.len(), 2);
         assert!(a.inflight.contains(&Subpiece {
             index: 2,
             offset: 0,
             size: SUBPIECE_SIZE,
+            timed_out: false,
         }));
-        assert_eq!(torrent_state.currently_downloading.len(), 1);
+        assert_eq!(torrent_state.num_allocated(), 1);
         a.handle_message(
             PeerMessage::RejectRequest {
                 index: 2,
@@ -1211,10 +1390,17 @@ fn reject_request_requests_new() {
             index: 2,
             offset: 0,
             size: SUBPIECE_SIZE,
+            timed_out: false,
         }));
         // New piece started
-        assert_eq!(torrent_state.currently_downloading.len(), 2);
-        assert_eq!(a.inflight.len(), 3);
+        assert_eq!(torrent_state.num_allocated(), 1);
+        assert!(!torrent_state.piece_selector.is_allocated(2));
+        // Last piece only have one subpiece
+        if torrent_state.pieces[8].is_some() {
+            assert_eq!(a.inflight.len(), 2);
+        } else {
+            assert_eq!(a.inflight.len(), 3);
+        }
     });
 }
 
@@ -1257,7 +1443,7 @@ fn invalid_reject_request() {
             scope,
         );
         a.is_interesting = true;
-        let mut subpieces = torrent_state.request_new_piece(2, &file_store);
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
         a.append_and_fill(&mut subpieces);
         assert!(a.pending_disconnect.is_none());
         a.handle_message(

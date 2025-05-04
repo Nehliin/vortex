@@ -25,13 +25,13 @@ pub struct Subpiece {
     pub index: i32,
     pub offset: i32,
     pub size: i32,
+    pub timed_out: bool,
 }
 
 pub struct PieceSelector {
     //    strategy: T,
     completed_pieces: BitBox<usize, Msb0>,
-    // TODO: rename to assinged pieces instead
-    inflight_pieces: BitBox<usize, Msb0>,
+    allocated_pieces: BitBox<usize, Msb0>,
     // These are all pieces the peer have that we have yet to complete
     // it should be kept up to date as the torrent is downloaded, completed
     // pieces are "turned off" and Have messages only set a bit if we do not already
@@ -51,7 +51,7 @@ impl PieceSelector {
 
         Self {
             completed_pieces,
-            inflight_pieces,
+            allocated_pieces: inflight_pieces,
             last_piece_length: last_piece_length as u32,
             piece_length: piece_length as u32,
             interesting_peer_pieces: Default::default(),
@@ -60,7 +60,7 @@ impl PieceSelector {
 
     fn new_available_pieces(&self, mut field: BitBox<usize, Msb0>) -> BitBox<usize, Msb0> {
         let mut tmp = self.completed_pieces.clone();
-        tmp |= &self.inflight_pieces;
+        tmp |= &self.allocated_pieces;
         field &= !tmp;
         field
     }
@@ -77,8 +77,8 @@ impl PieceSelector {
 
         if available_pieces.not_any() {
             log::warn!(
-                "There are no available pieces, inflight_pieces: {}",
-                self.inflight_pieces.count_ones()
+                "There are no available pieces, allocated_pieces: {}",
+                self.allocated_pieces.count_ones()
             );
             return None;
         }
@@ -156,10 +156,9 @@ impl PieceSelector {
 
     #[inline]
     pub fn mark_complete(&mut self, index: usize) {
-        assert!(self.inflight_pieces[index]);
         assert!(!self.completed_pieces[index]);
         self.completed_pieces.set(index, true);
-        self.inflight_pieces.set(index, false);
+        self.allocated_pieces.set(index, false);
         // The piece is no longer interesting if we've completed it
         for interesting_pieces in self.interesting_peer_pieces.values_mut() {
             interesting_pieces.set(index, false);
@@ -167,19 +166,19 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn mark_inflight(&mut self, index: usize) {
+    pub fn mark_allocated(&mut self, index: usize) {
         // We never pick a completed piece since there might exist
         // an ReadablePieceFileView alive for that (it also makes no sense to redownload)
         assert!(!self.completed_pieces[index]);
-        let mut bit = self.inflight_pieces.get_mut(index).unwrap();
+        let mut bit = self.allocated_pieces.get_mut(index).unwrap();
         let old = bit.replace(true);
         assert!(!old);
     }
 
     #[inline]
-    pub fn mark_not_inflight(&mut self, index: usize) {
-        assert!(self.inflight_pieces[index]);
-        self.inflight_pieces.set(index, false);
+    pub fn mark_not_allocated(&mut self, index: usize) {
+        assert!(self.allocated_pieces[index]);
+        self.allocated_pieces.set(index, false);
     }
 
     #[inline]
@@ -198,8 +197,8 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn is_inflight(&self, index: usize) -> bool {
-        self.inflight_pieces[index]
+    pub fn is_allocated(&self, index: usize) -> bool {
+        self.allocated_pieces[index]
     }
 
     #[inline]
@@ -214,7 +213,7 @@ impl PieceSelector {
 
     #[inline]
     pub fn total_inflight(&self) -> usize {
-        self.inflight_pieces.count_ones()
+        self.allocated_pieces.count_ones()
     }
 
     #[inline]
@@ -281,6 +280,7 @@ impl<'f_store> Piece<'f_store> {
                 index: self.index,
                 offset: SUBPIECE_SIZE * subpiece_index as i32,
                 size: SUBPIECE_SIZE,
+                timed_out: false,
             });
             last_is_last_index = subpiece_index == last_subpiece_index;
         }
@@ -301,6 +301,9 @@ impl<'f_store> Piece<'f_store> {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
+        if self.completed_subpieces[subpiece_index as usize] {
+            return;
+        }
         log::trace!("Subpiece index received: {subpiece_index}",);
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {

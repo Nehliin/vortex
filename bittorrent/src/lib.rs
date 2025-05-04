@@ -7,9 +7,8 @@ use std::{
     sync::mpsc::{Receiver, Sender},
 };
 
-use bytes::Bytes;
 use event_loop::{EventLoop, EventType};
-use file_store::{FileStore, ReadablePieceFileView};
+use file_store::FileStore;
 use io_uring::{
     IoUring, opcode,
     types::{self},
@@ -96,34 +95,45 @@ struct TorrentState<'f_store> {
     piece_selector: PieceSelector,
     num_unchoked: u32,
     max_unchoked: u32,
-    num_pieces: usize,
     completed_piece_rc: Receiver<CompletedPiece>,
     completed_piece_tx: Sender<CompletedPiece>,
-    currently_downloading: Vec<Piece<'f_store>>,
+    pieces: Vec<Option<Piece<'f_store>>>,
     is_complete: bool,
 }
 
 impl<'f_store> TorrentState<'f_store> {
     pub fn new(torrent: &lava_torrent::torrent::v1::Torrent) -> Self {
         let info_hash = torrent.info_hash_bytes().try_into().unwrap();
-
+        let mut pieces = Vec::with_capacity(torrent.pieces.len());
+        // Allow the vec to use piece indicies directly without - 1
+        // everywhere
+        for _ in 0..=torrent.pieces.len() {
+            pieces.push(None);
+        }
         let (tx, rc) = std::sync::mpsc::channel();
         Self {
             info_hash,
             piece_selector: PieceSelector::new(torrent),
-            num_pieces: torrent.pieces.len(),
             num_unchoked: 0,
             max_unchoked: 8,
             completed_piece_rc: rc,
             completed_piece_tx: tx,
-            currently_downloading: Default::default(),
+            pieces,
             is_complete: false,
         }
     }
 
+    #[allow(dead_code)]
+    pub fn num_allocated(&self) -> usize {
+        self.pieces
+            .iter()
+            .filter(|piece| piece.as_ref().is_some_and(|piece| piece.ref_count > 0))
+            .count()
+    }
+
     #[inline]
     pub fn num_pieces(&self) -> usize {
-        self.num_pieces
+        self.pieces.len() - 1
     }
 
     // TODO: Put this in the event loop directly instead when that is easier to test
@@ -155,7 +165,8 @@ impl<'f_store> TorrentState<'f_store> {
                         }
                     } else {
                         log::error!("Piece hash didn't match expected hash!");
-                        self.piece_selector.mark_not_inflight(completed_piece.index);
+                        self.piece_selector
+                            .mark_not_allocated(completed_piece.index);
                     }
                 }
                 Err(err) => {
@@ -168,70 +179,38 @@ impl<'f_store> TorrentState<'f_store> {
         }
     }
 
-    fn on_subpiece(
-        &mut self,
-        m_index: i32,
-        m_begin: i32,
-        data: Bytes,
-    ) -> Option<ReadablePieceFileView<'f_store>> {
-        let position = self
-            .currently_downloading
-            .iter()
-            .position(|piece| piece.index == m_index);
-        if let Some(position) = position {
-            let mut piece = self.currently_downloading.swap_remove(position);
-            piece.on_subpiece(m_index, m_begin, &data[..]);
-            if !piece.is_complete() {
-                // still downloading
-                self.currently_downloading.push(piece);
-            } else {
-                // TODO: consider moving everything from handle message here
-                log::debug!("Piece {m_index} completed");
-                return Some(piece.into_readable());
-            }
-        } else {
-            // TODO: This might happen in end game mode when multiple peers race to complete the
-            // piece. Haven't implemented it yet though
-            log::error!("Recived unexpected piece message, index: {m_index}",);
-        }
-        None
-    }
-
-    fn request_new_piece(
+    // Allocates a piece and increments the piece ref count
+    fn allocate_piece(
         &mut self,
         index: i32,
         file_store: &'f_store FileStore,
     ) -> VecDeque<Subpiece> {
-        let length = self.piece_selector.piece_len(index);
-        self.piece_selector.mark_inflight(index as usize);
-        // SAFETY: we check before that the piece is not already in flight (via mark_inflight)
-        // and is not already completed which means there can't exist any other
-        // writable piece views for this index. The piece is also marked as
-        // inflight right before.
-        let piece_view = unsafe { file_store.writable_piece_view(index).unwrap() };
-        let mut piece = Piece::new(index, length, piece_view);
-        let subpieces = piece.allocate_remaining_subpieces();
-        self.currently_downloading.push(piece);
-        subpieces
-    }
-
-    // TODO: deal with marking inflight?
-    fn deallocate_piece(&mut self, index: i32) {
-        let position = self
-            .currently_downloading
-            .iter()
-            .position(|piece| piece.index == index);
-
-        if let Some(position) = position {
-            let mut piece = self.currently_downloading.swap_remove(position);
-            piece.ref_count -= 1;
-            if piece.ref_count == 0 {
-                self.piece_selector.mark_not_inflight(index as usize);
-            } else {
-                // someone is still downloading this
-                self.currently_downloading.push(piece);
+        self.piece_selector.mark_allocated(index as usize);
+        match &mut self.pieces[index as usize] {
+            Some(allocated_piece) => allocated_piece.allocate_remaining_subpieces(),
+            None => {
+                let length = self.piece_selector.piece_len(index);
+                // SAFETY: There only exist a single piece per index in the torrent_state
+                // piece vector which guarantees that there can never be two concurrent writable
+                // piece views for the same index
+                let piece_view = unsafe { file_store.writable_piece_view(index).unwrap() };
+                let mut piece = Piece::new(index, length, piece_view);
+                let subpieces = piece.allocate_remaining_subpieces();
+                self.pieces[index as usize] = Some(piece);
+                subpieces
             }
         }
+    }
+
+    fn deallocate_piece(&mut self, index: i32) {
+        // if the piece has ever been allocated it should remain in the
+        // pieces vec so it's okay to unwrap here
+        let piece = self.pieces[index as usize].as_mut().unwrap();
+        // Will we reach 0 in the ref count?
+        if piece.ref_count == 1 {
+            self.piece_selector.mark_not_allocated(index as usize);
+        }
+        piece.ref_count = piece.ref_count.saturating_sub(1)
     }
 
     // TODO: Something like release in flight pieces?
