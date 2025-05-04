@@ -1128,7 +1128,9 @@ fn handles_duplicate_piece_recv() {
         );
         assert!(connections[key].last_seen.elapsed() < Duration::from_millis(1));
         // Timestamps for last_received_subpiece are not updated
-        assert!(connections[key].last_received_subpiece.unwrap().elapsed() > Duration::from_millis(100));
+        assert!(
+            connections[key].last_received_subpiece.unwrap().elapsed() > Duration::from_millis(100)
+        );
         assert_eq!(connections[key].target_inflight, prev_target_infligt + 1);
         assert_eq!(connections[key].inflight.len(), 1);
         connections[key].handle_message(
