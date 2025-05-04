@@ -1082,6 +1082,94 @@ fn piece_recv() {
 }
 
 #[test]
+fn handles_duplicate_piece_recv() {
+    let (file_store, torrent_info) = setup_test();
+    let mut torrent_state = TorrentState::new(&torrent_info);
+    rayon::scope(|scope| {
+        let a = generate_peer(true, 0);
+        let mut connections = Slab::new();
+        let key = connections.insert(a);
+
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        let prev_target_infligt = connections[key].target_inflight;
+        let mut subpieces = torrent_state.allocate_piece(2, &file_store);
+        connections[key].append_and_fill(&mut subpieces);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert_eq!(connections[key].target_inflight, prev_target_infligt + 1);
+        assert_eq!(connections[key].inflight.len(), 1);
+        std::thread::sleep(Duration::from_millis(100));
+        // Same message again
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key].last_seen.elapsed() < Duration::from_millis(1));
+        // Timestamps for last_received_subpiece are not updated
+        assert!(connections[key].last_received_subpiece.unwrap().elapsed() > Duration::from_millis(100));
+        assert_eq!(connections[key].target_inflight, prev_target_infligt + 1);
+        assert_eq!(connections[key].inflight.len(), 1);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key].inflight.is_empty());
+        assert_eq!(torrent_state.num_allocated(), 0);
+        // To ensure we do not miss the completion event
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections);
+        assert_eq!(torrent_state.piece_selector.total_inflight(), 0);
+        assert!(!torrent_state.piece_selector.is_allocated(2));
+        assert!(torrent_state.piece_selector.has_completed(2));
+        assert_eq!(torrent_state.piece_selector.total_completed(), 1);
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert_eq!(torrent_state.piece_selector.total_inflight(), 0);
+        assert!(!torrent_state.piece_selector.is_allocated(2));
+        assert!(torrent_state.piece_selector.has_completed(2));
+        assert_eq!(torrent_state.piece_selector.total_completed(), 1);
+    });
+}
+
+#[test]
 fn invalid_piece() {
     let (file_store, torrent_info) = setup_test();
     rayon::scope(|scope| {
@@ -1303,7 +1391,8 @@ fn reject_request_requests_new() {
             timed_out: false,
         }));
         // New piece started
-        assert_eq!(torrent_state.num_allocated(), 2);
+        assert_eq!(torrent_state.num_allocated(), 1);
+        assert!(!torrent_state.piece_selector.is_allocated(2));
         // Last piece only have one subpiece
         if torrent_state.pieces[8].is_some() {
             assert_eq!(a.inflight.len(), 2);
