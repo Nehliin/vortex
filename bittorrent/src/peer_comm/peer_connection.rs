@@ -888,6 +888,14 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     ));
                     return;
                 }
+                if torrent_state.pieces[index as usize].is_none()
+                    && !torrent_state.piece_selector.has_completed(index as usize)
+                {
+                    // TODO: This might happen in end game mode when multiple peers race to complete the
+                    // piece. Haven't implemented it yet though
+                    log::error!("Recived unexpected piece message, index: {index}",);
+                    return;
+                }
                 // TODO: disconnect on recv piece never requested if fast_ext is enabled
                 log::trace!(
                     "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
@@ -895,7 +903,15 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     data.len(),
                 );
                 self.update_stats(index, begin, data.len() as u32);
-                if let Some(readable_piece_view) = torrent_state.on_subpiece(index, begin, data) {
+
+                if let Some(readable_piece_view) = torrent_state.pieces[index as usize]
+                    .take_if(|piece| {
+                        piece.on_subpiece(index, begin, &data[..]);
+                        piece.is_complete()
+                    })
+                    .map(|completed_piece| completed_piece.into_readable())
+                {
+                    log::debug!("Piece {index} completed");
                     let complete_tx = torrent_state.completed_piece_tx.clone();
                     scope.spawn(move |_| {
                         let hash = &torrent_info.pieces[readable_piece_view.index as usize];

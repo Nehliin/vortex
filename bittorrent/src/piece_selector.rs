@@ -301,6 +301,9 @@ impl<'f_store> Piece<'f_store> {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
+        if self.completed_subpieces[subpiece_index as usize] {
+            return;
+        }
         log::trace!("Subpiece index received: {subpiece_index}",);
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {

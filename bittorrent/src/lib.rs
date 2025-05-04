@@ -7,9 +7,8 @@ use std::{
     sync::mpsc::{Receiver, Sender},
 };
 
-use bytes::Bytes;
 use event_loop::{EventLoop, EventType};
-use file_store::{FileStore, ReadablePieceFileView};
+use file_store::FileStore;
 use io_uring::{
     IoUring, opcode,
     types::{self},
@@ -177,29 +176,6 @@ impl<'f_store> TorrentState<'f_store> {
                 }
             }
         }
-    }
-
-    fn on_subpiece(
-        &mut self,
-        m_index: i32,
-        m_begin: i32,
-        data: Bytes,
-    ) -> Option<ReadablePieceFileView<'f_store>> {
-        let maybe_complete = self.pieces[m_index as usize].take_if(|piece| {
-            piece.on_subpiece(m_index, m_begin, &data[..]);
-            piece.is_complete()
-        });
-        if let Some(completed_piece) = maybe_complete {
-            // TODO: consider moving everything from handle message here
-            log::debug!("Piece {m_index} completed");
-            return Some(completed_piece.into_readable());
-        }
-        if self.pieces[m_index as usize].is_none() {
-            // TODO: This might happen in end game mode when multiple peers race to complete the
-            // piece. Haven't implemented it yet though
-            log::error!("Recived unexpected piece message, index: {m_index}",);
-        }
-        None
     }
 
     // Allocates a piece and increments the piece ref count
