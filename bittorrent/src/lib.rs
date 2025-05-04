@@ -123,6 +123,7 @@ impl<'f_store> TorrentState<'f_store> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn num_allocated(&self) -> usize {
         self.pieces
             .iter()
