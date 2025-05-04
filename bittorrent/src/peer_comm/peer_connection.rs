@@ -794,6 +794,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         self.peer_id
                     );
                 }
+                let mut defer_deallocation = false;
                 if let Some(i) = self.inflight.iter().position(|q_sub| {
                     q_sub.index == index && q_sub.offset == begin && q_sub.size == length
                 }) {
@@ -802,7 +803,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         self.peer_id,
                     );
                     self.inflight.remove(i).unwrap();
-                    torrent_state.deallocate_piece(index);
+                    defer_deallocation = true;
                 } else {
                     log::error!(
                         "[PeerId {}]: Subpiece not inflight rejected: {index}, {begin}",
@@ -817,13 +818,20 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         self.allowed_fast_pieces.swap_remove(i);
                     }
                 } else if self.inflight.len() < 2 && self.queued.is_empty() {
-                    if let Some(index) = torrent_state.piece_selector.next_piece(self.conn_id) {
-                        let mut subpieces = torrent_state.allocate_piece(index, file_store);
+                    if let Some(new_index) = torrent_state.piece_selector.next_piece(self.conn_id) {
+                        if defer_deallocation {
+                            defer_deallocation = false;
+                            torrent_state.deallocate_piece(index);
+                        }
+                        let mut subpieces = torrent_state.allocate_piece(new_index, file_store);
                         self.append_and_fill(&mut subpieces);
                     } else if self.inflight.is_empty() {
                         // TODO: Test this
                         self.last_received_subpiece = None;
                     }
+                }
+                if defer_deallocation {
+                    torrent_state.deallocate_piece(index);
                 }
                 self.fill_request_queue();
             }
