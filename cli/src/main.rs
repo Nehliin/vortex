@@ -33,7 +33,7 @@ fn main() {
     builder.install().unwrap();
     // TODO Should start dht first
     let torrent_info =
-        lava_torrent::torrent::v1::Torrent::read_from_file("debian.torrent").unwrap();
+        lava_torrent::torrent::v1::Torrent::read_from_file("linux-mint.torrent").unwrap();
     let (tx, rc) = std::sync::mpsc::channel();
 
     let info_hash = torrent_info.info_hash_bytes();
