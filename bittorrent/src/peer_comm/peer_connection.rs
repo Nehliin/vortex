@@ -482,6 +482,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         torrent_info: &'scope lava_torrent::torrent::v1::Torrent,
         scope: &Scope<'scope>,
     ) {
+        if self.peer_id.to_string().starts_with("-UT2210-") {
+            log::info!("HANDLE MESSAGE: {peer_message:?}");
+        }
         self.last_seen = Instant::now();
         match peer_message {
             PeerMessage::Choke => {
