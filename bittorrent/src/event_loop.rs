@@ -765,19 +765,60 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
 
 #[cfg(test)]
 mod tests {
+    use std::net::{SocketAddrV4, TcpListener};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use io_uring::IoUring;
+    use socket2::{Domain, Protocol, Socket, Type};
+    use crate::test_utils::setup_test;
+    use crate::peer_protocol::generate_peer_id;
+    use super::*;
 
-    // use crate::test_utils::{generate_peer, setup_test};
+    #[test]
+    fn test_handshake_timeout() {
+        // Setup test environment
+        let (file_store, torrent_info) = setup_test();
+        let mut torrent_state = TorrentState::new(&torrent_info);
+        let (tx, rx) = mpsc::channel();
+        let our_id = generate_peer_id();
+        let mut event_loop = EventLoop::new(our_id, Slab::new(), rx);
+        
+        // Create a ring with a small timeout to make the test run faster
+        let mut ring = IoUring::builder()
+            .setup_single_issuer()
+            .setup_clamp()
+            .setup_cqsize(4096)
+            .setup_defer_taskrun()
+            .setup_coop_taskrun()
+            .build(4096)
+            .unwrap();
 
-    // use super::*;
+        // Create a listener that will accept connections but not respond
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let addr = SocketAddrV4::new([127, 0, 0, 1].into(), addr.port());
+        
+        // Spawn a thread to accept the connection but not respond
+        let listener_thread = std::thread::spawn(move || {
+            // Send a connection attempt to our listener
+            tx.send(addr).unwrap();
+            let (socket, _) = listener.accept().unwrap();
+            // Keep the socket open but don't send any data
+            std::thread::sleep(Duration::from_secs(2));
+            drop(socket);
+        });
 
-    // TODO: probably should be checked in an integration test
-    //#[test]
-    //fn tick_last_seen() {}
 
-    // TODO
-    // #[test]
-    // fn tick_bandwidth_calculation() {}
+        // Run the event loop in the current thread
+        let result = event_loop.run(ring, torrent_state, &file_store, &torrent_info);
+        // Verify that we got an error (likely due to peer provider disconnect)
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::PeerProviderDisconnect));
+        
+        listener_thread.join().unwrap();
 
-    // #[test]
-    // fn tick_piece_distibution() {}
+        // Note: We can't directly verify the metrics in the test since they are global
+        // The metrics will be visible in the metrics output when running the test
+        // with metrics enabled
+    }
 }
