@@ -7,10 +7,10 @@ use std::{
 
 use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;
-use vortex_bittorrent::{Torrent, generate_peer_id};
+use vortex_bittorrent::{EventLoopCommand, Torrent, generate_peer_id};
 
 struct TorrentPeerList {
-    sender: Sender<SocketAddrV4>,
+    sender: Sender<EventLoopCommand>,
     // TODO: need to remove stuff when disconnecting
     ip_list: ahash::HashSet<SocketAddrV4>,
 }
@@ -21,7 +21,7 @@ impl TorrentPeerList {
             return;
         }
         self.ip_list.insert(peer);
-        self.sender.send(peer).unwrap();
+        self.sender.send(EventLoopCommand::ConnectToPeer(peer)).unwrap();
     }
 }
 

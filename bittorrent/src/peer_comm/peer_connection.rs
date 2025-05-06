@@ -127,6 +127,8 @@ pub enum DisconnectReason {
     ProtocolError(&'static str),
     #[error("Invalid message received")]
     InvalidMessage,
+    #[error("Event loop is shutting down")]
+    ShuttingDown,
 }
 
 pub struct PeerConnection {

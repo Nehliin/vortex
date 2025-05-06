@@ -43,6 +43,15 @@ pub enum EventType {
     Dummy,
 }
 
+/// Commands that can be sent to the event loop through the command channel
+#[derive(Debug)]
+pub enum EventLoopCommand {
+    /// Connect to a peer at the given address
+    ConnectToPeer(SocketAddrV4),
+    /// Stop the event loop gracefully
+    Stop,
+}
+
 fn event_error_handler<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     error_code: u32,
@@ -73,6 +82,16 @@ fn event_error_handler<Q: SubmissionQueue>(
                     panic!("Ran out of buffers on a non recv operation: {event:?}");
                 }
             }
+        }
+        libc::EAFNOSUPPORT => {
+            // Address family not supported by protocol (os error 97)
+            let event = match events.get(user_data.event_idx as _) {
+                Some(ev) => format!("{:?}", ev),
+                None => "Event not found".to_string(),
+            };
+            log::error!("Address family not supported error on event: {event}");
+            events.remove(user_data.event_idx as _);
+            Ok(())
         }
         libc::ETIME => {
             let event = events.remove(user_data.event_idx as _);
@@ -182,7 +201,7 @@ pub struct EventLoop {
     write_pool: BufferPool,
     read_ring: BufferRing,
     connections: Slab<PeerConnection>,
-    peer_provider: Receiver<SocketAddrV4>,
+    peer_provider: Receiver<EventLoopCommand>,
     our_id: PeerId,
 }
 
@@ -190,7 +209,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
     pub fn new(
         our_id: PeerId,
         events: Slab<EventType>,
-        peer_provider: Receiver<SocketAddrV4>,
+        peer_provider: Receiver<EventLoopCommand>,
     ) -> Self {
         Self {
             events,
@@ -215,6 +234,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
             let (submitter, sq, mut cq) = ring.split();
             let mut sq = BackloggedSubmissionQueue::new(sq);
             let mut last_tick = Instant::now();
+            let mut shutdown_requested = false;
+            
             loop {
                 let args = types::SubmitArgs::new().timespec(CQE_WAIT_TIME);
                 match submitter.submit_with_args(8, &args) {
@@ -309,13 +330,44 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     connection.outgoing_msgs_buffer.clear();
                 }
                 sq.sync();
-                self.connect_to_new_peers(&mut sq)?;
+                
+                let _connect_result = self.connect_to_new_peers(&mut sq)?;
+                
+                // Check if we need to initiate shutdown
+                if shutdown_requested && self.connections.is_empty() {
+                    // Sync file store before exiting
+                    log::info!("All connections closed, shutdown complete");
+                    return Ok(());
+                }
+                
+                // Check for stop command in the channel
+                if let Ok(EventLoopCommand::Stop) = self.peer_provider.try_recv() {
+                    if !shutdown_requested {
+                        log::info!("Shutdown requested, closing all connections");
+                        shutdown_requested = true;
+                        
+                        // Initiate graceful shutdown for all connections
+                        for (conn_id, connection) in self.connections.iter_mut() {
+                            log::info!("Closing connection to peer: {}", connection.peer_id);
+                            connection.pending_disconnect = Some(DisconnectReason::ShuttingDown);
+                            io_utils::stop_connection(
+                                &mut sq,
+                                conn_id,
+                                connection.socket.as_raw_fd(),
+                                &mut self.events,
+                            );
+                        }
+                        sq.sync();
+                    }
+                }
+                
                 if torrent_state.is_complete {
                     log::info!("Torrent complete!");
                     return Ok(());
                 }
             }
         });
+        
         self.read_ring.unregister(&ring.submitter())?;
         result
     }
@@ -326,37 +378,47 @@ impl<'scope, 'f_store: 'scope> EventLoop {
     ) -> Result<(), Error> {
         let result = loop {
             match self.peer_provider.try_recv() {
-                Ok(addr) => {
-                    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-                    //socket.set_recv_buffer_size(1 << 19).unwrap();
-                    let fd = socket.as_raw_fd();
-                    let event_idx = self.events.insert(EventType::Connect { socket, addr });
-                    let user_data = UserData::new(event_idx, None);
-                    let addr = SockAddr::from(addr);
-                    let connect_op =
-                        opcode::Connect::new(types::Fd(fd), addr.as_ptr() as *const _, addr.len())
+                Ok(command) => match command {
+                    EventLoopCommand::ConnectToPeer(addr) => {
+                        log::debug!("Connecting to peer: {}", addr);
+                        let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
+                            Ok(socket) => socket,
+                            Err(e) => {
+                                log::error!("Failed to create socket: {}", e);
+                                continue;
+                            }
+                        };
+                        //socket.set_recv_buffer_size(1 << 19).unwrap();
+                        let fd = socket.as_raw_fd();
+                        let event_idx = self.events.insert(EventType::Connect { socket, addr });
+                        let user_data = UserData::new(event_idx, None);
+                        let addr = SockAddr::from(addr);
+                        let connect_op =
+                            opcode::Connect::new(types::Fd(fd), addr.as_ptr() as *const _, addr.len())
+                                .build()
+                                .flags(io_uring::squeue::Flags::IO_LINK)
+                                .user_data(user_data.as_u64());
+                        let timeout = Timespec::new().sec(10);
+                        let user_data = UserData::new(event_idx, None);
+                        let timeout_op = opcode::LinkTimeout::new(&timeout)
                             .build()
-                            .flags(io_uring::squeue::Flags::IO_LINK)
                             .user_data(user_data.as_u64());
-                    let timeout = Timespec::new().sec(10);
-                    let user_data = UserData::new(event_idx, None);
-                    let timeout_op = opcode::LinkTimeout::new(&timeout)
-                        .build()
-                        .user_data(user_data.as_u64());
-                    let connect_counter = metrics::counter!("peer_connect_attempts");
-                    connect_counter.increment(1);
-                    // If the queue doesn't fit both events they need
-                    // to be sent to the backlog so they can be submitted
-                    // together and not with a arbitrary delay inbetween.
-                    // That would mess up the timeout
-                    if sq.remaining() >= 2 {
-                        sq.push(connect_op);
-                        sq.push(timeout_op);
-                    } else {
-                        sq.push_backlog(connect_op);
-                        sq.push_backlog(timeout_op);
+                        let connect_counter = metrics::counter!("peer_connect_attempts");
+                        connect_counter.increment(1);
+                        // If the queue doesn't fit both events they need
+                        // to be sent to the backlog so they can be submitted
+                        // together and not with a arbitrary delay inbetween.
+                        // That would mess up the timeout
+                        if sq.remaining() >= 2 {
+                            sq.push(connect_op);
+                            sq.push(timeout_op);
+                        } else {
+                            sq.push_backlog(connect_op);
+                            sq.push_backlog(timeout_op);
+                        }
                     }
-                }
+                    EventLoopCommand::Stop => break Ok(()),
+                },
                 Err(TryRecvError::Disconnected) => break Err(Error::PeerProviderDisconnect),
                 Err(TryRecvError::Empty) => break Ok(()),
             }
@@ -801,7 +863,7 @@ mod tests {
         // Spawn a thread to accept the connection but not respond
         let listener_thread = std::thread::spawn(move || {
             // Send a connection attempt to our listener
-            tx.send(addr).unwrap();
+            tx.send(EventLoopCommand::ConnectToPeer(addr)).unwrap();
             let (socket, _) = listener.accept().unwrap();
             // Keep the socket open but don't send any data
             std::thread::sleep(Duration::from_secs(2));
