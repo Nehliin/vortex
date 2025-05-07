@@ -33,7 +33,7 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 #[derive(Debug)]
 pub enum EventType {
     Accept,
-    Connect { socket: Socket, addr: SocketAddrV4 },
+    Connect { socket: Socket, addr: SockAddr },
     Write { socket: Socket },
     Recv { socket: Socket },
     ConnectedWrite { connection_idx: usize },
@@ -78,7 +78,7 @@ fn event_error_handler<Q: SubmissionQueue>(
             let event = events.remove(user_data.event_idx as _);
             let socket = match event {
                 EventType::Connect { socket, addr } => {
-                    log::debug!("Connect timed out!: {}", addr);
+                    log::debug!("Connect timed out!: {:?}", addr);
                     socket
                 }
                 EventType::Recv { socket } => {
@@ -137,7 +137,14 @@ fn event_error_handler<Q: SubmissionQueue>(
             Ok(())
         }
         _ => {
-            events.remove(user_data.event_idx as _);
+            if !events.contains(user_data.event_idx as _) {
+                log::error!(
+                    "Failing event didn't exist in events, id: {}",
+                    user_data.event_idx
+                );
+            } else {
+                events.remove(user_data.event_idx as _);
+            }
             let err = std::io::Error::from_raw_os_error(error_code as i32);
             Err(err)
         }
@@ -323,20 +330,34 @@ impl<'scope, 'f_store: 'scope> EventLoop {
         let result = loop {
             match self.peer_provider.try_recv() {
                 Ok(addr) => {
-                    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+                    let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+                    {
+                        Ok(socket) => socket,
+                        Err(e) => {
+                            log::error!("Failed to create socket: {}", e);
+                            continue;
+                        }
+                    };
                     //socket.set_recv_buffer_size(1 << 19).unwrap();
                     let fd = socket.as_raw_fd();
-                    let event_idx = self.events.insert(EventType::Connect { socket, addr });
+                    let event_idx = self.events.insert(EventType::Connect {
+                        socket,
+                        addr: SockAddr::from(addr),
+                    });
                     let user_data = UserData::new(event_idx, None);
-                    let addr = SockAddr::from(addr);
+
+                    let EventType::Connect { socket: _, addr } = &self.events[event_idx] else {
+                        panic!("Must be a connect event");
+                    };
+
                     let connect_op =
                         opcode::Connect::new(types::Fd(fd), addr.as_ptr() as *const _, addr.len())
                             .build()
                             .flags(io_uring::squeue::Flags::IO_LINK)
                             .user_data(user_data.as_u64());
-                    let timeout = Timespec::new().sec(10);
+                    const TIMEOUT: Timespec = Timespec::new().sec(10);
                     let user_data = UserData::new(event_idx, None);
-                    let timeout_op = opcode::LinkTimeout::new(&timeout)
+                    let timeout_op = opcode::LinkTimeout::new(&TIMEOUT)
                         .build()
                         .user_data(user_data.as_u64());
                     // If the queue doesn't fit both events they need
@@ -413,7 +434,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 sq.push(read_op);
             }
             EventType::Connect { socket, addr } => {
-                log::info!("Connected to: {addr}");
+                log::info!("Connected to: {addr:?}");
+
                 let buffer = self.write_pool.get_buffer();
                 write_handshake(self.our_id, torrent_state.info_hash, buffer.inner);
                 let fd = socket.as_raw_fd();
