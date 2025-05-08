@@ -672,7 +672,7 @@ fn bitfield_recv() {
             let mut b = generate_peer(true, 0);
             assert!(b.pending_disconnect.is_none());
             let invalid_field =
-                bitvec::bitvec!(usize, bitvec::order::Msb0; 1; torrent_state.num_pieces() - 1);
+                bitvec::bitvec!(u8, bitvec::order::Msb0; 1; torrent_state.num_pieces() - 1);
             b.handle_message(
                 PeerMessage::Bitfield(invalid_field),
                 &mut torrent_state,
@@ -686,7 +686,7 @@ fn bitfield_recv() {
         let mut a = generate_peer(true, 0);
         assert!(!a.is_interesting);
         assert!(!torrent_state.piece_selector.bitfield_received(a.conn_id));
-        let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; torrent_state.num_pieces());
+        let mut field = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; torrent_state.num_pieces());
         field.set(2, false);
         field.set(4, false);
         a.handle_message(
@@ -725,7 +725,7 @@ fn bitfield_recv() {
         assert!(!b.is_interesting);
         assert!(!torrent_state.piece_selector.bitfield_received(b.conn_id));
         let num_pieces = torrent_state.num_pieces();
-        let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; num_pieces);
+        let mut field = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
         field.set(2, false);
         field.set(4, false);
         b.handle_message(
@@ -743,7 +743,7 @@ fn bitfield_recv() {
         assert!(!c.is_interesting);
         assert!(!torrent_state.piece_selector.bitfield_received(c.conn_id));
         let num_pieces = torrent_state.num_pieces();
-        let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 1; num_pieces);
+        let mut field = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
         field.set(2, false);
         c.handle_message(
             PeerMessage::Bitfield(field),
@@ -775,7 +775,7 @@ fn interest_is_updated_when_recv_piece() {
                 .bitfield_received(connections[key].conn_id)
         );
         let num_pieces = torrent_state.num_pieces();
-        let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 0; num_pieces);
+        let mut field = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
         field.set(2, true);
         field.set(4, true);
         connections[key].handle_message(
@@ -869,7 +869,7 @@ fn send_have_to_peers_when_piece_completes() {
         connections.insert(c);
 
         let num_pieces = torrent_state.num_pieces();
-        let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 0; num_pieces);
+        let mut field = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
         field.set(2, true);
         connections[key_a].handle_message(
             PeerMessage::Bitfield(field),
@@ -878,7 +878,7 @@ fn send_have_to_peers_when_piece_completes() {
             &torrent_info,
             scope,
         );
-        let mut field = bitvec::bitvec!(usize, bitvec::order::Msb0; 0; num_pieces);
+        let mut field = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
         field.set(4, true);
         connections[key_b].handle_message(
             PeerMessage::Bitfield(field),
