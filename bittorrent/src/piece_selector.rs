@@ -30,20 +30,20 @@ pub struct Subpiece {
 
 pub struct PieceSelector {
     //    strategy: T,
-    completed_pieces: BitBox<usize, Msb0>,
-    allocated_pieces: BitBox<usize, Msb0>,
+    completed_pieces: BitBox<u8, Msb0>,
+    allocated_pieces: BitBox<u8, Msb0>,
     // These are all pieces the peer have that we have yet to complete
     // it should be kept up to date as the torrent is downloaded, completed
     // pieces are "turned off" and Have messages only set a bit if we do not already
     // have it.
-    interesting_peer_pieces: HashMap<usize, BitBox<usize, Msb0>>,
+    interesting_peer_pieces: HashMap<usize, BitBox<u8, Msb0>>,
     last_piece_length: u32,
     piece_length: u32,
 }
 
 impl PieceSelector {
     pub fn new(torrent_info: &Torrent) -> Self {
-        let completed_pieces: BitBox<usize, Msb0> =
+        let completed_pieces: BitBox<u8, Msb0> =
             torrent_info.pieces.iter().map(|_| false).collect();
         let inflight_pieces = completed_pieces.clone();
         let piece_length = torrent_info.piece_length;
@@ -58,7 +58,7 @@ impl PieceSelector {
         }
     }
 
-    fn new_available_pieces(&self, mut field: BitBox<usize, Msb0>) -> BitBox<usize, Msb0> {
+    fn new_available_pieces(&self, mut field: BitBox<u8, Msb0>) -> BitBox<u8, Msb0> {
         let mut tmp = self.completed_pieces.clone();
         tmp |= &self.allocated_pieces;
         field &= !tmp;
@@ -121,11 +121,7 @@ impl PieceSelector {
     }
 
     // Updates the interesting peer pieces and returns if the peer has any interesting pieces
-    pub fn peer_bitfield(
-        &mut self,
-        connection_id: usize,
-        peer_pieces: BitBox<usize, Msb0>,
-    ) -> bool {
+    pub fn peer_bitfield(&mut self, connection_id: usize, peer_pieces: BitBox<u8, Msb0>) -> bool {
         let not_completed = !self.completed_pieces.clone();
         let interesting_pieces = peer_pieces & not_completed;
         let is_interesting = interesting_pieces.any();
@@ -141,7 +137,7 @@ impl PieceSelector {
         entry
             .and_modify(|pieces| pieces.set(piece_index, is_interesting))
             .or_insert_with(|| {
-                let mut all_pieces: BitBox<usize, Msb0> =
+                let mut all_pieces: BitBox<u8, Msb0> =
                     (0..self.completed_pieces.len()).map(|_| false).collect();
                 all_pieces.set(piece_index, is_interesting);
                 all_pieces
@@ -150,7 +146,7 @@ impl PieceSelector {
     }
 
     // All interesting peer pieces if a bitfield has been received
-    pub fn interesting_peer_pieces(&self, connection_id: usize) -> Option<&BitBox<usize, Msb0>> {
+    pub fn interesting_peer_pieces(&self, connection_id: usize) -> Option<&BitBox<u8, Msb0>> {
         self.interesting_peer_pieces.get(&connection_id)
     }
 
@@ -187,7 +183,7 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn completed_clone(&self) -> BitBox<usize, Msb0> {
+    pub fn completed_clone(&self) -> BitBox<u8, Msb0> {
         self.completed_pieces.clone()
     }
 
