@@ -827,10 +827,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         }
                         let mut subpieces = torrent_state.allocate_piece(new_index, file_store);
                         self.append_and_fill(&mut subpieces);
-                    } else if self.inflight.is_empty() {
-                        // TODO: Test this
-                        self.last_received_subpiece = None;
                     }
+                }
+                if self.inflight.is_empty() {
+                    // TODO: Test this
+                    self.last_received_subpiece = None;
                 }
                 if defer_deallocation {
                     torrent_state.deallocate_piece(index);
