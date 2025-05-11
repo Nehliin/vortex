@@ -58,7 +58,7 @@ impl Torrent {
 
     pub fn start(
         &self,
-        peer_provider: Receiver<Command>,
+        command_rc: Receiver<Command>,
         downloads_path: impl AsRef<Path>,
     ) -> Result<(), Error> {
         // check ulimit
@@ -86,7 +86,7 @@ impl Torrent {
         ring.submission().sync();
         let file_store = FileStore::new(downloads_path, &self.torrent_info).unwrap();
         let torrent_state = TorrentState::new(&self.torrent_info);
-        let mut event_loop = EventLoop::new(self.our_id, events, peer_provider);
+        let mut event_loop = EventLoop::new(self.our_id, events, command_rc);
         event_loop.run(ring, torrent_state, &file_store, &self.torrent_info)
     }
 }

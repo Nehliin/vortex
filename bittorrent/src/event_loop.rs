@@ -201,13 +201,13 @@ pub struct EventLoop {
 }
 
 impl<'scope, 'f_store: 'scope> EventLoop {
-    pub fn new(our_id: PeerId, events: Slab<EventType>, peer_provider: Receiver<Command>) -> Self {
+    pub fn new(our_id: PeerId, events: Slab<EventType>, command_rc: Receiver<Command>) -> Self {
         Self {
             events,
             write_pool: BufferPool::new(256, (SUBPIECE_SIZE * 2) as _),
             read_ring: BufferRing::new(1, 256, (SUBPIECE_SIZE * 2) as _).unwrap(),
             connections: Slab::with_capacity(64),
-            command_rc: peer_provider,
+            command_rc,
             our_id,
         }
     }
