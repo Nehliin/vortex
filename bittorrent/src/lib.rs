@@ -202,14 +202,16 @@ impl<'f_store> TorrentState<'f_store> {
     }
 
     fn deallocate_piece(&mut self, index: i32) {
-        // if the piece has ever been allocated it should remain in the
-        // pieces vec so it's okay to unwrap here
-        let piece = self.pieces[index as usize].as_mut().unwrap();
-        // Will we reach 0 in the ref count?
-        if piece.ref_count == 1 {
-            self.piece_selector.mark_not_allocated(index as usize);
+        // The piece might have been mid hashing when a timeout is received 
+        // (two separate peer) which causes to be completed whilst another peer
+        // tried to download it. It's fine (TODO: confirm)
+        if let Some(piece) = self.pieces[index as usize].as_mut() {
+            // Will we reach 0 in the ref count?
+            if piece.ref_count == 1 {
+                self.piece_selector.mark_not_allocated(index as usize);
+            }
+            piece.ref_count = piece.ref_count.saturating_sub(1)
         }
-        piece.ref_count = piece.ref_count.saturating_sub(1)
     }
 
     // TODO: Something like release in flight pieces?
