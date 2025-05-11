@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     io::{self},
-    net::{SocketAddrV4, TcpListener},
+    net::TcpListener,
     os::fd::AsRawFd,
     path::Path,
     sync::mpsc::{Receiver, Sender},
@@ -31,9 +31,9 @@ use peer_comm::{peer_connection::PeerConnection, *};
 #[cfg(feature = "fuzzing")]
 pub use peer_protocol::*;
 
+pub use event_loop::Command;
 pub use peer_protocol::PeerId;
 pub use peer_protocol::generate_peer_id;
-pub use event_loop::Command;
 
 #[derive(Error, Debug)]
 pub enum Error {

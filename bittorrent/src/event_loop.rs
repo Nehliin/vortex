@@ -827,12 +827,21 @@ mod tests {
     use crate::peer_protocol::generate_peer_id;
     use crate::test_utils::setup_test;
     use io_uring::IoUring;
+    use metrics::Key;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use metrics_util::{CompositeKey, MetricKind};
     use std::net::{SocketAddrV4, TcpListener};
     use std::sync::mpsc;
     use std::time::Duration;
 
     #[test]
-    fn test_handshake_timeout() {
+    fn handshake_timeout() {
+        env_logger::builder()
+            .filter_level(log::LevelFilter::Trace)
+            .init();
+
+        let debbuging = DebuggingRecorder::new();
+        let snapshotter = debbuging.snapshotter();
         // Setup test environment
         let (file_store, torrent_info) = setup_test();
         let torrent_state = TorrentState::new(&torrent_info);
@@ -848,30 +857,59 @@ mod tests {
             // Send a connection attempt to our listener
             let (_socket, _) = listener.accept().unwrap();
             // Keep the socket open but don't send any data
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
         });
         let event_loop_thread = std::thread::spawn(move || {
-            let our_id = generate_peer_id();
-            let mut event_loop = EventLoop::new(our_id, Slab::new(), rx);
-            let ring = IoUring::builder()
-                .setup_single_issuer()
-                .setup_clamp()
-                .setup_cqsize(4096)
-                .setup_defer_taskrun()
-                .setup_coop_taskrun()
-                .build(4096)
-                .unwrap();
-            let result = event_loop.run(ring, torrent_state, &file_store, &torrent_info);
-            assert!(result.is_ok());
+            metrics::with_local_recorder(&debbuging, || {
+                let our_id = generate_peer_id();
+                let mut event_loop = EventLoop::new(our_id, Slab::new(), rx);
+                let ring = IoUring::builder()
+                    .setup_single_issuer()
+                    .setup_clamp()
+                    .setup_cqsize(4096)
+                    .setup_defer_taskrun()
+                    .setup_coop_taskrun()
+                    .build(4096)
+                    .unwrap();
+                let result = event_loop.run(ring, torrent_state, &file_store, &torrent_info);
+                assert!(result.is_ok());
+            })
         });
 
         tx.send(Command::ConnectToPeer(addr)).unwrap();
+        std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
         tx.send(Command::Stop).unwrap();
-        simulated_peer_thread.join().unwrap();
         event_loop_thread.join().unwrap();
+        simulated_peer_thread.join().unwrap();
 
-        // Note: We can't directly verify the metrics in the test since they are global
-        // The metrics will be visible in the metrics output when running the test
-        // with metrics enabled
+        let snapshot = snapshotter.snapshot();
+        #[allow(clippy::mutable_key_type)]
+        let metrics = snapshot.into_hashmap();
+        let val = metrics.get(&CompositeKey::new(
+            MetricKind::Counter,
+            Key::from_name("peer_handshake_timeout"),
+        ));
+        let DebugValue::Counter(num_timeouts) = val.unwrap().2 else {
+            unreachable!();
+        };
+        assert_eq!(num_timeouts, 1);
     }
+
+    // // Timeouts when accepting an incoming connection is handled properly
+    // #[test]
+    // fn accept_handshake_timeout() {
+    //     todo!()
+    // }
+
+    // // Invalid handshakes are dealt with properly
+    // #[test]
+    // fn invalid_handshake() {
+    //     todo!()
+    // }
+
+    // // Tests that the handshake is valid and that we send a proper bitfield afterwards
+    // #[test]
+    // fn valid_handshake() {
+    //     todo!()
+    // }
 }
