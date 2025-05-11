@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
-use vortex_bittorrent::{Torrent, generate_peer_id};
+use vortex_bittorrent::{Command, Torrent, generate_peer_id};
 
 #[test]
 fn basic_seeded_download() {
@@ -18,7 +18,18 @@ fn basic_seeded_download() {
 
     let download_time = Instant::now();
     let (tx, rc) = std::sync::mpsc::channel();
-    tx.send("127.0.0.1:51413".parse().unwrap()).unwrap();
+
+    tx.send(Command::ConnectToPeer("127.0.0.1:51413".parse().unwrap()))
+        .unwrap();
+
+    // Spawn a thread to send Stop command after a timeout
+    let tx_clone = tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        // Send stop command if download takes too long
+        let _ = tx_clone.send(Command::Stop);
+    });
+
     torrent.start(rc, "../downloaded").unwrap();
     let elapsed = download_time.elapsed();
     log::info!("Download complete in: {}s", elapsed.as_secs());

@@ -33,6 +33,7 @@ pub use peer_protocol::*;
 
 pub use peer_protocol::PeerId;
 pub use peer_protocol::generate_peer_id;
+pub use event_loop::Command;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -57,7 +58,7 @@ impl Torrent {
 
     pub fn start(
         &self,
-        peer_provider: Receiver<SocketAddrV4>,
+        peer_provider: Receiver<Command>,
         downloads_path: impl AsRef<Path>,
     ) -> Result<(), Error> {
         // check ulimit
