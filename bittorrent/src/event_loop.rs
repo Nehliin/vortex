@@ -227,7 +227,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
             let (submitter, sq, mut cq) = ring.split();
             let mut sq = BackloggedSubmissionQueue::new(sq);
             let mut last_tick = Instant::now();
-            let mut shutdown_requested = false;
+            let mut shutting_down = false;
 
             loop {
                 let args = types::SubmitArgs::new().timespec(CQE_WAIT_TIME);
@@ -324,9 +324,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 }
                 sq.sync();
 
-                // Handle commands including connect requests and shutdown
-                self.handle_commands(&mut sq, &mut shutdown_requested)?;
-                if shutdown_requested && self.connections.is_empty() {
+                self.handle_commands(&mut sq, &mut shutting_down)?;
+                if shutting_down && self.connections.is_empty() {
                     log::info!("All connections closed, shutdown complete");
                     return Ok(());
                 }
@@ -345,14 +344,14 @@ impl<'scope, 'f_store: 'scope> EventLoop {
     fn handle_commands<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
-        shutdown_requested: &mut bool,
+        shutting_down: &mut bool,
     ) -> Result<(), Error> {
         loop {
             match self.command_rc.try_recv() {
                 Ok(command) => match command {
                     Command::ConnectToPeer(addr) => {
-                        // Don't connect to new peers if shutdown is requested
-                        if *shutdown_requested {
+                        // Don't connect to new peers if we are shutting down
+                        if *shutting_down {
                             continue;
                         }
 
@@ -406,9 +405,9 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                         }
                     }
                     Command::Stop => {
-                        if !*shutdown_requested {
+                        if !*shutting_down {
                             log::info!("Shutdown requested, closing all connections");
-                            *shutdown_requested = true;
+                            *shutting_down = true;
 
                             // Initiate graceful shutdown for all connections
                             for (conn_id, connection) in self.connections.iter_mut() {
