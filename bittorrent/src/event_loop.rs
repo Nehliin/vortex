@@ -111,10 +111,8 @@ fn event_error_handler<Q: SubmissionQueue>(
             let event = events.remove(user_data.event_idx as _);
             match event {
                 EventType::Write { socket } | EventType::Recv { socket } => {
-                    log::error!(
-                        "Connection to {:?} reset before handshake completed",
-                        socket.peer_addr().expect("Must have connected")
-                    );
+                    // Socket is no longer connected here so can't read the addr
+                    log::error!("Connection reset before handshake completed");
                     socket.shutdown(std::net::Shutdown::Both)?;
                 }
                 EventType::ConnectedRecv { connection_idx }
