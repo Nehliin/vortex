@@ -79,6 +79,8 @@ fn event_error_handler<Q: SubmissionQueue>(
             let socket = match event {
                 EventType::Connect { socket, addr } => {
                     log::debug!("Connect timed out!: {:?}", addr);
+                    let connect_fail_counter = metrics::counter!("peer_connect_timeout");
+                    connect_fail_counter.increment(1);
                     socket
                 }
                 EventType::Recv { socket } => {
@@ -86,6 +88,8 @@ fn event_error_handler<Q: SubmissionQueue>(
                         "Handshake timed out!: {:?}",
                         socket.peer_addr().expect("must have connected")
                     );
+                    let handshake_timeout_counter = metrics::counter!("peer_handshake_timeout");
+                    handshake_timeout_counter.increment(1);
                     socket
                 }
                 _ => panic!("Timed out unexpected event: {event:?}"),
@@ -435,6 +439,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
             }
             EventType::Connect { socket, addr } => {
                 log::info!("Connected to: {addr:?}");
+                let connect_success_counter = metrics::counter!("peer_connect_success");
+                connect_success_counter.increment(1);
 
                 let buffer = self.write_pool.get_buffer();
                 write_handshake(self.our_id, torrent_state.info_hash, buffer.inner);
@@ -465,6 +471,9 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     &mut self.events[io_event.user_data.event_idx as usize],
                     EventType::Recv { socket },
                 );
+                // Write is only used for unestablished connections aka when doing handshake
+                let handshake_counter = metrics::counter!("peer_handshake_attempt");
+                handshake_counter.increment(1);
                 debug_assert!(matches!(old, EventType::Dummy));
                 let read_token = io_event.user_data.event_idx as usize;
                 let user_data = UserData::new(read_token, None);
@@ -520,6 +529,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 let id = peer_connection.peer_id;
                 entry.insert(peer_connection);
                 log::info!("Finished handshake! [{conn_id}]: {id}");
+                let handshake_success_counter = metrics::counter!("peer_handshake_success");
+                handshake_success_counter.increment(1);
                 // We are now connected!
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
@@ -655,7 +666,7 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection.fill_request_queue();
 }
 
-fn report_metrics(torrent_state: &TorrentState<'_>, connections: &Slab<PeerConnection>) {
+fn report_tick_metrics(torrent_state: &TorrentState<'_>, connections: &Slab<PeerConnection>) {
     let counter = metrics::counter!("pieces_completed");
     counter.absolute(torrent_state.piece_selector.total_completed() as u64);
     let gauge = metrics::gauge!("pieces_inflight");
@@ -761,7 +772,7 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
         peer.report_metrics();
     }
 
-    report_metrics(torrent_state, connections);
+    report_tick_metrics(torrent_state, connections);
 }
 
 #[cfg(test)]
