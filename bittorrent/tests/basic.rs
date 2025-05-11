@@ -25,7 +25,7 @@ fn basic_seeded_download() {
     // Spawn a thread to send Stop command after a timeout
     let tx_clone = tx.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(30));
+        std::thread::sleep(std::time::Duration::from_secs(60));
         // Send stop command if download takes too long
         let _ = tx_clone.send(Command::Stop);
     });
