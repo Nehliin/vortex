@@ -30,4 +30,5 @@ fuzzing = ["dep:arbitrary"]
 
 [dev-dependencies]
 metrics-exporter-prometheus = "0.17"
+metrics-util = "0.19"
 env_logger = { workspace = true }

@@ -43,6 +43,15 @@ pub enum EventType {
     Dummy,
 }
 
+/// Commands that can be sent to the event loop through the command channel
+#[derive(Debug)]
+pub enum Command {
+    /// Connect to a peer at the given address
+    ConnectToPeer(SocketAddrV4),
+    /// Stop the event loop gracefully
+    Stop,
+}
+
 fn event_error_handler<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     error_code: u32,
@@ -79,6 +88,8 @@ fn event_error_handler<Q: SubmissionQueue>(
             let socket = match event {
                 EventType::Connect { socket, addr } => {
                     log::debug!("Connect timed out!: {:?}", addr);
+                    let connect_fail_counter = metrics::counter!("peer_connect_timeout");
+                    connect_fail_counter.increment(1);
                     socket
                 }
                 EventType::Recv { socket } => {
@@ -86,6 +97,8 @@ fn event_error_handler<Q: SubmissionQueue>(
                         "Handshake timed out!: {:?}",
                         socket.peer_addr().expect("must have connected")
                     );
+                    let handshake_timeout_counter = metrics::counter!("peer_handshake_timeout");
+                    handshake_timeout_counter.increment(1);
                     socket
                 }
                 _ => panic!("Timed out unexpected event: {event:?}"),
@@ -98,10 +111,8 @@ fn event_error_handler<Q: SubmissionQueue>(
             let event = events.remove(user_data.event_idx as _);
             match event {
                 EventType::Write { socket } | EventType::Recv { socket } => {
-                    log::error!(
-                        "Connection to {:?} reset before handshake completed",
-                        socket.peer_addr().expect("Must have connected")
-                    );
+                    // Socket is no longer connected here so can't read the addr
+                    log::error!("Connection reset before handshake completed");
                     socket.shutdown(std::net::Shutdown::Both)?;
                 }
                 EventType::ConnectedRecv { connection_idx }
@@ -185,22 +196,18 @@ pub struct EventLoop {
     write_pool: BufferPool,
     read_ring: BufferRing,
     connections: Slab<PeerConnection>,
-    peer_provider: Receiver<SocketAddrV4>,
+    command_rc: Receiver<Command>,
     our_id: PeerId,
 }
 
 impl<'scope, 'f_store: 'scope> EventLoop {
-    pub fn new(
-        our_id: PeerId,
-        events: Slab<EventType>,
-        peer_provider: Receiver<SocketAddrV4>,
-    ) -> Self {
+    pub fn new(our_id: PeerId, events: Slab<EventType>, command_rc: Receiver<Command>) -> Self {
         Self {
             events,
             write_pool: BufferPool::new(256, (SUBPIECE_SIZE * 2) as _),
             read_ring: BufferRing::new(1, 256, (SUBPIECE_SIZE * 2) as _).unwrap(),
             connections: Slab::with_capacity(64),
-            peer_provider,
+            command_rc,
             our_id,
         }
     }
@@ -218,6 +225,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
             let (submitter, sq, mut cq) = ring.split();
             let mut sq = BackloggedSubmissionQueue::new(sq);
             let mut last_tick = Instant::now();
+            let mut shutting_down = false;
+
             loop {
                 let args = types::SubmitArgs::new().timespec(CQE_WAIT_TIME);
                 match submitter.submit_with_args(8, &args) {
@@ -312,72 +321,113 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     connection.outgoing_msgs_buffer.clear();
                 }
                 sq.sync();
-                self.connect_to_new_peers(&mut sq)?;
+
+                self.handle_commands(&mut sq, &mut shutting_down)?;
+                if shutting_down && self.connections.is_empty() {
+                    log::info!("All connections closed, shutdown complete");
+                    return Ok(());
+                }
+
                 if torrent_state.is_complete {
                     log::info!("Torrent complete!");
                     return Ok(());
                 }
             }
         });
+
         self.read_ring.unregister(&ring.submitter())?;
         result
     }
 
-    fn connect_to_new_peers<Q: SubmissionQueue>(
+    fn handle_commands<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
+        shutting_down: &mut bool,
     ) -> Result<(), Error> {
-        let result = loop {
-            match self.peer_provider.try_recv() {
-                Ok(addr) => {
-                    let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
-                    {
-                        Ok(socket) => socket,
-                        Err(e) => {
-                            log::error!("Failed to create socket: {}", e);
+        loop {
+            match self.command_rc.try_recv() {
+                Ok(command) => match command {
+                    Command::ConnectToPeer(addr) => {
+                        // Don't connect to new peers if we are shutting down
+                        if *shutting_down {
                             continue;
                         }
-                    };
-                    //socket.set_recv_buffer_size(1 << 19).unwrap();
-                    let fd = socket.as_raw_fd();
-                    let event_idx = self.events.insert(EventType::Connect {
-                        socket,
-                        addr: SockAddr::from(addr),
-                    });
-                    let user_data = UserData::new(event_idx, None);
 
-                    let EventType::Connect { socket: _, addr } = &self.events[event_idx] else {
-                        panic!("Must be a connect event");
-                    };
+                        let socket =
+                            match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
+                                Ok(socket) => socket,
+                                Err(e) => {
+                                    log::error!("Failed to create socket: {}", e);
+                                    continue;
+                                }
+                            };
+                        //socket.set_recv_buffer_size(1 << 19).unwrap();
+                        let fd = socket.as_raw_fd();
+                        let event_idx = self.events.insert(EventType::Connect {
+                            socket,
+                            addr: SockAddr::from(addr),
+                        });
+                        let user_data = UserData::new(event_idx, None);
 
-                    let connect_op =
-                        opcode::Connect::new(types::Fd(fd), addr.as_ptr() as *const _, addr.len())
-                            .build()
-                            .flags(io_uring::squeue::Flags::IO_LINK)
-                            .user_data(user_data.as_u64());
-                    const TIMEOUT: Timespec = Timespec::new().sec(10);
-                    let user_data = UserData::new(event_idx, None);
-                    let timeout_op = opcode::LinkTimeout::new(&TIMEOUT)
+                        let EventType::Connect { socket: _, addr } = &self.events[event_idx] else {
+                            unreachable!();
+                        };
+
+                        log::debug!("Connecting to peer: {:?}", addr);
+                        let connect_counter = metrics::counter!("peer_connect_attempts");
+                        connect_counter.increment(1);
+
+                        let connect_op = opcode::Connect::new(
+                            types::Fd(fd),
+                            addr.as_ptr() as *const _,
+                            addr.len(),
+                        )
                         .build()
+                        .flags(io_uring::squeue::Flags::IO_LINK)
                         .user_data(user_data.as_u64());
-                    // If the queue doesn't fit both events they need
-                    // to be sent to the backlog so they can be submitted
-                    // together and not with a arbitrary delay inbetween.
-                    // That would mess up the timeout
-                    if sq.remaining() >= 2 {
-                        sq.push(connect_op);
-                        sq.push(timeout_op);
-                    } else {
-                        sq.push_backlog(connect_op);
-                        sq.push_backlog(timeout_op);
+                        const TIMEOUT: Timespec = Timespec::new().sec(10);
+                        let user_data = UserData::new(event_idx, None);
+                        let timeout_op = opcode::LinkTimeout::new(&TIMEOUT)
+                            .build()
+                            .user_data(user_data.as_u64());
+                        // If the queue doesn't fit both events they need
+                        // to be sent to the backlog so they can be submitted
+                        // together and not with a arbitrary delay inbetween.
+                        // That would mess up the timeout
+                        if sq.remaining() >= 2 {
+                            sq.push(connect_op);
+                            sq.push(timeout_op);
+                        } else {
+                            sq.push_backlog(connect_op);
+                            sq.push_backlog(timeout_op);
+                        }
                     }
-                }
-                Err(TryRecvError::Disconnected) => break Err(Error::PeerProviderDisconnect),
-                Err(TryRecvError::Empty) => break Ok(()),
+                    Command::Stop => {
+                        if !*shutting_down {
+                            log::info!("Shutdown requested, closing all connections");
+                            *shutting_down = true;
+
+                            // Initiate graceful shutdown for all connections
+                            for (conn_id, connection) in self.connections.iter_mut() {
+                                log::info!("Closing connection to peer: {}", connection.peer_id);
+                                connection.pending_disconnect =
+                                    Some(DisconnectReason::ShuttingDown);
+                                io_utils::stop_connection(
+                                    sq,
+                                    conn_id,
+                                    connection.socket.as_raw_fd(),
+                                    &mut self.events,
+                                );
+                            }
+                        }
+                    }
+                },
+                Err(TryRecvError::Disconnected) => return Err(Error::PeerProviderDisconnect),
+                Err(TryRecvError::Empty) => break,
             }
-        };
+        }
         sq.sync();
-        result
+        Ok(())
     }
 
     fn event_handler<Q: SubmissionQueue>(
@@ -435,6 +485,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
             }
             EventType::Connect { socket, addr } => {
                 log::info!("Connected to: {addr:?}");
+                let connect_success_counter = metrics::counter!("peer_connect_success");
+                connect_success_counter.increment(1);
 
                 let buffer = self.write_pool.get_buffer();
                 write_handshake(self.our_id, torrent_state.info_hash, buffer.inner);
@@ -465,6 +517,9 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     &mut self.events[io_event.user_data.event_idx as usize],
                     EventType::Recv { socket },
                 );
+                // Write is only used for unestablished connections aka when doing handshake
+                let handshake_counter = metrics::counter!("peer_handshake_attempt");
+                handshake_counter.increment(1);
                 debug_assert!(matches!(old, EventType::Dummy));
                 let read_token = io_event.user_data.event_idx as usize;
                 let user_data = UserData::new(read_token, None);
@@ -520,6 +575,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 let id = peer_connection.peer_id;
                 entry.insert(peer_connection);
                 log::info!("Finished handshake! [{conn_id}]: {id}");
+                let handshake_success_counter = metrics::counter!("peer_handshake_success");
+                handshake_success_counter.increment(1);
                 // We are now connected!
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
@@ -655,7 +712,7 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection.fill_request_queue();
 }
 
-fn report_metrics(torrent_state: &TorrentState<'_>, connections: &Slab<PeerConnection>) {
+fn report_tick_metrics(torrent_state: &TorrentState<'_>, connections: &Slab<PeerConnection>) {
     let counter = metrics::counter!("pieces_completed");
     counter.absolute(torrent_state.piece_selector.total_completed() as u64);
     let gauge = metrics::gauge!("pieces_inflight");
@@ -761,24 +818,98 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
         peer.report_metrics();
     }
 
-    report_metrics(torrent_state, connections);
+    report_tick_metrics(torrent_state, connections);
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::peer_protocol::generate_peer_id;
+    use crate::test_utils::setup_test;
+    use io_uring::IoUring;
+    use metrics::Key;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use metrics_util::{CompositeKey, MetricKind};
+    use std::net::{SocketAddrV4, TcpListener};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
-    // use crate::test_utils::{generate_peer, setup_test};
+    #[test]
+    fn handshake_timeout() {
+        env_logger::builder()
+            .filter_level(log::LevelFilter::Trace)
+            .init();
 
-    // use super::*;
+        let debbuging = DebuggingRecorder::new();
+        let snapshotter = debbuging.snapshotter();
+        // Setup test environment
+        let (file_store, torrent_info) = setup_test();
+        let torrent_state = TorrentState::new(&torrent_info);
+        let (tx, rx) = mpsc::channel();
 
-    // TODO: probably should be checked in an integration test
-    //#[test]
-    //fn tick_last_seen() {}
+        // Create a listener that will accept connections but not respond
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let addr = SocketAddrV4::new([127, 0, 0, 1].into(), addr.port());
 
-    // TODO
+        // Spawn a thread to accept the connection but not respond
+        let simulated_peer_thread = std::thread::spawn(move || {
+            // Send a connection attempt to our listener
+            let (_socket, _) = listener.accept().unwrap();
+            // Keep the socket open but don't send any data
+            std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
+        });
+        let event_loop_thread = std::thread::spawn(move || {
+            metrics::with_local_recorder(&debbuging, || {
+                let our_id = generate_peer_id();
+                let mut event_loop = EventLoop::new(our_id, Slab::new(), rx);
+                let ring = IoUring::builder()
+                    .setup_single_issuer()
+                    .setup_clamp()
+                    .setup_cqsize(4096)
+                    .setup_defer_taskrun()
+                    .setup_coop_taskrun()
+                    .build(4096)
+                    .unwrap();
+                let result = event_loop.run(ring, torrent_state, &file_store, &torrent_info);
+                assert!(result.is_ok());
+            })
+        });
+
+        tx.send(Command::ConnectToPeer(addr)).unwrap();
+        std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
+        tx.send(Command::Stop).unwrap();
+        event_loop_thread.join().unwrap();
+        simulated_peer_thread.join().unwrap();
+
+        let snapshot = snapshotter.snapshot();
+        #[allow(clippy::mutable_key_type)]
+        let metrics = snapshot.into_hashmap();
+        let val = metrics.get(&CompositeKey::new(
+            MetricKind::Counter,
+            Key::from_name("peer_handshake_timeout"),
+        ));
+        let DebugValue::Counter(num_timeouts) = val.unwrap().2 else {
+            unreachable!();
+        };
+        assert_eq!(num_timeouts, 1);
+    }
+
+    // // Timeouts when accepting an incoming connection is handled properly
     // #[test]
-    // fn tick_bandwidth_calculation() {}
+    // fn accept_handshake_timeout() {
+    //     todo!()
+    // }
 
+    // // Invalid handshakes are dealt with properly
     // #[test]
-    // fn tick_piece_distibution() {}
+    // fn invalid_handshake() {
+    //     todo!()
+    // }
+
+    // // Tests that the handshake is valid and that we send a proper bitfield afterwards
+    // #[test]
+    // fn valid_handshake() {
+    //     todo!()
+    // }
 }

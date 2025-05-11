@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     io::{self},
-    net::{SocketAddrV4, TcpListener},
+    net::TcpListener,
     os::fd::AsRawFd,
     path::Path,
     sync::mpsc::{Receiver, Sender},
@@ -31,6 +31,7 @@ use peer_comm::{peer_connection::PeerConnection, *};
 #[cfg(feature = "fuzzing")]
 pub use peer_protocol::*;
 
+pub use event_loop::Command;
 pub use peer_protocol::PeerId;
 pub use peer_protocol::generate_peer_id;
 
@@ -57,7 +58,7 @@ impl Torrent {
 
     pub fn start(
         &self,
-        peer_provider: Receiver<SocketAddrV4>,
+        command_rc: Receiver<Command>,
         downloads_path: impl AsRef<Path>,
     ) -> Result<(), Error> {
         // check ulimit
@@ -85,7 +86,7 @@ impl Torrent {
         ring.submission().sync();
         let file_store = FileStore::new(downloads_path, &self.torrent_info).unwrap();
         let torrent_state = TorrentState::new(&self.torrent_info);
-        let mut event_loop = EventLoop::new(self.our_id, events, peer_provider);
+        let mut event_loop = EventLoop::new(self.our_id, events, command_rc);
         event_loop.run(ring, torrent_state, &file_store, &self.torrent_info)
     }
 }
