@@ -133,10 +133,10 @@ fn event_error_handler<Q: SubmissionQueue>(
             }
             Ok(())
         }
-        libc::ECONNREFUSED => {
+        libc::ECONNREFUSED | libc::EHOSTUNREACH => {
             // Failling to connect due to this is not really an error due to
             // the likelyhood of being stale info in the DHT
-            log::debug!("Connection refused");
+            log::debug!("Connection failed");
             Ok(())
         }
         libc::ECANCELED => {
