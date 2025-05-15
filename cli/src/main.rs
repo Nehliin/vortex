@@ -1,29 +1,11 @@
 use std::{
-    net::SocketAddrV4,
     path::PathBuf,
-    sync::mpsc::Sender,
     time::{Duration, Instant},
 };
 
 use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use vortex_bittorrent::{Command, Torrent, generate_peer_id};
-
-struct TorrentPeerList {
-    sender: Sender<Command>,
-    // TODO: need to remove stuff when disconnecting
-    ip_list: ahash::HashSet<SocketAddrV4>,
-}
-
-impl TorrentPeerList {
-    fn insert_peer(&mut self, peer: SocketAddrV4) {
-        if self.ip_list.contains(&peer) {
-            return;
-        }
-        self.ip_list.insert(peer);
-        self.sender.send(Command::ConnectToPeer(peer)).unwrap();
-    }
-}
 
 fn main() {
     let mut log_builder = env_logger::builder();
@@ -41,10 +23,6 @@ fn main() {
 
     std::thread::spawn(move || {
         let mut builder = Dht::builder();
-        let mut torrent_peer_list = TorrentPeerList {
-            sender: tx,
-            ip_list: Default::default(),
-        };
         let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
         if dht_boostrap_nodes.exists() {
             let list = std::fs::read_to_string(&dht_boostrap_nodes).unwrap();
@@ -63,14 +41,12 @@ fn main() {
             let all_peers = dht_client.get_peers(info_hash);
             for peers in all_peers {
                 log::info!("Got {} peers", peers.len());
-                for peer in peers {
-                    torrent_peer_list.insert_peer(peer);
-                }
+                tx.send(Command::ConnectToPeers(peers)).unwrap();
             }
             let bootstrap_nodes = dht_client.to_bootstrap();
             let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
             std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes()).unwrap();
-            std::thread::sleep(Duration::from_secs(30));
+            std::thread::sleep(Duration::from_secs(20));
         }
     });
 

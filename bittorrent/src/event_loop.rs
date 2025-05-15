@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io,
     net::SocketAddrV4,
     os::fd::{AsRawFd, FromRawFd},
@@ -28,14 +29,16 @@ use crate::{
     piece_selector::{self, SUBPIECE_SIZE},
 };
 
-const HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+const HANDSHAKE_TIMEOUT_SECS: u64 = 7;
+const MAX_CONNECTIONS: usize = 100;
+const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
 
 #[derive(Debug)]
 pub enum EventType {
     Accept,
     Connect { socket: Socket, addr: SockAddr },
-    Write { socket: Socket },
-    Recv { socket: Socket },
+    Write { socket: Socket, addr: SockAddr },
+    Recv { socket: Socket, addr: SockAddr },
     ConnectedWrite { connection_idx: usize },
     ConnectedRecv { connection_idx: usize },
     ConnectionStopped { connection_idx: usize },
@@ -46,12 +49,14 @@ pub enum EventType {
 /// Commands that can be sent to the event loop through the command channel
 #[derive(Debug)]
 pub enum Command {
-    /// Connect to a peer at the given address
-    ConnectToPeer(SocketAddrV4),
+    /// Connect to peers at the given address
+    /// already connected peers will be filtered out
+    ConnectToPeers(Vec<SocketAddrV4>),
     /// Stop the event loop gracefully
     Stop,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn event_error_handler<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     error_code: u32,
@@ -59,6 +64,7 @@ fn event_error_handler<Q: SubmissionQueue>(
     events: &mut Slab<EventType>,
     torrent_state: &mut TorrentState<'_>,
     connections: &mut Slab<PeerConnection>,
+    pending_connections: &mut HashSet<SockAddr>,
     bgid: Bgid,
 ) -> io::Result<()> {
     match error_code as i32 {
@@ -68,7 +74,7 @@ fn event_error_handler<Q: SubmissionQueue>(
             log::warn!("Ran out of buffers!, resubmitting recv op");
             // Ran out of buffers!
             match event {
-                EventType::Recv { socket } => {
+                EventType::Recv { socket, addr: _ } => {
                     let fd = socket.as_raw_fd();
                     io_utils::recv(sq, user_data, fd, bgid, HANDSHAKE_TIMEOUT_SECS);
                     Ok(())
@@ -88,15 +94,14 @@ fn event_error_handler<Q: SubmissionQueue>(
             let socket = match event {
                 EventType::Connect { socket, addr } => {
                     log::debug!("Connect timed out!: {:?}", addr);
+                    assert!(pending_connections.remove(&addr));
                     let connect_fail_counter = metrics::counter!("peer_connect_timeout");
                     connect_fail_counter.increment(1);
                     socket
                 }
-                EventType::Recv { socket } => {
-                    log::debug!(
-                        "Handshake timed out!: {:?}",
-                        socket.peer_addr().expect("must have connected")
-                    );
+                EventType::Recv { socket, addr } => {
+                    log::debug!("Handshake timed out!: {addr:?}",);
+                    assert!(pending_connections.remove(&addr));
                     let handshake_timeout_counter = metrics::counter!("peer_handshake_timeout");
                     handshake_timeout_counter.increment(1);
                     socket
@@ -110,9 +115,9 @@ fn event_error_handler<Q: SubmissionQueue>(
         libc::ECONNRESET => {
             let event = events.remove(user_data.event_idx as _);
             match event {
-                EventType::Write { socket } | EventType::Recv { socket } => {
-                    // Socket is no longer connected here so can't read the addr
-                    log::error!("Connection reset before handshake completed");
+                EventType::Write { socket, addr } | EventType::Recv { socket, addr } => {
+                    log::error!("Connection to {addr:?} reset before handshake completed ");
+                    assert!(pending_connections.remove(&addr));
                     socket.shutdown(std::net::Shutdown::Both)?;
                 }
                 EventType::ConnectedRecv { connection_idx }
@@ -136,7 +141,15 @@ fn event_error_handler<Q: SubmissionQueue>(
         libc::ECONNREFUSED | libc::EHOSTUNREACH => {
             // Failling to connect due to this is not really an error due to
             // the likelyhood of being stale info in the DHT
-            log::debug!("Connection failed");
+            let event = events.remove(user_data.event_idx as _);
+            match event {
+                EventType::Connect { socket, addr } => {
+                    log::debug!("Connection to {addr:?} failed");
+                    assert!(pending_connections.remove(&addr));
+                    socket.shutdown(std::net::Shutdown::Both)?;
+                }
+                _ => unreachable!(),
+            }
             Ok(())
         }
         libc::ECANCELED => {
@@ -195,7 +208,10 @@ pub struct EventLoop {
     events: Slab<EventType>,
     write_pool: BufferPool,
     read_ring: BufferRing,
+    // TODO: Merge these or consider disconnecting
+    // pending peers as soon as max connections is reached
     connections: Slab<PeerConnection>,
+    pending_connections: HashSet<SockAddr>,
     command_rc: Receiver<Command>,
     our_id: PeerId,
 }
@@ -206,7 +222,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
             events,
             write_pool: BufferPool::new(256, (SUBPIECE_SIZE * 2) as _),
             read_ring: BufferRing::new(1, 256, (SUBPIECE_SIZE * 2) as _).unwrap(),
-            connections: Slab::with_capacity(64),
+            connections: Slab::with_capacity(MAX_CONNECTIONS),
+            pending_connections: HashSet::with_capacity(MAX_CONNECTIONS),
             command_rc,
             our_id,
         }
@@ -256,6 +273,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     tick(
                         &tick_delta,
                         &mut self.connections,
+                        &self.pending_connections,
                         file_store,
                         &mut torrent_state,
                     );
@@ -344,69 +362,37 @@ impl<'scope, 'f_store: 'scope> EventLoop {
         sq: &mut BackloggedSubmissionQueue<Q>,
         shutting_down: &mut bool,
     ) -> Result<(), Error> {
+        let existing_connections: HashSet<SockAddr> = self
+            .connections
+            .iter()
+            .filter_map(|(_, peer)| peer.socket.peer_addr().ok())
+            .collect();
         loop {
             match self.command_rc.try_recv() {
                 Ok(command) => match command {
-                    Command::ConnectToPeer(addr) => {
+                    Command::ConnectToPeers(addrs) => {
                         // Don't connect to new peers if we are shutting down
                         if *shutting_down {
                             continue;
                         }
-
-                        let socket =
-                            match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
-                                Ok(socket) => socket,
-                                Err(e) => {
-                                    log::error!("Failed to create socket: {}", e);
-                                    continue;
-                                }
-                            };
-                        //socket.set_recv_buffer_size(1 << 19).unwrap();
-                        let fd = socket.as_raw_fd();
-                        let event_idx = self.events.insert(EventType::Connect {
-                            socket,
-                            addr: SockAddr::from(addr),
-                        });
-                        let user_data = UserData::new(event_idx, None);
-
-                        let EventType::Connect { socket: _, addr } = &self.events[event_idx] else {
-                            unreachable!();
-                        };
-
-                        log::debug!("Connecting to peer: {:?}", addr);
-                        let connect_counter = metrics::counter!("peer_connect_attempts");
-                        connect_counter.increment(1);
-
-                        let connect_op = opcode::Connect::new(
-                            types::Fd(fd),
-                            addr.as_ptr() as *const _,
-                            addr.len(),
-                        )
-                        .build()
-                        .flags(io_uring::squeue::Flags::IO_LINK)
-                        .user_data(user_data.as_u64());
-                        const TIMEOUT: Timespec = Timespec::new().sec(10);
-                        let user_data = UserData::new(event_idx, None);
-                        let timeout_op = opcode::LinkTimeout::new(&TIMEOUT)
-                            .build()
-                            .user_data(user_data.as_u64());
-                        // If the queue doesn't fit both events they need
-                        // to be sent to the backlog so they can be submitted
-                        // together and not with a arbitrary delay inbetween.
-                        // That would mess up the timeout
-                        if sq.remaining() >= 2 {
-                            sq.push(connect_op);
-                            sq.push(timeout_op);
-                        } else {
-                            sq.push_backlog(connect_op);
-                            sq.push_backlog(timeout_op);
+                        for addr in addrs.into_iter().map(|addr| addr.into()) {
+                            if self.pending_connections.contains(&addr)
+                                || existing_connections.contains(&addr)
+                            {
+                                continue;
+                            }
+                            if self.pending_connections.len() + self.connections.len()
+                                < MAX_CONNECTIONS
+                            {
+                                self.pending_connections.insert(addr.clone());
+                                self.connect_to_peer(addr, sq);
+                            }
                         }
                     }
                     Command::Stop => {
                         if !*shutting_down {
                             log::info!("Shutdown requested, closing all connections");
                             *shutting_down = true;
-
                             // Initiate graceful shutdown for all connections
                             for (conn_id, connection) in self.connections.iter_mut() {
                                 log::info!("Closing connection to peer: {}", connection.peer_id);
@@ -430,6 +416,52 @@ impl<'scope, 'f_store: 'scope> EventLoop {
         Ok(())
     }
 
+    fn connect_to_peer<Q: SubmissionQueue>(
+        &mut self,
+        addr: SockAddr,
+        sq: &mut BackloggedSubmissionQueue<Q>,
+    ) {
+        let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
+            Ok(socket) => socket,
+            Err(e) => {
+                log::error!("Failed to create socket: {}", e);
+                return;
+            }
+        };
+        //socket.set_recv_buffer_size(1 << 19).unwrap();
+        let fd = socket.as_raw_fd();
+        let event_idx = self.events.insert(EventType::Connect { socket, addr });
+        let user_data = UserData::new(event_idx, None);
+
+        let EventType::Connect { socket: _, addr } = &self.events[event_idx] else {
+            unreachable!();
+        };
+
+        log::debug!("Connecting to peer: {:?}", addr);
+        let connect_counter = metrics::counter!("peer_connect_attempts");
+        connect_counter.increment(1);
+
+        let connect_op = opcode::Connect::new(types::Fd(fd), addr.as_ptr() as *const _, addr.len())
+            .build()
+            .flags(io_uring::squeue::Flags::IO_LINK)
+            .user_data(user_data.as_u64());
+        let user_data = UserData::new(event_idx, None);
+        let timeout_op = opcode::LinkTimeout::new(&CONNECT_TIMEOUT)
+            .build()
+            .user_data(user_data.as_u64());
+        // If the queue doesn't fit both events they need
+        // to be sent to the backlog so they can be submitted
+        // together and not with a arbitrary delay inbetween.
+        // That would mess up the timeout
+        if sq.remaining() >= 2 {
+            sq.push(connect_op);
+            sq.push(timeout_op);
+        } else {
+            sq.push_backlog(connect_op);
+            sq.push_backlog(timeout_op);
+        }
+    }
+
     fn event_handler<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
@@ -449,6 +481,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     &mut self.events,
                     torrent_state,
                     &mut self.connections,
+                    &mut self.pending_connections,
                     self.read_ring.bgid(),
                 );
             }
@@ -467,15 +500,16 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 );
                 let fd = ret;
                 let socket = unsafe { Socket::from_raw_fd(fd) };
-                if socket.peer_addr()?.is_ipv6() {
+                let addr = socket.peer_addr()?;
+                if addr.is_ipv6() {
                     log::error!("Received connection from non ipv4 addr");
                     return Ok(());
                 };
 
-                log::info!("Accepted connection: {:?}", socket.peer_addr()?);
+                log::info!("Accepted connection: {addr:?}");
                 // Construct new recv token on accept, after that it lives forever and or is reused
                 // since this is a recvmulti operation
-                let read_token = self.events.insert(EventType::Recv { socket });
+                let read_token = self.events.insert(EventType::Recv { socket, addr });
                 let user_data = UserData::new(read_token, None);
                 let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
                     .build()
@@ -494,7 +528,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
                     &mut self.events[io_event.user_data.event_idx as usize],
-                    EventType::Write { socket },
+                    EventType::Write { socket, addr },
                 );
                 debug_assert!(matches!(old, EventType::Dummy));
                 let write_token = io_event.user_data.event_idx as usize;
@@ -509,13 +543,13 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 .user_data(user_data.as_u64());
                 sq.push(write_op);
             }
-            EventType::Write { socket } => {
+            EventType::Write { socket, addr } => {
                 let fd = socket.as_raw_fd();
                 log::debug!("Wrote to unestablsihed connection");
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
                     &mut self.events[io_event.user_data.event_idx as usize],
-                    EventType::Recv { socket },
+                    EventType::Recv { socket, addr },
                 );
                 // Write is only used for unestablished connections aka when doing handshake
                 let handshake_counter = metrics::counter!("peer_handshake_attempt");
@@ -539,7 +573,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 // TODO: add to metrics
                 self.events.remove(io_event.user_data.event_idx as _);
             }
-            EventType::Recv { socket } => {
+            EventType::Recv { socket, addr: _ } => {
                 let fd = socket.as_raw_fd();
                 let len = ret as usize;
                 if len == 0 {
@@ -564,6 +598,11 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 // Expect this to be the handshake response
                 let parsed_handshake =
                     parse_handshake(torrent_state.info_hash, handshake_data).unwrap();
+                assert!(
+                    self.pending_connections
+                        .remove(&socket.peer_addr().unwrap())
+                );
+
                 let entry = self.connections.vacant_entry();
                 let conn_id = entry.key();
                 let peer_connection = PeerConnection::new(
@@ -712,7 +751,11 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection.fill_request_queue();
 }
 
-fn report_tick_metrics(torrent_state: &TorrentState<'_>, connections: &Slab<PeerConnection>) {
+fn report_tick_metrics(
+    torrent_state: &TorrentState<'_>,
+    connections: &Slab<PeerConnection>,
+    pending_connections: &HashSet<SockAddr>,
+) {
     let counter = metrics::counter!("pieces_completed");
     counter.absolute(torrent_state.piece_selector.total_completed() as u64);
     let gauge = metrics::gauge!("pieces_inflight");
@@ -721,11 +764,14 @@ fn report_tick_metrics(torrent_state: &TorrentState<'_>, connections: &Slab<Peer
     gauge.set(torrent_state.num_unchoked);
     let gauge = metrics::gauge!("num_connections");
     gauge.set(connections.len() as u32);
+    let gauge = metrics::gauge!("num_pending_connections");
+    gauge.set(pending_connections.len() as u32);
 }
 
 pub(crate) fn tick<'scope, 'f_store: 'scope>(
     tick_delta: &Duration,
     connections: &mut Slab<PeerConnection>,
+    pending_connections: &HashSet<SockAddr>,
     file_store: &'f_store FileStore,
     torrent_state: &mut TorrentState<'scope>,
 ) {
@@ -818,7 +864,7 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
         peer.report_metrics();
     }
 
-    report_tick_metrics(torrent_state, connections);
+    report_tick_metrics(torrent_state, connections, pending_connections);
 }
 
 #[cfg(test)]
@@ -876,7 +922,7 @@ mod tests {
             })
         });
 
-        tx.send(Command::ConnectToPeer(addr)).unwrap();
+        tx.send(Command::ConnectToPeers(vec![addr])).unwrap();
         std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
         tx.send(Command::Stop).unwrap();
         event_loop_thread.join().unwrap();
