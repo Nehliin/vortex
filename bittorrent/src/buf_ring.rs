@@ -107,35 +107,26 @@ impl BufferRing {
             match e.raw_os_error() {
                 Some(libc::EINVAL) => {
                     // using buf_ring requires kernel 5.19 or greater.
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!(
-                            "buf_ring.register returned {}, most likely indicating this kernel is not 5.19+",
-                            e
-                        ),
-                    ));
+                    return Err(io::Error::other(format!(
+                        "buf_ring.register returned {}, most likely indicating this kernel is not 5.19+",
+                        e
+                    )));
                 }
                 Some(libc::EEXIST) => {
                     // Registering a duplicate bgid is not allowed. There is an `unregister`
                     // operations that can remove the first, but care must be taken that there
                     // are no outstanding operations that will still return a buffer from that
                     // one.
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!(
-                            "buf_ring.register returned `{}`, indicating the attempted buffer group id {} was already registered",
-                            e, self.bgid
-                        ),
-                    ));
+                    return Err(io::Error::other(format!(
+                        "buf_ring.register returned `{}`, indicating the attempted buffer group id {} was already registered",
+                        e, self.bgid
+                    )));
                 }
                 _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!(
-                            "buf_ring.register returned `{}` for group id {}",
-                            e, self.bgid
-                        ),
-                    ));
+                    return Err(io::Error::other(format!(
+                        "buf_ring.register returned `{}` for group id {}",
+                        e, self.bgid
+                    )));
                 }
             }
         };

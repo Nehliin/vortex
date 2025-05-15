@@ -202,7 +202,7 @@ impl<'f_store> TorrentState<'f_store> {
     }
 
     fn deallocate_piece(&mut self, index: i32) {
-        // The piece might have been mid hashing when a timeout is received 
+        // The piece might have been mid hashing when a timeout is received
         // (two separate peer) which causes to be completed whilst another peer
         // tried to download it. It's fine (TODO: confirm)
         if let Some(piece) = self.pieces[index as usize].as_mut() {
