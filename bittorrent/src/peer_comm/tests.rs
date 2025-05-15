@@ -274,6 +274,7 @@ fn slow_start() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
@@ -316,6 +317,7 @@ fn slow_start() {
         tick(
             &Duration::from_millis(1500),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
@@ -353,6 +355,7 @@ fn slow_start() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
@@ -389,6 +392,7 @@ fn slow_start() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
@@ -439,6 +443,7 @@ fn desired_queue_size() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
@@ -449,6 +454,7 @@ fn desired_queue_size() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
@@ -506,6 +512,7 @@ fn peer_choke_recv_supports_fast() {
         tick(
             &Duration::from_millis(650),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
@@ -579,6 +586,7 @@ fn peer_choke_recv_does_not_support_fast() {
         tick(
             &Duration::from_millis(650),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
@@ -1309,6 +1317,7 @@ fn snubbed_peer() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
@@ -1334,6 +1343,7 @@ fn snubbed_peer() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
+            &Default::default(),
             &file_store,
             &mut torrent_state,
         );
