@@ -19,8 +19,10 @@ fn basic_seeded_download() {
     let download_time = Instant::now();
     let (tx, rc) = std::sync::mpsc::channel();
 
-    tx.send(Command::ConnectToPeer("127.0.0.1:51413".parse().unwrap()))
-        .unwrap();
+    tx.send(Command::ConnectToPeers(vec![
+        "127.0.0.1:51413".parse().unwrap(),
+    ]))
+    .unwrap();
 
     // Spawn a thread to send Stop command after a timeout
     let tx_clone = tx.clone();
