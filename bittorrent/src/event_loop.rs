@@ -41,7 +41,9 @@ pub enum EventType {
     Recv { socket: Socket, addr: SockAddr },
     ConnectedWrite { connection_idx: usize },
     ConnectedRecv { connection_idx: usize },
-    ConnectionStopped { connection_idx: usize },
+    Cancel { connection_idx: usize },
+    Shutdown { connection_idx: usize },
+    Close,
     // Dummy used to allow stable keys in the slab
     Dummy,
 }
@@ -84,9 +86,7 @@ fn event_error_handler<Q: SubmissionQueue>(
                     io_utils::recv_multishot(sq, user_data, fd, bgid);
                     Ok(())
                 }
-                _ => {
-                    panic!("Ran out of buffers on a non recv operation: {event:?}");
-                }
+                _ => unreachable!(),
             }
         }
         libc::ETIME => {
@@ -106,10 +106,9 @@ fn event_error_handler<Q: SubmissionQueue>(
                     handshake_timeout_counter.increment(1);
                     socket
                 }
-                _ => panic!("Timed out unexpected event: {event:?}"),
+                _ => unreachable!(),
             };
-
-            socket.shutdown(std::net::Shutdown::Both)?;
+            io_utils::close_socket(sq, socket, events);
             Ok(())
         }
         libc::ECONNRESET => {
@@ -118,23 +117,45 @@ fn event_error_handler<Q: SubmissionQueue>(
                 EventType::Write { socket, addr } | EventType::Recv { socket, addr } => {
                     log::error!("Connection to {addr:?} reset before handshake completed ");
                     assert!(pending_connections.remove(&addr));
-                    socket.shutdown(std::net::Shutdown::Both)?;
+                    io_utils::close_socket(sq, socket, events);
                 }
                 EventType::ConnectedRecv { connection_idx }
                 | EventType::ConnectedWrite { connection_idx } => {
-                    let connection = &mut connections[connection_idx];
+                    let mut connection = connections.remove(connection_idx);
                     log::error!("Peer [{}] Connection reset", connection.peer_id);
-                    connection.pending_disconnect = Some(DisconnectReason::TcpReset);
+                    connection.release_all_pieces(torrent_state);
+                    if !connection.is_choking {
+                        torrent_state.num_unchoked -= 1;
+                    }
+                    io_utils::close_socket(sq, connection.socket, events);
                 }
-                EventType::ConnectionStopped { connection_idx } => {
+                _ => unreachable!(),
+            }
+            Ok(())
+        }
+        libc::EPIPE => {
+            let event = events.remove(user_data.event_idx as _);
+            match event {
+                EventType::Write { socket, addr } => {
+                    log::warn!("Attempted to write to closed connection {addr:?}");
+                    assert!(pending_connections.remove(&addr));
+                    io_utils::close_socket(sq, socket, events);
+                }
+                EventType::ConnectedWrite { connection_idx } => {
                     let mut connection = connections.remove(connection_idx);
                     log::error!(
-                        "Peer [{}] Connection reset during shutdown",
+                        "Peer [{}] EPIPE received when writing to connection",
                         connection.peer_id
                     );
                     connection.release_all_pieces(torrent_state);
+                    // Don't count disconnected peers
+                    if !connection.is_choking {
+                        torrent_state.num_unchoked -= 1;
+                    }
+                    io_utils::close_socket(sq, connection.socket, events);
                 }
-                EventType::Dummy | EventType::Connect { .. } | EventType::Accept => unreachable!(),
+
+                _ => unreachable!(),
             }
             Ok(())
         }
@@ -146,7 +167,7 @@ fn event_error_handler<Q: SubmissionQueue>(
                 EventType::Connect { socket, addr } => {
                     log::debug!("Connection to {addr:?} failed");
                     assert!(pending_connections.remove(&addr));
-                    socket.shutdown(std::net::Shutdown::Both)?;
+                    io_utils::close_socket(sq, socket, events);
                 }
                 _ => unreachable!(),
             }
@@ -161,15 +182,36 @@ fn event_error_handler<Q: SubmissionQueue>(
             Ok(())
         }
         _ => {
+            let err = std::io::Error::from_raw_os_error(error_code as i32);
             if !events.contains(user_data.event_idx as _) {
                 log::error!(
                     "Failing event didn't exist in events, id: {}",
                     user_data.event_idx
                 );
             } else {
-                events.remove(user_data.event_idx as _);
+                let event = events.remove(user_data.event_idx as _);
+                match event {
+                    EventType::Connect { socket, addr: _ }
+                    | EventType::Write { socket, addr: _ }
+                    | EventType::Recv { socket, addr: _ } => {
+                        io_utils::close_socket(sq, socket, events);
+                    }
+                    EventType::ConnectedWrite { connection_idx }
+                    | EventType::ConnectedRecv { connection_idx }
+                    | EventType::Cancel { connection_idx }
+                    | EventType::Shutdown { connection_idx } => {
+                        let mut connection = connections.remove(connection_idx);
+                        log::error!("Peer [{}] unhandled error: {err}", connection.peer_id);
+                        connection.release_all_pieces(torrent_state);
+                        // Don't count disconnected peers
+                        if !connection.is_choking {
+                            torrent_state.num_unchoked -= 1;
+                        }
+                        io_utils::close_socket(sq, connection.socket, events);
+                    }
+                    EventType::Close | EventType::Accept | EventType::Dummy => return Err(err),
+                }
             }
-            let err = std::io::Error::from_raw_os_error(error_code as i32);
             Err(err)
         }
     }
@@ -568,9 +610,11 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     HANDSHAKE_TIMEOUT_SECS,
                 );
             }
-            EventType::ConnectedWrite { connection_idx: _ } => {
+            EventType::ConnectedWrite { connection_idx: _ }
+            | EventType::Cancel { connection_idx: _ }
+            | EventType::Shutdown { connection_idx: _ } => {
                 // neither replaced nor modified
-                // TODO: add to metrics
+                // TODO: add to metrics for writes?
                 self.events.remove(io_event.user_data.event_idx as _);
             }
             EventType::Recv { socket, addr: _ } => {
@@ -673,17 +717,23 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     &mut event,
                     &mut self.events[io_event.user_data.event_idx as usize],
                 );
-                let connection = &mut self.connections[connection_idx];
                 let len = ret as usize;
                 if len == 0 {
+                    let mut connection = self.connections.remove(connection_idx);
                     log::debug!(
-                        "[PeerId: {}] No more data, mark as pending disconnect",
+                        "[PeerId: {}] No more data, graceful shutdown complete",
                         connection.peer_id
                     );
                     self.events.remove(io_event.user_data.event_idx as _);
-                    connection.pending_disconnect = Some(DisconnectReason::ClosedConnection);
+                    connection.release_all_pieces(torrent_state);
+                    // Don't count disconnected peers
+                    if !connection.is_choking {
+                        torrent_state.num_unchoked -= 1;
+                    }
+                    io_utils::close_socket(sq, connection.socket, &mut self.events);
                     return Ok(());
                 }
+                let connection = &mut self.connections[connection_idx];
                 if !io_event.is_more {
                     let fd = connection.socket.as_raw_fd();
                     // restart the operation
@@ -705,17 +755,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     scope,
                 );
             }
-            EventType::ConnectionStopped { connection_idx } => {
-                let mut connection = self.connections.remove(connection_idx);
-                connection.release_all_pieces(torrent_state);
-                // Don't count disconnected peers
-                if !connection.is_choking {
-                    torrent_state.num_unchoked -= 1;
-                }
-                log::debug!(
-                    "Pending operations cancelled, disconnecting: {}",
-                    connection.peer_id
-                );
+            EventType::Close => {
+                self.events.remove(io_event.user_data.event_idx as _);
             }
             EventType::Dummy => unreachable!(),
         }
