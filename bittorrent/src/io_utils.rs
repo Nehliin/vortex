@@ -143,7 +143,7 @@ pub fn write_to_connection<Q: SubmissionQueue>(
     sq.push(write_op);
 }
 
-// Cancelles all operations on the socket and initiates graceful shutdown
+// Cancels all operations on the socket and initiates graceful shutdown
 pub fn stop_connection<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     conn_id: usize,
