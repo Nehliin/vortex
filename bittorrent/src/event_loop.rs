@@ -29,6 +29,7 @@ use crate::{
     piece_selector::{self, SUBPIECE_SIZE},
 };
 
+pub const MAX_QUEUE_SIZE: usize = 200;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 7;
 const MAX_CONNECTIONS: usize = 100;
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);

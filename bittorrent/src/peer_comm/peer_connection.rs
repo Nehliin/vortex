@@ -11,6 +11,7 @@ use socket2::Socket;
 
 use crate::{
     Error, TorrentState,
+    event_loop::MAX_QUEUE_SIZE,
     file_store::FileStore,
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
@@ -144,7 +145,7 @@ pub struct PeerConnection {
     pub peer_interested: bool,
     // Target number of inflight requests
     pub target_inflight: usize,
-    // Current inflight requests
+    // Current inflight requests, may have timed out
     pub inflight: VecDeque<Subpiece>,
     // Queued requests
     pub queued: VecDeque<Subpiece>,
@@ -293,7 +294,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             self.target_inflight = 1;
             return;
         }
-        self.target_inflight = target_inflight.clamp(0, 200);
+        self.target_inflight = target_inflight.clamp(0, MAX_QUEUE_SIZE);
         self.target_inflight = self.target_inflight.max(1);
     }
 
@@ -449,14 +450,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 return;
             }
         }
-        // Probably caused by the request being rejected or the timeout happen because
-        // we had not requested anything more, shouldn't happen afaik
-        log::error!(
-            "[PeerId: {}] Piece timed out but not found in inflight queue",
-            self.peer_id
-        );
-        // Don't timeout again at least
-        self.last_received_subpiece = None;
     }
 
     #[inline]
@@ -491,8 +484,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     // pieces as well
                     self.queued.append(&mut self.inflight);
                     self.inflight.clear();
-                    // TODO: test this
-                    self.last_received_subpiece = None;
+                    // TODO handle as reject piece
                 }
                 self.release_all_pieces(torrent_state);
             }
@@ -824,10 +816,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         let mut subpieces = torrent_state.allocate_piece(new_index, file_store);
                         self.append_and_fill(&mut subpieces);
                     }
-                }
-                if self.inflight.is_empty() {
-                    // TODO: Test this
-                    self.last_received_subpiece = None;
                 }
                 if defer_deallocation {
                     torrent_state.deallocate_piece(index);
