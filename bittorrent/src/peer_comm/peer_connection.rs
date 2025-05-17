@@ -11,6 +11,7 @@ use socket2::Socket;
 
 use crate::{
     Error, TorrentState,
+    event_loop::MAX_QUEUE_SIZE,
     file_store::FileStore,
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
@@ -293,7 +294,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             self.target_inflight = 1;
             return;
         }
-        self.target_inflight = target_inflight.clamp(0, 200);
+        self.target_inflight = target_inflight.clamp(0, MAX_QUEUE_SIZE);
         self.target_inflight = self.target_inflight.max(1);
     }
 
