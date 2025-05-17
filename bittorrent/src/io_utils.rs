@@ -1,11 +1,19 @@
-use std::{collections::VecDeque, io, os::fd::RawFd, ptr::null_mut};
+use std::{
+    collections::VecDeque,
+    io,
+    os::fd::{IntoRawFd, RawFd},
+    ptr::null_mut,
+};
 
 use io_uring::{
-    Submitter, opcode,
+    Submitter,
+    opcode::{self},
     squeue::PushError,
     types::{self, CancelBuilder, Timespec},
 };
+use libc::SHUT_WR;
 use slab::Slab;
+use socket2::Socket;
 
 use crate::{buf_ring::Bgid, event_loop::EventType};
 
@@ -135,14 +143,14 @@ pub fn write_to_connection<Q: SubmissionQueue>(
     sq.push(write_op);
 }
 
-// Cancelles all operations on the socket
+// Cancels all operations on the socket and initiates graceful shutdown
 pub fn stop_connection<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     conn_id: usize,
     fd: RawFd,
     events: &mut Slab<EventType>,
 ) {
-    let event = events.insert(EventType::ConnectionStopped {
+    let event = events.insert(EventType::Cancel {
         connection_idx: conn_id,
     });
     let user_data = UserData::new(event, None);
@@ -150,6 +158,27 @@ pub fn stop_connection<Q: SubmissionQueue>(
         .build()
         .user_data(user_data.as_u64());
     sq.push(cancel_op);
+    let event = events.insert(EventType::Shutdown {
+        connection_idx: conn_id,
+    });
+    let user_data = UserData::new(event, None);
+    let shutdown_op = opcode::Shutdown::new(types::Fd(fd), SHUT_WR)
+        .build()
+        .user_data(user_data.as_u64());
+    sq.push(shutdown_op);
+}
+
+pub fn close_socket<Q: SubmissionQueue>(
+    sq: &mut BackloggedSubmissionQueue<Q>,
+    socket: Socket,
+    events: &mut Slab<EventType>,
+) {
+    let event = events.insert(EventType::Close);
+    let user_data = UserData::new(event, None);
+    let close_op = opcode::Close::new(types::Fd(socket.into_raw_fd()))
+        .build()
+        .user_data(user_data.as_u64());
+    sq.push(close_op);
 }
 
 pub fn recv<Q: SubmissionQueue>(

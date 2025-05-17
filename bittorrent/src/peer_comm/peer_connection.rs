@@ -117,12 +117,8 @@ pub struct OutgoingMsg {
 
 #[derive(Error, Debug)]
 pub enum DisconnectReason {
-    #[error("Peer closed the connection")]
-    ClosedConnection,
     #[error("Peer was idle for too long")]
     Idle,
-    #[error("Peer reset the underlying connection")]
-    TcpReset,
     #[error("Protocol error {0}")]
     ProtocolError(&'static str),
     #[error("Invalid message received")]
@@ -297,7 +293,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             self.target_inflight = 1;
             return;
         }
-        self.target_inflight = target_inflight.clamp(0, 400);
+        self.target_inflight = target_inflight.clamp(0, 200);
         self.target_inflight = self.target_inflight.max(1);
     }
 
@@ -487,7 +483,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.last_seen = Instant::now();
         match peer_message {
             PeerMessage::Choke => {
-                log::error!("[Peer: {}] Peer is choking us!", self.peer_id);
+                log::debug!("[Peer: {}] Peer is choking us!", self.peer_id);
                 self.peer_choking = true;
                 // Interpret all sent pieces as rejected
                 if !self.fast_ext {
