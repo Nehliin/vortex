@@ -487,7 +487,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.last_seen = Instant::now();
         match peer_message {
             PeerMessage::Choke => {
-                log::error!("[Peer: {}] Peer is choking us!", self.peer_id);
+                log::debug!("[Peer: {}] Peer is choking us!", self.peer_id);
                 self.peer_choking = true;
                 // Interpret all sent pieces as rejected
                 if !self.fast_ext {

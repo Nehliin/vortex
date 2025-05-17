@@ -9,7 +9,7 @@ use vortex_bittorrent::{Command, Torrent, generate_peer_id};
 
 fn main() {
     let mut log_builder = env_logger::builder();
-    log_builder.filter_level(log::LevelFilter::Info).init();
+    log_builder.filter_level(log::LevelFilter::Error).init();
 
     let builder = PrometheusBuilder::new();
     builder.install().unwrap();
