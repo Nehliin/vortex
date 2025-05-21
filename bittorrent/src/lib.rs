@@ -184,7 +184,6 @@ impl<'f_store> TorrentState<'f_store> {
         index: i32,
         file_store: &'f_store FileStore,
     ) -> VecDeque<Subpiece> {
-        self.piece_selector.mark_allocated(index as usize);
         match &mut self.pieces[index as usize] {
             Some(allocated_piece) => allocated_piece.allocate_remaining_subpieces(),
             None => {
@@ -201,7 +200,14 @@ impl<'f_store> TorrentState<'f_store> {
         }
     }
 
-    fn deallocate_piece(&mut self, index: i32) {
+    // Deallocate a piece and mark the index again if the connection is in endgame mode
+    // since those are marked as not interesting to prevent repicking of pieces
+    fn deallocate_piece(&mut self, index: i32, endgame_conn_id: Option<usize>) {
+        if let Some(conn_id) = endgame_conn_id {
+            // Mark the piece as interesting again so it can be picked again
+            // if necessary
+            self.piece_selector.peer_have_piece(conn_id, index as usize);
+        }
         // The piece might have been mid hashing when a timeout is received
         // (two separate peer) which causes to be completed whilst another peer
         // tried to download it. It's fine (TODO: confirm)
@@ -213,8 +219,6 @@ impl<'f_store> TorrentState<'f_store> {
             piece.ref_count = piece.ref_count.saturating_sub(1)
         }
     }
-
-    // TODO: Something like release in flight pieces?
 
     pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked

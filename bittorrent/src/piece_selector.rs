@@ -65,35 +65,36 @@ impl PieceSelector {
         field
     }
 
-    pub fn next_piece(&self, connection_id: usize) -> Option<i32> {
-        let pieces_left = self.completed_pieces.count_zeros();
-        if pieces_left == 0 {
-            log::info!("Torrent is completed, no next piece found");
-            return None;
-        }
-
+    // Returns index and if the peer is in endgame mode
+    pub fn next_piece(&mut self, connection_id: usize) -> Option<(i32, bool)> {
         let available_pieces =
             self.new_available_pieces(self.interesting_peer_pieces.get(&connection_id)?.clone());
 
+        let interesting_pieces = self.interesting_peer_pieces.get_mut(&connection_id)?;
         if available_pieces.not_any() {
-            log::warn!(
-                "There are no available pieces, allocated_pieces: {}",
-                self.allocated_pieces.count_ones()
-            );
-            return None;
+            let allocated_interesting = interesting_pieces.first_one()?;
+            // if we still have interesting pieces not completed we should enter endgame mode
+            // and pick one of those
+            // Mark this as no longer interesting to prevent it from being repicked.
+            // If this is rejected we can mark it as interesting again when deallocating
+            interesting_pieces.set(allocated_interesting, false);
+            return Some((allocated_interesting as i32, true));
         }
 
-        let procentage_left = pieces_left as f32 / self.completed_pieces.len() as f32;
-
+        let procentage_left =
+            self.completed_pieces.count_zeros() as f32 / self.completed_pieces.len() as f32;
         if procentage_left > 0.95 {
             for _ in 0..5 {
                 let index = (rand::random::<f32>() * self.completed_pieces.len() as f32) as usize;
                 if available_pieces[index] {
-                    return Some(index as i32);
+                    self.allocated_pieces.set(index, true);
+                    return Some((index as i32, false));
                 }
             }
             log::warn!("Random piece selection failed");
-            available_pieces.first_one().map(|index| index as i32)
+            let available_index = available_pieces.first_one()?;
+            self.allocated_pieces.set(available_index, true);
+            Some((available_index as i32, false))
         } else {
             // Rarest first
             let mut count = vec![0; available_pieces.len()];
@@ -104,14 +105,13 @@ impl PieceSelector {
                     }
                 }
             }
-            let index = count
+            let (rarest_index, _) = count
                 .into_iter()
                 .enumerate()
                 .filter(|(_pos, count)| count > &0)
-                .min_by_key(|(_pos, val)| *val)
-                .map(|(pos, _)| pos as i32);
-            log::debug!("Picking rarest piece to download, index: {index:?}");
-            index
+                .min_by_key(|(_pos, val)| *val)?;
+            self.allocated_pieces.set(rarest_index, true);
+            Some((rarest_index as i32, false))
         }
     }
 
@@ -159,16 +159,6 @@ impl PieceSelector {
         for interesting_pieces in self.interesting_peer_pieces.values_mut() {
             interesting_pieces.set(index, false);
         }
-    }
-
-    #[inline]
-    pub fn mark_allocated(&mut self, index: usize) {
-        // We never pick a completed piece since there might exist
-        // an ReadablePieceFileView alive for that (it also makes no sense to redownload)
-        assert!(!self.completed_pieces[index]);
-        let mut bit = self.allocated_pieces.get_mut(index).unwrap();
-        let old = bit.replace(true);
-        assert!(!old);
     }
 
     #[inline]
