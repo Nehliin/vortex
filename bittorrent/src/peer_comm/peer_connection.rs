@@ -411,8 +411,16 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
 
         let gauge = metrics::gauge!("peer.queued", "peer_id" => self.peer_id.to_string());
         gauge.set(self.queued.len() as u32);
+
+        let gauge = metrics::gauge!("peer.snubbed", "peer_id" => self.peer_id.to_string());
+        gauge.set(if self.snubbed { 1 } else { 0 } as u32);
+
+        let gauge = metrics::gauge!("peer.endgame", "peer_id" => self.peer_id.to_string());
+        gauge.set(if self.endgame { 1 } else { 0 } as u32);
+
         let gauge = metrics::gauge!("peer.inflight", "peer_id" => self.peer_id.to_string());
         gauge.set(self.inflight.len() as u32);
+
         let histogram = metrics::histogram!("rtt", "peer_id" => self.peer_id.to_string());
         histogram.record(self.moving_rtt.mean());
     }

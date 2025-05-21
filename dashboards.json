@@ -784,6 +784,49 @@
           "legendFormat": "num_pending_connections",
           "range": true,
           "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "editorMode": "code",
+          "expr": "",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "num_snubbed",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "sum by(job) (peer_snubbed)",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "num_snubbed",
+          "range": true,
+          "refId": "E",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "editorMode": "code",
+          "expr": "sum by(job) (peer_endgame)",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "endgame",
+          "range": true,
+          "refId": "F"
         }
       ],
       "title": "Connections",
@@ -1003,5 +1046,5 @@
   "timezone": "browser",
   "title": "Throughput",
   "uid": "eebvxemmfqh34d",
-  "version": 28
+  "version": 30
 }
