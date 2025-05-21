@@ -892,7 +892,8 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
             let nothing_queued = peer.queued.is_empty();
             (bandwitdth_available_for_new_piece || nothing_queued) && !peer.peer_choking
         } {
-            if let Some(next_piece) = torrent_state.piece_selector.next_piece(peer_key) {
+            if let Some((next_piece, endgame)) = torrent_state.piece_selector.next_piece(peer_key) {
+                peer.endgame = endgame;
                 let mut queue = torrent_state.allocate_piece(next_piece, file_store);
                 let queue_len = queue.len();
                 peer.append_and_fill(&mut queue);

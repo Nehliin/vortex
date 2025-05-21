@@ -151,6 +151,8 @@ pub struct PeerConnection {
     pub queued: VecDeque<Subpiece>,
     // Time since any data was received
     pub last_seen: Instant,
+    // Is this peer in endgame mode?
+    pub endgame: bool,
     // Time since last received subpiece request, used to timeout
     // requests
     pub last_received_subpiece: Option<Instant>,
@@ -183,6 +185,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             sent_allowed_fast: false,
             peer_choking: true,
             peer_interested: false,
+            endgame: false,
             last_received_subpiece: None,
             fast_ext,
             inflight: VecDeque::with_capacity(64),
@@ -214,7 +217,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     acc
                 });
         for piece in pieces {
-            torrent_state.deallocate_piece(piece);
+            torrent_state.deallocate_piece(piece, self.endgame.then_some(self.conn_id));
         }
         self.queued.clear();
     }
@@ -402,8 +405,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         // Prev throughput is used since the mertics are reported at the end of TICK and
         // throughput have been reset and stored here at that point
         gauge.set(self.prev_throughput as u32);
+
         let gauge = metrics::gauge!("peer.target_inflight", "peer_id" => self.peer_id.to_string());
         gauge.set(self.target_inflight as u32);
+
         let gauge = metrics::gauge!("peer.queued", "peer_id" => self.peer_id.to_string());
         gauge.set(self.queued.len() as u32);
         let gauge = metrics::gauge!("peer.inflight", "peer_id" => self.peer_id.to_string());
@@ -434,14 +439,18 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 // Request a new different piece and do it before clearing
                 // the queue so the same piece isn't picked again
                 let maybe_new_piece = torrent_state.piece_selector.next_piece(self.conn_id);
-                // Ensure this piece specifically is deallocated
+                // Ensure this piece specifically is deallocated, do not update endgame mode
+                // before this call since it should only be interesting if we _were_ in endgame
+                // mode or not.
                 // TODO: This can be improved probably
-                torrent_state.deallocate_piece(subpiece.index);
+                torrent_state
+                    .deallocate_piece(subpiece.index, self.endgame.then_some(self.conn_id));
                 self.release_all_pieces(torrent_state);
                 // Make it possible to request one more piece if this
                 // is the final inflight piece
                 self.target_inflight = 2;
-                if let Some(new_piece) = maybe_new_piece {
+                if let Some((new_piece, endgame)) = maybe_new_piece {
+                    self.endgame = endgame;
                     let mut subpieces = torrent_state.allocate_piece(new_piece, file_store);
                     self.append_and_fill(&mut subpieces);
                 }
@@ -494,9 +503,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     // Not interested so don't do anything
                     return;
                 }
-                if let Some(piece_idx) = torrent_state.piece_selector.next_piece(self.conn_id) {
+                if let Some((piece_idx, endgame)) =
+                    torrent_state.piece_selector.next_piece(self.conn_id)
+                {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
+                    self.endgame = endgame;
                     let mut subpieces = torrent_state.allocate_piece(piece_idx, file_store);
                     // TODO: might be more than the peer can handle
                     self.append_and_fill(&mut subpieces);
@@ -808,17 +820,22 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         self.allowed_fast_pieces.swap_remove(i);
                     }
                 } else if self.inflight.len() < 2 && self.queued.is_empty() {
-                    if let Some(new_index) = torrent_state.piece_selector.next_piece(self.conn_id) {
+                    if let Some((new_index, endgame)) =
+                        torrent_state.piece_selector.next_piece(self.conn_id)
+                    {
                         if defer_deallocation {
                             defer_deallocation = false;
-                            torrent_state.deallocate_piece(index);
+                            // Use the old endgame value
+                            torrent_state
+                                .deallocate_piece(index, self.endgame.then_some(self.conn_id));
                         }
+                        self.endgame = endgame;
                         let mut subpieces = torrent_state.allocate_piece(new_index, file_store);
                         self.append_and_fill(&mut subpieces);
                     }
                 }
                 if defer_deallocation {
-                    torrent_state.deallocate_piece(index);
+                    torrent_state.deallocate_piece(index, self.endgame.then_some(self.conn_id));
                 }
                 self.fill_request_queue();
             }
