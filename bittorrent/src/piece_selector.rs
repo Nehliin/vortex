@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 
 use crate::file_store::{ReadablePieceFileView, WritablePieceFileView};
 
@@ -39,6 +40,7 @@ pub struct PieceSelector {
     interesting_peer_pieces: HashMap<usize, BitBox<u8, Msb0>>,
     last_piece_length: u32,
     piece_length: u32,
+    rng_gen: SmallRng,
 }
 
 impl PieceSelector {
@@ -55,6 +57,10 @@ impl PieceSelector {
             last_piece_length: last_piece_length as u32,
             piece_length: piece_length as u32,
             interesting_peer_pieces: Default::default(),
+            #[cfg(not(test))]
+            rng_gen: SmallRng::from_os_rng(),
+            #[cfg(test)]
+            rng_gen: SmallRng::seed_from_u64(0xdeadbeef),
         }
     }
 
@@ -85,7 +91,8 @@ impl PieceSelector {
             self.completed_pieces.count_zeros() as f32 / self.completed_pieces.len() as f32;
         if procentage_left > 0.95 {
             for _ in 0..5 {
-                let index = (rand::random::<f32>() * self.completed_pieces.len() as f32) as usize;
+                let index =
+                    (self.rng_gen.random::<f32>() * self.completed_pieces.len() as f32) as usize;
                 if available_pieces[index] {
                     self.allocated_pieces.set(index, true);
                     return Some((index as i32, false));
