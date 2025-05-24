@@ -95,11 +95,13 @@ impl PieceSelector {
                     (self.rng_gen.random::<f32>() * self.completed_pieces.len() as f32) as usize;
                 if available_pieces[index] {
                     self.allocated_pieces.set(index, true);
+                    interesting_pieces.set(index, false);
                     return Some((index as i32, false));
                 }
             }
             log::warn!("Random piece selection failed");
             let available_index = available_pieces.first_one()?;
+            interesting_pieces.set(available_index, false);
             self.allocated_pieces.set(available_index, true);
             Some((available_index as i32, false))
         } else {
@@ -117,6 +119,9 @@ impl PieceSelector {
                 .enumerate()
                 .filter(|(_pos, count)| count > &0)
                 .min_by_key(|(_pos, val)| *val)?;
+            self.interesting_peer_pieces
+                .get_mut(&connection_id)?
+                .set(rarest_index, false);
             self.allocated_pieces.set(rarest_index, true);
             Some((rarest_index as i32, false))
         }
@@ -138,7 +143,7 @@ impl PieceSelector {
     }
 
     // Updates the interesting peer pieces tracking and returns if the piece index was interesting
-    pub fn peer_have_piece(&mut self, connection_id: usize, piece_index: usize) -> bool {
+    pub fn update_peer_piece_intrest(&mut self, connection_id: usize, piece_index: usize) -> bool {
         let is_interesting = !self.completed_pieces[piece_index];
         let entry = self.interesting_peer_pieces.entry(connection_id);
         entry

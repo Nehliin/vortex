@@ -202,12 +202,11 @@ impl<'f_store> TorrentState<'f_store> {
 
     // Deallocate a piece and mark the index again if the connection is in endgame mode
     // since those are marked as not interesting to prevent repicking of pieces
-    fn deallocate_piece(&mut self, index: i32, endgame_conn_id: Option<usize>) {
-        if let Some(conn_id) = endgame_conn_id {
-            // Mark the piece as interesting again so it can be picked again
-            // if necessary
-            self.piece_selector.peer_have_piece(conn_id, index as usize);
-        }
+    fn deallocate_piece(&mut self, index: i32, endgame_conn_id: usize) {
+        // Mark the piece as interesting again so it can be picked again
+        // if necessary
+        self.piece_selector
+            .update_peer_piece_intrest(endgame_conn_id, index as usize);
         // The piece might have been mid hashing when a timeout is received
         // (two separate peer) which causes to be completed whilst another peer
         // tried to download it. It's fine (TODO: confirm)

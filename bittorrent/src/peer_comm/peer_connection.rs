@@ -217,7 +217,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     acc
                 });
         for piece in pieces {
-            torrent_state.deallocate_piece(piece, self.endgame.then_some(self.conn_id));
+            torrent_state.deallocate_piece(piece, self.conn_id);
         }
         self.queued.clear();
     }
@@ -451,8 +451,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 // before this call since it should only be interesting if we _were_ in endgame
                 // mode or not.
                 // TODO: This can be improved probably
-                torrent_state
-                    .deallocate_piece(subpiece.index, self.endgame.then_some(self.conn_id));
+                torrent_state.deallocate_piece(subpiece.index, self.conn_id);
                 self.release_all_pieces(torrent_state);
                 // Make it possible to request one more piece if this
                 // is the final inflight piece
@@ -597,7 +596,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 let index = index as usize;
                 let is_interesting = torrent_state
                     .piece_selector
-                    .peer_have_piece(self.conn_id, index);
+                    .update_peer_piece_intrest(dbg!(self.conn_id), dbg!(index));
                 if is_interesting && !self.is_interesting {
                     self.interested(false);
                 }
@@ -834,8 +833,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         if defer_deallocation {
                             defer_deallocation = false;
                             // Use the old endgame value
-                            torrent_state
-                                .deallocate_piece(index, self.endgame.then_some(self.conn_id));
+                            torrent_state.deallocate_piece(index, self.conn_id);
                         }
                         self.endgame = endgame;
                         let mut subpieces = torrent_state.allocate_piece(new_index, file_store);
@@ -843,7 +841,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                 }
                 if defer_deallocation {
-                    torrent_state.deallocate_piece(index, self.endgame.then_some(self.conn_id));
+                    torrent_state.deallocate_piece(index, self.conn_id);
                 }
                 self.fill_request_queue();
             }
