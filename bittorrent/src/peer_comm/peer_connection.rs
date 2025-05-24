@@ -458,7 +458,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 self.target_inflight = 2;
                 if let Some((new_piece, endgame)) = maybe_new_piece {
                     self.endgame = endgame;
-                    let mut subpieces = torrent_state.allocate_piece(new_piece, file_store);
+                    let mut subpieces =
+                        torrent_state.allocate_piece(new_piece, self.conn_id, file_store);
                     self.append_and_fill(&mut subpieces);
                 }
                 // Update to actual target
@@ -516,7 +517,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
                     self.endgame = endgame;
-                    let mut subpieces = torrent_state.allocate_piece(piece_idx, file_store);
+                    let mut subpieces =
+                        torrent_state.allocate_piece(piece_idx, self.conn_id, file_store);
                     // TODO: might be more than the peer can handle
                     self.append_and_fill(&mut subpieces);
                 } else {
@@ -596,7 +598,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 let index = index as usize;
                 let is_interesting = torrent_state
                     .piece_selector
-                    .update_peer_piece_intrest(dbg!(self.conn_id), dbg!(index));
+                    .update_peer_piece_intrest(self.conn_id, index);
                 if is_interesting && !self.is_interesting {
                     self.interested(false);
                 }
@@ -616,6 +618,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         .piece_selector
                         .interesting_peer_pieces(self.conn_id)
                     {
+                        // maste markera som allokerad har! eller atminstonde valj fran fast set
                         if interesting_pieces[index as usize]
                             && !torrent_state.piece_selector.is_allocated(index as usize)
                         {
@@ -625,7 +628,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             );
                             // Mark ourselves as interested
                             self.interested(true);
-                            let mut subpieces = torrent_state.allocate_piece(index, file_store);
+                            let mut subpieces =
+                                torrent_state.allocate_piece(index, self.conn_id, file_store);
                             self.append_and_fill(&mut subpieces);
                         }
                     }
@@ -836,7 +840,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             torrent_state.deallocate_piece(index, self.conn_id);
                         }
                         self.endgame = endgame;
-                        let mut subpieces = torrent_state.allocate_piece(new_index, file_store);
+                        let mut subpieces =
+                            torrent_state.allocate_piece(new_index, self.conn_id, file_store);
                         self.append_and_fill(&mut subpieces);
                     }
                 }
@@ -903,7 +908,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 {
                     // TODO: This might happen in end game mode when multiple peers race to complete the
                     // piece. Haven't implemented it yet though
-                    log::error!("Recived unexpected piece message, index: {index}",);
+                    log::error!("Received unexpected piece message, index: {index}",);
                     return;
                 }
                 // TODO: disconnect on recv piece never requested if fast_ext is enabled
@@ -921,14 +926,16 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     })
                     .map(|completed_piece| completed_piece.into_readable())
                 {
-                    log::debug!("Piece {index} completed");
+                    log::debug!("Piece {index} download completed, sending to hash thread");
                     let complete_tx = torrent_state.completed_piece_tx.clone();
+                    let conn_id = self.conn_id;
                     scope.spawn(move |_| {
                         let hash = &torrent_info.pieces[readable_piece_view.index as usize];
                         let hash_check_result = readable_piece_view.sync_and_check_hash(hash);
                         complete_tx
                             .send(CompletedPiece {
                                 index: index as usize,
+                                conn_id,
                                 hash_matched: hash_check_result,
                             })
                             .unwrap();

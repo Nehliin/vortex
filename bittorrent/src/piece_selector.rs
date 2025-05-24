@@ -73,17 +73,14 @@ impl PieceSelector {
 
     // Returns index and if the peer is in endgame mode
     pub fn next_piece(&mut self, connection_id: usize) -> Option<(i32, bool)> {
-        let available_pieces =
-            self.new_available_pieces(self.interesting_peer_pieces.get(&connection_id)?.clone());
+        let interesting_pieces = self.interesting_peer_pieces.get(&connection_id)?;
+        let available_pieces = self.new_available_pieces(interesting_pieces.clone());
 
-        let interesting_pieces = self.interesting_peer_pieces.get_mut(&connection_id)?;
         if available_pieces.not_any() {
             let allocated_interesting = interesting_pieces.first_one()?;
             // if we still have interesting pieces not completed we should enter endgame mode
             // and pick one of those
-            // Mark this as no longer interesting to prevent it from being repicked.
-            // If this is rejected we can mark it as interesting again when deallocating
-            interesting_pieces.set(allocated_interesting, false);
+            log::debug!("Peer {connection_id} is entering endgame mode");
             return Some((allocated_interesting as i32, true));
         }
 
@@ -94,17 +91,14 @@ impl PieceSelector {
                 let index =
                     (self.rng_gen.random::<f32>() * self.completed_pieces.len() as f32) as usize;
                 if available_pieces[index] {
-                    self.allocated_pieces.set(index, true);
-                    interesting_pieces.set(index, false);
                     return Some((index as i32, false));
                 }
             }
             log::warn!("Random piece selection failed");
             let available_index = available_pieces.first_one()?;
-            interesting_pieces.set(available_index, false);
-            self.allocated_pieces.set(available_index, true);
             Some((available_index as i32, false))
         } else {
+            // Note: This won't count allocated piece but that should be fine
             // Rarest first
             let mut count = vec![0; available_pieces.len()];
             for available in available_pieces.iter_ones() {
@@ -119,10 +113,6 @@ impl PieceSelector {
                 .enumerate()
                 .filter(|(_pos, count)| count > &0)
                 .min_by_key(|(_pos, val)| *val)?;
-            self.interesting_peer_pieces
-                .get_mut(&connection_id)?
-                .set(rarest_index, false);
-            self.allocated_pieces.set(rarest_index, true);
             Some((rarest_index as i32, false))
         }
     }
@@ -174,9 +164,28 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn mark_not_allocated(&mut self, index: usize) {
+    pub fn mark_allocated(&mut self, index: i32, connection_id: usize) {
+        let index = index as usize;
+        self.allocated_pieces.set(index, true);
+        // Mark this as no longer interesting to prevent it from being repicked.
+        // If this is rejected we can mark it as interesting again when deallocating
+        let interesting_pieces = &mut self
+            .interesting_peer_pieces
+            .get_mut(&connection_id)
+            .unwrap();
+        let old = interesting_pieces.replace(index, false);
+        // Must have been interesting to this peer before allocating it
+        assert!(old);
+    }
+
+    #[inline]
+    pub fn mark_not_allocated(&mut self, index: i32, connection_id: usize) {
+        let index = index as usize;
         assert!(self.allocated_pieces[index]);
         self.allocated_pieces.set(index, false);
+        // Mark the piece as interesting again so it can be picked again
+        // if necessary
+        self.update_peer_piece_intrest(connection_id, index);
     }
 
     #[inline]
@@ -232,6 +241,7 @@ impl PieceSelector {
 #[derive(Debug)]
 pub struct CompletedPiece {
     pub index: usize,
+    pub conn_id: usize,
     pub hash_matched: std::io::Result<bool>,
 }
 
