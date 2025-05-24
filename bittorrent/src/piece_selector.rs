@@ -60,7 +60,7 @@ impl PieceSelector {
             #[cfg(not(test))]
             rng_gen: SmallRng::from_os_rng(),
             #[cfg(test)]
-            rng_gen: SmallRng::seed_from_u64(0xdeadbeef),
+            rng_gen: SmallRng::seed_from_u64(0xbeefdead),
         }
     }
 

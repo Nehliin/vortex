@@ -137,69 +137,120 @@ fn have() {
     let (file_store, torrent_info) = setup_test();
     let mut torrent_state = TorrentState::new(&torrent_info);
     rayon::scope(|scope| {
-        let mut a = generate_peer(true, 0);
-        a.handle_message(
-            PeerMessage::Have { index: 8 },
+        let a = generate_peer(true, 0);
+        let mut connections = Slab::new();
+        let key_a = connections.insert(a);
+        connections[key_a].handle_message(
+            PeerMessage::Have { index: 7 },
             &mut torrent_state,
             &file_store,
             &torrent_info,
             scope,
         );
         // Interpret the Have as HaveNone, the bitfield might have been omitted
-        assert!(torrent_state.piece_selector.bitfield_received(a.conn_id));
-        assert!(a.pending_disconnect.is_none());
+        assert!(torrent_state.piece_selector.bitfield_received(key_a));
+        assert!(connections[key_a].pending_disconnect.is_none());
         // We should be interestead now since we do not have the piece
-        sent_and_marked_interested(&a);
-        assert!(a.outgoing_msgs_buffer.contains(&OutgoingMsg {
-            message: PeerMessage::Interested,
-            ordered: false
-        }));
-        a.outgoing_msgs_buffer.clear();
+        sent_and_marked_interested(&connections[key_a]);
+        connections[key_a].outgoing_msgs_buffer.clear();
         for piece_id in 0..torrent_info.pieces.len() {
-            if piece_id == 8 {
+            if piece_id == 7 {
                 assert!(
                     torrent_state
                         .piece_selector
-                        .interesting_peer_pieces(a.conn_id)
+                        .interesting_peer_pieces(key_a)
                         .unwrap()[piece_id]
                 );
             } else {
                 assert!(
                     !torrent_state
                         .piece_selector
-                        .interesting_peer_pieces(a.conn_id)
+                        .interesting_peer_pieces(key_a)
                         .unwrap()[piece_id]
                 );
             }
         }
         // Does not send interested again
-        a.handle_message(
-            PeerMessage::Have { index: 8 },
+        connections[key_a].handle_message(
+            PeerMessage::Have { index: 7 },
             &mut torrent_state,
             &file_store,
             &torrent_info,
             scope,
         );
-        assert!(a.outgoing_msgs_buffer.is_empty());
-        let (index, _) = torrent_state.piece_selector.next_piece(a.conn_id).unwrap();
+        assert!(connections[key_a].outgoing_msgs_buffer.is_empty());
+        let (index, _) = torrent_state.piece_selector.next_piece(key_a).unwrap();
+        assert_eq!(index, 7);
         let mut subpieces = torrent_state.allocate_piece(index, &file_store);
-        a.append_and_fill(&mut subpieces);
+        connections[key_a].append_and_fill(&mut subpieces);
 
-        let mut b = generate_peer(true, 1);
-        assert!(!b.is_interesting);
+        let b = generate_peer(true, 1);
+        let key_b = connections.insert(b);
+        assert!(!connections[key_b].is_interesting);
         assert!(torrent_state.piece_selector.is_allocated(index as usize));
-        // Does not mark as interestead since the piece is inflight
-        b.handle_message(
+        connections[key_b].handle_message(
             PeerMessage::Have { index },
             &mut torrent_state,
             &file_store,
             &torrent_info,
             scope,
         );
+        // Piece is still interesting since it's not completed
+        sent_and_marked_interested(&connections[key_b]);
         assert!(
             torrent_state
                 .piece_selector
-                .interesting_peer_pieces(a.conn_id)
+                .interesting_peer_pieces(key_b)
+                .unwrap()[index as usize]
+        );
+
+        let c = generate_peer(true, 2);
+        let key_c = connections.insert(c);
+
+        // Complete the piece
+        connections[key_a].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        connections[key_a].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(connections[key_a].inflight.is_empty());
+        assert_eq!(torrent_state.num_allocated(), 0);
+        // To ensure we do not miss the completion event
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections);
+
+        // C is not interesting
+        assert!(!connections[key_c].is_interesting);
+        connections[key_c].handle_message(
+            PeerMessage::Have { index },
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        // Piece is NOT interesting since it's completed
+        assert!(!connections[key_c].is_interesting);
+        assert!(
+            !torrent_state
+                .piece_selector
+                .interesting_peer_pieces(key_c)
                 .unwrap()[index as usize]
         );
     });
