@@ -413,13 +413,21 @@ fn desired_queue_size() {
         let mut connections = Slab::new();
         let key = connections.insert(a);
 
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
         connections[key].peer_choking = false;
         connections[key].slow_start = false;
-        let mut subpieces = torrent_state.allocate_piece(1, &file_store);
+        let (index, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let mut subpieces = torrent_state.allocate_piece(index, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
             PeerMessage::Piece {
-                index: 1,
+                index,
                 begin: 0,
                 data: vec![1; SUBPIECE_SIZE as usize].into(),
             },
@@ -430,7 +438,7 @@ fn desired_queue_size() {
         );
         connections[key].handle_message(
             PeerMessage::Piece {
-                index: 1,
+                index,
                 begin: SUBPIECE_SIZE,
                 data: vec![2; SUBPIECE_SIZE as usize].into(),
             },
@@ -476,19 +484,57 @@ fn peer_choke_recv_supports_fast() {
         let mut connections = Slab::new();
         let key = connections.insert(a);
 
-        connections[key].peer_choking = false;
-        connections[key].slow_start = false;
-        for i in 1..7 {
-            let mut subpieces = torrent_state.allocate_piece(i, &file_store);
-            connections[key].append_and_fill(&mut subpieces);
+        // First, the peer needs to have pieces to be interesting
+        for index in 1..7 {
+            connections[key].handle_message(
+                PeerMessage::Have { index },
+                &mut torrent_state,
+                &file_store,
+                &torrent_info,
+                scope,
+            );
         }
+
+        connections[key].slow_start = false;
+
+        assert!(connections[key].peer_choking);
+        connections[key].handle_message(
+            PeerMessage::Unchoke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(!connections[key].peer_choking);
+
+        // Now allocate additional pieces manually
+        let mut allocated_pieces = Vec::new();
+
+        // Get the first piece that was allocated during unchoke
+        if let Some(piece) = torrent_state.pieces.iter().position(|p| p.is_some()) {
+            allocated_pieces.push(piece as i32);
+        }
+
+        // Allocate 5 more pieces
+        for _ in 0..5 {
+            if let Some((index, _)) = torrent_state.piece_selector.next_piece(key) {
+                allocated_pieces.push(index);
+                let mut subpieces = torrent_state.allocate_piece(index, &file_store);
+                connections[key].append_and_fill(&mut subpieces);
+            }
+        }
+
+        assert_eq!(allocated_pieces.len(), 6);
         assert_eq!(torrent_state.num_allocated(), 6);
         assert_eq!(connections[key].target_inflight, 4);
         assert_eq!(connections[key].queued.len(), 8);
         assert_eq!(connections[key].inflight.len(), 4);
+
+        // Complete the first piece
+        let first_piece = allocated_pieces[0];
         connections[key].handle_message(
             PeerMessage::Piece {
-                index: 1,
+                index: first_piece,
                 begin: 0,
                 data: vec![1; SUBPIECE_SIZE as usize].into(),
             },
@@ -499,7 +545,7 @@ fn peer_choke_recv_supports_fast() {
         );
         connections[key].handle_message(
             PeerMessage::Piece {
-                index: 1,
+                index: first_piece,
                 begin: SUBPIECE_SIZE,
                 data: vec![2; SUBPIECE_SIZE as usize].into(),
             },
@@ -521,8 +567,11 @@ fn peer_choke_recv_supports_fast() {
         assert_eq!(connections[key].target_inflight, 9);
         assert_eq!(connections[key].inflight.len(), 9);
         assert_eq!(connections[key].queued.len(), 1);
-        assert!(torrent_state.piece_selector.is_allocated(6));
 
+        for index in allocated_pieces.iter().skip(1) {
+            // The last allocated piece should still be allocated
+            assert!(torrent_state.piece_selector.is_allocated(*index as usize));
+        }
         connections[key].handle_message(
             PeerMessage::Choke,
             &mut torrent_state,
@@ -530,14 +579,17 @@ fn peer_choke_recv_supports_fast() {
             &torrent_info,
             scope,
         );
-        assert!(connections[key].is_choking);
+        assert!(connections[key].peer_choking);
         assert_eq!(connections[key].target_inflight, 9);
         assert_eq!(connections[key].inflight.len(), 9);
-        assert_eq!(connections[key].queued.len(), 0);
+        assert!(connections[key].queued.is_empty());
         // 1 piece completed (pending hashing), one was released
         assert_eq!(torrent_state.num_allocated(), 4);
-        // No longer inflight!
-        assert!(!torrent_state.piece_selector.is_allocated(6));
+        assert!(
+            !torrent_state
+                .piece_selector
+                .is_allocated(*allocated_pieces.last().unwrap() as usize)
+        );
     });
 }
 
@@ -550,19 +602,57 @@ fn peer_choke_recv_does_not_support_fast() {
         let mut connections = Slab::new();
         let key = connections.insert(a);
 
-        connections[key].peer_choking = false;
-        connections[key].slow_start = false;
-        for i in 1..7 {
-            let mut subpieces = torrent_state.allocate_piece(i, &file_store);
-            connections[key].append_and_fill(&mut subpieces);
+        // First, the peer needs to have pieces to be interesting
+        for index in 1..7 {
+            connections[key].handle_message(
+                PeerMessage::Have { index },
+                &mut torrent_state,
+                &file_store,
+                &torrent_info,
+                scope,
+            );
         }
+
+        connections[key].slow_start = false;
+
+        assert!(connections[key].peer_choking);
+        connections[key].handle_message(
+            PeerMessage::Unchoke,
+            &mut torrent_state,
+            &file_store,
+            &torrent_info,
+            scope,
+        );
+        assert!(!connections[key].peer_choking);
+
+        // Now allocate additional pieces manually
+        let mut allocated_pieces = Vec::new();
+
+        // Get the first piece that was allocated during unchoke
+        if let Some(piece) = torrent_state.pieces.iter().position(|p| p.is_some()) {
+            allocated_pieces.push(piece as i32);
+        }
+
+        // Allocate 5 more pieces
+        for _ in 0..5 {
+            if let Some((index, _)) = torrent_state.piece_selector.next_piece(key) {
+                allocated_pieces.push(index);
+                let mut subpieces = torrent_state.allocate_piece(index, &file_store);
+                connections[key].append_and_fill(&mut subpieces);
+            }
+        }
+
+        assert_eq!(allocated_pieces.len(), 6);
         assert_eq!(torrent_state.num_allocated(), 6);
         assert_eq!(connections[key].target_inflight, 4);
         assert_eq!(connections[key].queued.len(), 8);
         assert_eq!(connections[key].inflight.len(), 4);
+
+        // Complete the first piece
+        let first_piece = allocated_pieces[0];
         connections[key].handle_message(
             PeerMessage::Piece {
-                index: 1,
+                index: first_piece,
                 begin: 0,
                 data: vec![1; SUBPIECE_SIZE as usize].into(),
             },
@@ -573,7 +663,7 @@ fn peer_choke_recv_does_not_support_fast() {
         );
         connections[key].handle_message(
             PeerMessage::Piece {
-                index: 1,
+                index: first_piece,
                 begin: SUBPIECE_SIZE,
                 data: vec![2; SUBPIECE_SIZE as usize].into(),
             },
@@ -595,7 +685,11 @@ fn peer_choke_recv_does_not_support_fast() {
         assert_eq!(connections[key].target_inflight, 9);
         assert_eq!(connections[key].inflight.len(), 9);
         assert_eq!(connections[key].queued.len(), 1);
-        assert!(torrent_state.piece_selector.is_allocated(6));
+        assert!(
+            torrent_state
+                .piece_selector
+                .is_allocated(*allocated_pieces.last().unwrap() as usize)
+        );
 
         connections[key].handle_message(
             PeerMessage::Choke,
@@ -604,17 +698,16 @@ fn peer_choke_recv_does_not_support_fast() {
             &torrent_info,
             scope,
         );
-        assert!(connections[key].is_choking);
+        assert!(connections[key].peer_choking);
         assert_eq!(connections[key].target_inflight, 9);
         assert_eq!(connections[key].inflight.len(), 0);
         assert_eq!(connections[key].queued.len(), 0);
         // 1 piece completed (pending hashing), one was released
         assert_eq!(torrent_state.num_allocated(), 0);
-        // index = 1 is not inflight over the network but pending hashing and thus is
+        // index = first_piece is not inflight over the network but pending hashing and thus is
         // still marked inflight
-        for i in 2..7 {
-            // No longer inflight!
-            assert!(!torrent_state.piece_selector.is_allocated(i));
+        for i in allocated_pieces.iter().skip(1) {
+            assert!(!torrent_state.piece_selector.is_allocated(*i as usize));
         }
     });
 }
