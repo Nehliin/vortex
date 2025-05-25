@@ -1,6 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 
-use bitvec::prelude::{BitBox, Msb0};
+use bitvec::{
+    prelude::{BitBox, Msb0},
+    vec::BitVec,
+};
 use lava_torrent::torrent::v1::Torrent;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
@@ -51,7 +54,7 @@ pub struct PieceSelector {
 impl PieceSelector {
     pub fn new(torrent_info: &Torrent) -> Self {
         let completed_pieces: BitBox<u8, Msb0> =
-            torrent_info.pieces.iter().map(|_| false).collect();
+            BitVec::repeat(false, torrent_info.pieces.len()).into();
         let allocated_pieces = completed_pieces.clone();
         let hashing_pieces = completed_pieces.clone();
         let piece_length = torrent_info.piece_length;
@@ -147,7 +150,7 @@ impl PieceSelector {
             .and_modify(|pieces| pieces.set(piece_index, is_interesting))
             .or_insert_with(|| {
                 let mut all_pieces: BitBox<u8, Msb0> =
-                    (0..self.completed_pieces.len()).map(|_| false).collect();
+                    BitVec::repeat(false, self.completed_pieces.len()).into();
                 all_pieces.set(piece_index, is_interesting);
                 all_pieces
             });

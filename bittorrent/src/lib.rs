@@ -248,15 +248,23 @@ mod test_utils {
     use std::{collections::HashMap, path::PathBuf};
 
     use crate::{
-        file_store::FileStore, generate_peer_id, peer_connection::PeerConnection,
-        piece_selector::SUBPIECE_SIZE,
+        file_store::FileStore, generate_peer_id, peer_comm::peer_protocol::ParsedHandshake,
+        peer_connection::PeerConnection, piece_selector::SUBPIECE_SIZE,
     };
     use lava_torrent::torrent::v1::{Torrent, TorrentBuilder};
     use socket2::{Domain, Protocol, Socket, Type};
 
     pub fn generate_peer(fast_ext: bool, conn_id: usize) -> PeerConnection {
         let socket_a = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-        PeerConnection::new(socket_a, generate_peer_id(), conn_id, fast_ext)
+        PeerConnection::new(
+            socket_a,
+            conn_id,
+            ParsedHandshake {
+                peer_id: generate_peer_id(),
+                fast_ext,
+                extension_protocol: false,
+            },
+        )
     }
 
     struct TempDir {

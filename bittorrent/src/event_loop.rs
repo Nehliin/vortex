@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     io,
     net::SocketAddrV4,
     os::fd::{AsRawFd, FromRawFd},
@@ -650,12 +650,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
                 let entry = self.connections.vacant_entry();
                 let conn_id = entry.key();
-                let peer_connection = PeerConnection::new(
-                    socket,
-                    parsed_handshake.peer_id,
-                    conn_id,
-                    parsed_handshake.fast_ext,
-                );
+                let peer_connection = PeerConnection::new(socket, conn_id, parsed_handshake);
                 let id = peer_connection.peer_id;
                 entry.insert(peer_connection);
                 log::info!("Finished handshake! [{conn_id}]: {id}");
@@ -694,23 +689,38 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 } else {
                     peer_protocol::PeerMessage::Bitfield(completed.into())
                 };
+                if connection.extended_extension {
+                    let mut m = BTreeMap::new();
+                    m.insert("ut_metadata", 1);
+                    let mut handshake = BTreeMap::new();
+                    handshake.insert("m", bt_bencode::value::to_value(&m).unwrap());
+                    handshake.insert("v", bt_bencode::value::to_value("Vortex 0.2.0").unwrap());
+                    connection.outgoing_msgs_buffer.push(OutgoingMsg {
+                        message: peer_protocol::PeerMessage::Extended {
+                            id: 0,
+                            data: bt_bencode::to_vec(&handshake).unwrap().into(),
+                        },
+                        ordered: true,
+                    });
+                }
                 // sent as first message after handshake
                 let bitfield_msg = OutgoingMsg {
                     message,
                     ordered: true,
                 };
-                let buffer = self.write_pool.get_buffer();
-                bitfield_msg.message.encode(buffer.inner);
-                let size = bitfield_msg.message.encoded_size();
-                io_utils::write_to_connection(
-                    conn_id,
-                    fd,
-                    &mut self.events,
-                    sq,
-                    buffer.index,
-                    &buffer.inner[..size],
-                    bitfield_msg.ordered,
-                );
+                connection.outgoing_msgs_buffer.push(bitfield_msg);
+                // let buffer = self.write_pool.get_buffer();
+                // bitfield_msg.message.encode(buffer.inner);
+                // let size = bitfield_msg.message.encoded_size();
+                // io_utils::write_to_connection(
+                //     conn_id,
+                //     fd,
+                //     &mut self.events,
+                //     sq,
+                //     buffer.index,
+                //     &buffer.inner[..size],
+                //     bitfield_msg.ordered,
+                // );
             }
             EventType::ConnectedRecv { connection_idx } => {
                 // The event is reused and not replaced

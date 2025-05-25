@@ -223,6 +223,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt_bencode"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6398febbe0d54acd58256692c7d0608c0f49741ec830af6918129d6348f5c4bd"
+dependencies = [
+ "itoa",
+ "serde",
+]
+
+[[package]]
 name = "btoi"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2141,6 +2151,7 @@ version = "0.2.0"
 dependencies = [
  "arbitrary",
  "bitvec",
+ "bt_bencode",
  "bytes",
  "env_logger",
  "io-uring 0.7.5",
@@ -2152,6 +2163,7 @@ dependencies = [
  "metrics-util",
  "rand",
  "rayon",
+ "serde",
  "sha1",
  "slab",
  "smallvec 2.0.0-alpha.11",

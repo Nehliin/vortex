@@ -1,11 +1,13 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     net::Ipv4Addr,
     time::{Duration, Instant},
 };
 
+use bt_bencode::{Deserializer, Value};
 use bytes::Bytes;
 use rayon::Scope;
+use serde::Deserialize;
 use sha1::Digest;
 use socket2::Socket;
 
@@ -13,9 +15,12 @@ use crate::{
     Error, TorrentState,
     event_loop::MAX_QUEUE_SIZE,
     file_store::FileStore,
+    peer_comm::extended_protocol::MetadataExtension,
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
 };
+
+use super::{extended_protocol::ExtensionProtocol, peer_protocol::ParsedHandshake};
 
 // Taken from
 // https://github.com/arvidn/moving_average/blob/master/moving_average.hpp
@@ -139,6 +144,7 @@ pub struct PeerConnection {
     /// Have we sent allowed fast set yet too the peer
     pub sent_allowed_fast: bool,
     pub fast_ext: bool,
+    pub extended_extension: bool,
     /// The peer have informed us that it is choking us.
     pub peer_choking: bool,
     /// The peer is interested what we have to offer
@@ -166,6 +172,7 @@ pub struct PeerConnection {
     // because of low througput. (Choke instead?)
     pub pending_disconnect: Option<DisconnectReason>,
     pub stateful_decoder: PeerMessageDecoder,
+    pub extensions: HashMap<u8, Box<dyn ExtensionProtocol>>,
     // Stored here to prevent reallocations
     pub outgoing_msgs_buffer: Vec<OutgoingMsg>,
     // Uses vec instead of hashset since this is expected to be small
@@ -175,11 +182,11 @@ pub struct PeerConnection {
 }
 
 impl<'scope, 'f_store: 'scope> PeerConnection {
-    pub fn new(socket: Socket, peer_id: PeerId, conn_id: usize, fast_ext: bool) -> Self {
+    pub fn new(socket: Socket, conn_id: usize, parsed_handshake: ParsedHandshake) -> Self {
         PeerConnection {
             socket,
             conn_id,
-            peer_id,
+            peer_id: parsed_handshake.peer_id,
             is_choking: true,
             is_interesting: false,
             sent_allowed_fast: false,
@@ -187,7 +194,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             peer_interested: false,
             endgame: false,
             last_received_subpiece: None,
-            fast_ext,
+            fast_ext: parsed_handshake.fast_ext,
+            extended_extension: parsed_handshake.extension_protocol,
             inflight: VecDeque::with_capacity(64),
             queued: VecDeque::with_capacity(64),
             target_inflight: 4,
@@ -199,6 +207,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             throughput: 0,
             prev_throughput: 0,
             outgoing_msgs_buffer: Default::default(),
+            extensions: Default::default(),
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
             allowed_fast_pieces: Default::default(),
             accept_fast_pieces: Default::default(),
@@ -932,6 +941,55 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             })
                             .unwrap();
                     });
+                }
+            }
+            // TODO: we do not send handshake yet
+            PeerMessage::Extended { id, data } => {
+                if id == 0 {
+                    log::info!("Extended message handshake");
+                    // ID for an extension is the message id that should be used
+                    // in further communication ex ut_metadata = 3 then the id should be 3
+                    // when sending such extension messages
+                    println!("{}", String::from_utf8_lossy(&data[..]));
+                    let mut de = Deserializer::from_slice(&data[..]);
+                    let value: Value = <Value>::deserialize(&mut de).unwrap();
+                    log::info!("{:#?}", value);
+                    if let Some(dict) = value.as_dict() {
+                        let m = dict
+                            .get("m".as_bytes())
+                            .and_then(|val| val.as_dict())
+                            .unwrap();
+
+                        for (key, val) in m {
+                            if key.as_slice() == b"ut_metadata".as_slice() {
+                                let id: u8 = val.as_u64().unwrap() as u8;
+                                if self.extensions.contains_key(&id) {
+                                    continue;
+                                }
+                                let mut metadata = MetadataExtension::new(
+                                    id,
+                                    dict.get("metadata_size".as_bytes())
+                                        .unwrap()
+                                        .as_u64()
+                                        .unwrap() as usize,
+                                );
+                                for i in 0..16.min(metadata.num_pieces()) {
+                                    self.outgoing_msgs_buffer.push(OutgoingMsg {
+                                        message: metadata.request(i as i32),
+                                        ordered: false,
+                                    });
+                                }
+                                // hard coded
+                                self.extensions.insert(1, Box::new(metadata));
+                            }
+                        }
+                    }
+                    // TODO: Deal with reqq as well
+                } else if let Some(ext) = self.extensions.get_mut(&id) {
+                    ext.handle_message(data, &mut self.outgoing_msgs_buffer)
+                        .unwrap();
+                } else {
+                    log::error!("Unexpected extended msg");
                 }
             }
         }
