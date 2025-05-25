@@ -221,6 +221,11 @@ impl PieceSelector {
     }
 
     #[inline]
+    pub fn is_hashing(&self, index: usize) -> bool {
+        self.hashing_pieces[index]
+    }
+
+    #[inline]
     pub fn is_allocated(&self, index: usize) -> bool {
         self.allocated_pieces[index]
     }

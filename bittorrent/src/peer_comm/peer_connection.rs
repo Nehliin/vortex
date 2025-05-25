@@ -377,14 +377,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             .iter()
             .position(|sub| sub.index == m_index && m_begin == sub.offset)
         else {
-            // If this supiece was already considered timed out but then arrived slightly later
-            // we may up here. This means the timeout (based off RTT) is too strict so should be
-            // updated.
-            log::error!(
-                "Received pieced i: {} begin: {} was not found in queue",
-                m_index,
-                m_begin
-            );
+            log::error!("Received unexpected piece message, index: {m_index}");
             return;
         };
         if self.slow_start {
@@ -903,14 +896,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     ));
                     return;
                 }
-                if torrent_state.pieces[index as usize].is_none()
-                    && !torrent_state.piece_selector.has_completed(index as usize)
-                {
-                    // TODO: This might happen in end game mode when multiple peers race to complete the
-                    // piece. Haven't implemented it yet though
-                    log::error!("Received unexpected piece message, index: {index}",);
-                    return;
-                }
                 // TODO: disconnect on recv piece never requested if fast_ext is enabled
                 log::trace!(
                     "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
@@ -926,6 +911,15 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     })
                     .map(|completed_piece| completed_piece.into_readable())
                 {
+                    if torrent_state.piece_selector.has_completed(index as usize)
+                        // We assume the hash will match, if not we will just request it again
+                        || torrent_state.piece_selector.is_hashing(index as usize)
+                    {
+                        // This might happen in end game mode when multiple peers race to complete the
+                        // piece. Haven't implemented it yet though
+                        log::debug!("Piece {index} already completed or pending hashing, skipping");
+                        return;
+                    }
                     log::debug!("Piece {index} download completed, sending to hash thread");
                     torrent_state.piece_selector.mark_hashing(index as usize);
                     let complete_tx = torrent_state.completed_piece_tx.clone();
