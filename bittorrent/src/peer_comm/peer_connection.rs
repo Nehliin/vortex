@@ -986,8 +986,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                     // TODO: Deal with reqq as well
                 } else if let Some(ext) = self.extensions.get_mut(&id) {
-                    ext.handle_message(data, &mut self.outgoing_msgs_buffer)
-                        .unwrap();
+                    ext.handle_message(
+                        data,
+                        &torrent_info.info_hash_bytes(),
+                        &mut self.outgoing_msgs_buffer,
+                    )
+                    .unwrap();
                 } else {
                     log::error!("Unexpected extended msg");
                 }

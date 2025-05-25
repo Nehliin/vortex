@@ -15,6 +15,7 @@ pub trait ExtensionProtocol {
     fn handle_message(
         &mut self,
         data: Bytes,
+        info_hash: &[u8],
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
     ) -> Result<(), DisconnectReason>;
     // TODO: fn tick?
@@ -92,6 +93,7 @@ impl ExtensionProtocol for MetadataExtension {
     fn handle_message(
         &mut self,
         data: Bytes,
+        info_hash: &[u8],
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
     ) -> Result<(), DisconnectReason> {
         let mut de = Deserializer::from_slice(&data[..]);
@@ -103,14 +105,15 @@ impl ExtensionProtocol for MetadataExtension {
             }
             DATA => {
                 log::trace!("DATA: {}", message.piece);
+                let end = ((SUBPIECE_SIZE * message.piece + SUBPIECE_SIZE) as usize)
+                    .min(self.metadata.len());
                 // TODO: check size
                 let actual_data = &data[de.byte_offset()..];
-                self.metadata[(SUBPIECE_SIZE * message.piece) as usize
-                    ..(SUBPIECE_SIZE * message.piece + message.total_size.unwrap()) as usize]
+                self.metadata[(SUBPIECE_SIZE * message.piece) as usize..end]
                     .copy_from_slice(actual_data);
 
                 self.completed.set(message.piece as usize, true);
-                if let Some(index) = self.inflight.first_one() {
+                if let Some(index) = self.inflight.first_zero() {
                     outgoing_msgs_buffer.push(OutgoingMsg {
                         message: self.request(index as i32),
                         ordered: false,
@@ -119,7 +122,10 @@ impl ExtensionProtocol for MetadataExtension {
                     let mut hasher = Sha1::new();
                     hasher.update(&self.metadata);
                     let hash = hasher.finalize();
-                    log::error!("HASH: {:x?}", hash);
+                    log::error!("HASH: {:x?}, INFO: {:x?}", hash, info_hash);
+                    if hash.as_slice() != info_hash {
+                        panic!("WROGN");
+                    }
                 }
             }
             REJECT => {
