@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
+
 use bitvec::{boxed::BitBox, vec::BitVec};
-use bt_bencode::Deserializer;
+use bt_bencode::{Deserializer, Value};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -123,6 +125,18 @@ impl ExtensionProtocol for MetadataExtension {
                     hasher.update(&self.metadata);
                     let hash = hasher.finalize();
                     log::error!("HASH: {:x?}, INFO: {:x?}", hash, info_hash);
+                    let metadata: Value = bt_bencode::from_slice(&self.metadata).unwrap();
+                    log::error!("META: {:?}", metadata);
+                    // META is ALREADY the info value so one needs to either construct
+                    let mut parsable = BTreeMap::new();
+                    parsable.insert("info", metadata);
+                    let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(
+                        bt_bencode::to_vec(&parsable).unwrap().as_slice(),
+                    )
+                    .unwrap();
+                    for piece in torrent.pieces {
+                        log::debug!("{:x?}", piece);
+                    }
                     if hash.as_slice() != info_hash {
                         panic!("WROGN");
                     }
