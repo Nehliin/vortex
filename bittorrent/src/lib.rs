@@ -168,7 +168,8 @@ impl<'f_store> TorrentState<'f_store> {
                             }
                         }
                     } else {
-                        // only need to do that when failing hashing since
+                        // Only need to mark this as not hashing when it fails
+                        // since otherwise it will be marked as completed and this is moot
                         self.piece_selector.mark_not_hashing(completed_piece.index);
                         // TODO: disconnect, there also might be a minimal chance of a race
                         // condition here where the connection id is replaced (by disconnect +

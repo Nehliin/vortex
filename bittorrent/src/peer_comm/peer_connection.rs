@@ -443,6 +443,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     .piece_selector
                     .next_piece(self.conn_id, &mut self.endgame);
                 // Ensure this piece specifically is deallocated
+                // TODO: This can be improved probably
                 torrent_state.deallocate_piece(subpiece.index, self.conn_id);
                 self.release_all_pieces(torrent_state);
                 // Make it possible to request one more piece if this
@@ -609,7 +610,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         .piece_selector
                         .interesting_peer_pieces(self.conn_id)
                     {
-                        // maste markera som allokerad har! eller atminstonde valj fran fast set
                         if interesting_pieces[index as usize]
                             && !torrent_state.piece_selector.is_allocated(index as usize)
                         {
