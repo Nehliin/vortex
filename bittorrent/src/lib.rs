@@ -146,7 +146,11 @@ impl<'f_store> TorrentState<'f_store> {
                             if let Some(bitfield) =
                                 self.piece_selector.interesting_peer_pieces(conn_id)
                             {
-                                if !bitfield.any() && peer.is_interesting {
+                                if !bitfield.any()
+                                    && peer.is_interesting
+                                    && peer.queued.is_empty()
+                                    && peer.inflight.is_empty()
+                                {
                                     // We are no longer interestead in this peer
                                     peer.not_interested(false);
                                 }
