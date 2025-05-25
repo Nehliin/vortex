@@ -800,8 +800,8 @@ fn report_tick_metrics(
 ) {
     let counter = metrics::counter!("pieces_completed");
     counter.absolute(torrent_state.piece_selector.total_completed() as u64);
-    let gauge = metrics::gauge!("pieces_inflight");
-    gauge.set(torrent_state.piece_selector.total_inflight() as u32);
+    let gauge = metrics::gauge!("pieces_allocated");
+    gauge.set(torrent_state.piece_selector.total_allocated() as u32);
     let gauge = metrics::gauge!("num_unchoked");
     gauge.set(torrent_state.num_unchoked);
     let gauge = metrics::gauge!("num_connections");
