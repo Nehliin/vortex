@@ -927,6 +927,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     .map(|completed_piece| completed_piece.into_readable())
                 {
                     log::debug!("Piece {index} download completed, sending to hash thread");
+                    torrent_state.piece_selector.mark_hashing(index as usize);
                     let complete_tx = torrent_state.completed_piece_tx.clone();
                     let conn_id = self.conn_id;
                     scope.spawn(move |_| {

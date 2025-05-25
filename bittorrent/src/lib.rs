@@ -156,9 +156,12 @@ impl<'f_store> TorrentState<'f_store> {
                         log::debug!("Piece {} completed!", completed_piece.index);
 
                         if self.piece_selector.completed_all() {
+                            // TODO: mark all as not interesting
                             self.is_complete = true;
                         }
                     } else {
+                        // only need to do that when failing hashing since
+                        self.piece_selector.mark_not_hashing(completed_piece.index);
                         // TODO: disconnect, there also might be a minimal chance of a race
                         // condition here where the connection id is replaced (by disconnect +
                         // new connection so that the wrong peer is marked) but this should be

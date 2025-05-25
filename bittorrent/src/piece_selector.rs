@@ -31,12 +31,17 @@ pub struct Subpiece {
 
 pub struct PieceSelector {
     //    strategy: T,
+    // Completed -> 1 completed 0 = not completed (global)
     completed_pieces: BitBox<u8, Msb0>,
+    // Allocated -> 1 allocated 0 = not allocated (global)
     allocated_pieces: BitBox<u8, Msb0>,
+    // Hashing -> 1 is currently being hashed 0 = not hashing (global)
+    hashing_pieces: BitBox<u8, Msb0>,
     // These are all pieces the peer have that we have yet to complete
     // it should be kept up to date as the torrent is downloaded, completed
     // pieces are "turned off" and Have messages only set a bit if we do not already
-    // have it.
+    // have it. If a peer requests a piece it is also turned off here to prevent it being
+    // picked again. TODO: feels fragile
     interesting_peer_pieces: HashMap<usize, BitBox<u8, Msb0>>,
     last_piece_length: u32,
     piece_length: u32,
@@ -47,13 +52,15 @@ impl PieceSelector {
     pub fn new(torrent_info: &Torrent) -> Self {
         let completed_pieces: BitBox<u8, Msb0> =
             torrent_info.pieces.iter().map(|_| false).collect();
-        let inflight_pieces = completed_pieces.clone();
+        let allocated_pieces = completed_pieces.clone();
+        let hashing_pieces = completed_pieces.clone();
         let piece_length = torrent_info.piece_length;
         let last_piece_length = torrent_info.length % piece_length;
 
         Self {
             completed_pieces,
-            allocated_pieces: inflight_pieces,
+            allocated_pieces,
+            hashing_pieces,
             last_piece_length: last_piece_length as u32,
             piece_length: piece_length as u32,
             interesting_peer_pieces: Default::default(),
@@ -64,24 +71,20 @@ impl PieceSelector {
         }
     }
 
-    fn new_available_pieces(&self, mut field: BitBox<u8, Msb0>) -> BitBox<u8, Msb0> {
-        let mut tmp = self.completed_pieces.clone();
-        tmp |= &self.allocated_pieces;
-        field &= !tmp;
-        field
-    }
-
     // Returns index and if the peer is in endgame mode
     pub fn next_piece(&mut self, connection_id: usize) -> Option<(i32, bool)> {
         let interesting_pieces = self.interesting_peer_pieces.get(&connection_id)?;
-        let available_pieces = self.new_available_pieces(interesting_pieces.clone());
+        let pickable = !self.hashing_pieces.clone() & interesting_pieces;
+        // due to lifetime issues
+        let first_pickable = pickable.first_one();
+        let unallocated_pickable = !self.allocated_pieces.clone() & pickable;
 
-        if available_pieces.not_any() {
-            let allocated_interesting = interesting_pieces.first_one()?;
+        if unallocated_pickable.not_any() {
+            let pickable = first_pickable?;
             // if we still have interesting pieces not completed we should enter endgame mode
             // and pick one of those
             log::debug!("Peer {connection_id} is entering endgame mode");
-            return Some((allocated_interesting as i32, true));
+            return Some((pickable as i32, true));
         }
 
         let procentage_left =
@@ -90,18 +93,18 @@ impl PieceSelector {
             for _ in 0..5 {
                 let index =
                     (self.rng_gen.random::<f32>() * self.completed_pieces.len() as f32) as usize;
-                if available_pieces[index] {
+                if unallocated_pickable[index] {
                     return Some((index as i32, false));
                 }
             }
             log::warn!("Random piece selection failed");
-            let available_index = available_pieces.first_one()?;
+            let available_index = unallocated_pickable.first_one()?;
             Some((available_index as i32, false))
         } else {
             // Note: This won't count allocated piece but that should be fine
             // Rarest first
-            let mut count = vec![0; available_pieces.len()];
-            for available in available_pieces.iter_ones() {
+            let mut count = vec![0; unallocated_pickable.len()];
+            for available in unallocated_pickable.iter_ones() {
                 for peer_pieces in self.interesting_peer_pieces.values() {
                     if peer_pieces[available] {
                         count[available] += 1;
@@ -164,6 +167,20 @@ impl PieceSelector {
     }
 
     #[inline]
+    pub fn mark_hashing(&mut self, index: usize) {
+        assert!(!self.completed_pieces[index]);
+        assert!(!self.hashing_pieces[index]);
+        self.hashing_pieces.set(index, true);
+    }
+
+    #[inline]
+    pub fn mark_not_hashing(&mut self, index: usize) {
+        assert!(!self.completed_pieces[index]);
+        assert!(self.hashing_pieces[index]);
+        self.hashing_pieces.set(index, false);
+    }
+
+    #[inline]
     pub fn mark_allocated(&mut self, index: i32, connection_id: usize) {
         let index = index as usize;
         self.allocated_pieces.set(index, true);
@@ -209,17 +226,12 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn pieces(&self) -> usize {
-        self.completed_pieces.len()
-    }
-
-    #[inline]
     pub fn total_completed(&self) -> usize {
         self.completed_pieces.count_ones()
     }
 
     #[inline]
-    pub fn total_inflight(&self) -> usize {
+    pub fn total_allocated(&self) -> usize {
         self.allocated_pieces.count_ones()
     }
 
