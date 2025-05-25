@@ -386,12 +386,12 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "pieces_inflight",
+          "expr": "pieces_allocated",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "inflight",
+          "legendFormat": "allocated",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -716,6 +716,30 @@
                     10
                   ],
                   "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "__systemRef": "hideSeriesFrom",
+            "matcher": {
+              "id": "byNames",
+              "options": {
+                "mode": "exclude",
+                "names": [
+                  "endgame"
+                ],
+                "prefix": "All except:",
+                "readOnly": true
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": true
                 }
               }
             ]
@@ -1046,5 +1070,5 @@
   "timezone": "browser",
   "title": "Throughput",
   "uid": "eebvxemmfqh34d",
-  "version": 30
+  "version": 31
 }
