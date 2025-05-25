@@ -439,18 +439,16 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 subpiece.timed_out = true;
                 // Request a new different piece and do it before clearing
                 // the queue so the same piece isn't picked again
-                let maybe_new_piece = torrent_state.piece_selector.next_piece(self.conn_id);
-                // Ensure this piece specifically is deallocated, do not update endgame mode
-                // before this call since it should only be interesting if we _were_ in endgame
-                // mode or not.
-                // TODO: This can be improved probably
+                let maybe_new_piece = torrent_state
+                    .piece_selector
+                    .next_piece(self.conn_id, &mut self.endgame);
+                // Ensure this piece specifically is deallocated
                 torrent_state.deallocate_piece(subpiece.index, self.conn_id);
                 self.release_all_pieces(torrent_state);
                 // Make it possible to request one more piece if this
                 // is the final inflight piece
                 self.target_inflight = 2;
-                if let Some((new_piece, endgame)) = maybe_new_piece {
-                    self.endgame = endgame;
+                if let Some(new_piece) = maybe_new_piece {
                     let mut subpieces =
                         torrent_state.allocate_piece(new_piece, self.conn_id, file_store);
                     self.append_and_fill(&mut subpieces);
@@ -504,12 +502,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     // Not interested so don't do anything
                     return;
                 }
-                if let Some((piece_idx, endgame)) =
-                    torrent_state.piece_selector.next_piece(self.conn_id)
+                if let Some(piece_idx) = torrent_state
+                    .piece_selector
+                    .next_piece(self.conn_id, &mut self.endgame)
                 {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
-                    self.endgame = endgame;
                     let mut subpieces =
                         torrent_state.allocate_piece(piece_idx, self.conn_id, file_store);
                     // TODO: might be more than the peer can handle
@@ -824,14 +822,14 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         self.allowed_fast_pieces.swap_remove(i);
                     }
                 } else if self.inflight.len() < 2 && self.queued.is_empty() {
-                    if let Some((new_index, endgame)) =
-                        torrent_state.piece_selector.next_piece(self.conn_id)
+                    if let Some(new_index) = torrent_state
+                        .piece_selector
+                        .next_piece(self.conn_id, &mut self.endgame)
                     {
                         if defer_deallocation {
                             defer_deallocation = false;
                             torrent_state.deallocate_piece(index, self.conn_id);
                         }
-                        self.endgame = endgame;
                         let mut subpieces =
                             torrent_state.allocate_piece(new_index, self.conn_id, file_store);
                         self.append_and_fill(&mut subpieces);

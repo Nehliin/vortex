@@ -72,7 +72,7 @@ impl PieceSelector {
     }
 
     // Returns index and if the peer is in endgame mode
-    pub fn next_piece(&mut self, connection_id: usize) -> Option<(i32, bool)> {
+    pub fn next_piece(&mut self, connection_id: usize, endgame_mode: &mut bool) -> Option<i32> {
         let interesting_pieces = self.interesting_peer_pieces.get(&connection_id)?;
         let pickable = !self.hashing_pieces.clone() & interesting_pieces;
         // due to lifetime issues
@@ -84,7 +84,8 @@ impl PieceSelector {
             // if we still have interesting pieces not completed we should enter endgame mode
             // and pick one of those
             log::debug!("Peer {connection_id} is entering endgame mode");
-            return Some((pickable as i32, true));
+            *endgame_mode = true;
+            return Some(pickable as i32);
         }
 
         let procentage_left =
@@ -94,12 +95,14 @@ impl PieceSelector {
                 let index =
                     (self.rng_gen.random::<f32>() * self.completed_pieces.len() as f32) as usize;
                 if unallocated_pickable[index] {
-                    return Some((index as i32, false));
+                    *endgame_mode = false;
+                    return Some(index as i32);
                 }
             }
             log::warn!("Random piece selection failed");
             let available_index = unallocated_pickable.first_one()?;
-            Some((available_index as i32, false))
+            *endgame_mode = false;
+            Some(available_index as i32)
         } else {
             // Note: This won't count allocated piece but that should be fine
             // Rarest first
@@ -116,7 +119,8 @@ impl PieceSelector {
                 .enumerate()
                 .filter(|(_pos, count)| count > &0)
                 .min_by_key(|(_pos, val)| *val)?;
-            Some((rarest_index as i32, false))
+            *endgame_mode = false;
+            Some(rarest_index as i32)
         }
     }
 

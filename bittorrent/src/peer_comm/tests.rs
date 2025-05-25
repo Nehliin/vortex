@@ -179,7 +179,10 @@ fn have() {
             scope,
         );
         assert!(connections[key_a].outgoing_msgs_buffer.is_empty());
-        let (index, _) = torrent_state.piece_selector.next_piece(key_a).unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key_a, &mut connections[key_a].endgame)
+            .unwrap();
         assert_eq!(index, 7);
         let mut subpieces = torrent_state.allocate_piece(index, key_a, &file_store);
         connections[key_a].append_and_fill(&mut subpieces);
@@ -348,7 +351,10 @@ fn slow_start() {
             scope,
         );
 
-        let (index, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
         assert_eq!(index, 1);
         let mut subpieces = torrent_state.allocate_piece(index, key, &file_store);
         connections[key].append_and_fill(&mut subpieces);
@@ -399,7 +405,11 @@ fn slow_start() {
             &torrent_info,
             scope,
         );
-        let (index, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
+        assert_eq!(index, 2);
         let mut subpieces = torrent_state.allocate_piece(index, key, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
@@ -445,7 +455,11 @@ fn slow_start() {
             scope,
         );
 
-        let (index, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
+        assert_eq!(index, 3);
         let mut subpieces = torrent_state.allocate_piece(index, key, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
@@ -504,7 +518,10 @@ fn desired_queue_size() {
         );
         connections[key].peer_choking = false;
         connections[key].slow_start = false;
-        let (index, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
         let mut subpieces = torrent_state.allocate_piece(index, key, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
@@ -599,7 +616,10 @@ fn peer_choke_recv_supports_fast() {
 
         // Allocate 5 more pieces
         for _ in 0..5 {
-            if let Some((index, _)) = torrent_state.piece_selector.next_piece(key) {
+            if let Some(index) = torrent_state
+                .piece_selector
+                .next_piece(key, &mut connections[key].endgame)
+            {
                 allocated_pieces.push(index);
                 let mut subpieces = torrent_state.allocate_piece(index, key, &file_store);
                 connections[key].append_and_fill(&mut subpieces);
@@ -717,7 +737,10 @@ fn peer_choke_recv_does_not_support_fast() {
 
         // Allocate 5 more pieces
         for _ in 0..5 {
-            if let Some((index, _)) = torrent_state.piece_selector.next_piece(key) {
+            if let Some(index) = torrent_state
+                .piece_selector
+                .next_piece(key, &mut connections[key].endgame)
+            {
                 allocated_pieces.push(index);
                 let mut subpieces = torrent_state.allocate_piece(index, key, &file_store);
                 connections[key].append_and_fill(&mut subpieces);
@@ -975,10 +998,16 @@ fn interest_is_updated_when_recv_piece() {
                 .bitfield_received(connections[key].conn_id)
         );
 
-        let (index_a, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let index_a = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
         let mut subpieces = torrent_state.allocate_piece(index_a, key, &file_store);
         connections[key].append_and_fill(&mut subpieces);
-        let (index_b, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let index_b = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
         let mut subpieces = torrent_state.allocate_piece(index_b, key, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         assert_eq!(connections[key].inflight.len(), 4);
@@ -1071,10 +1100,16 @@ fn send_have_to_peers_when_piece_completes() {
             &torrent_info,
             scope,
         );
-        let (index_a, _) = torrent_state.piece_selector.next_piece(key_a).unwrap();
+        let index_a = torrent_state
+            .piece_selector
+            .next_piece(key_a, &mut connections[key_a].endgame)
+            .unwrap();
         let mut subpieces = torrent_state.allocate_piece(index_a, key_a, &file_store);
         connections[key_a].append_and_fill(&mut subpieces);
-        let (index_b, _) = torrent_state.piece_selector.next_piece(key_b).unwrap();
+        let index_b = torrent_state
+            .piece_selector
+            .next_piece(key_b, &mut connections[key_b].endgame)
+            .unwrap();
         let mut subpieces = torrent_state.allocate_piece(index_b, key_b, &file_store);
         connections[key_b].append_and_fill(&mut subpieces);
 
@@ -1202,7 +1237,10 @@ fn piece_recv() {
             scope,
         );
 
-        let (index, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
         let mut subpieces = torrent_state.allocate_piece(index, key, &file_store);
         let prev_target_infligt = connections[key].target_inflight;
         assert_eq!(torrent_state.num_allocated(), 1);
@@ -1285,7 +1323,10 @@ fn handles_duplicate_piece_recv() {
             scope,
         );
         let prev_target_infligt = connections[key].target_inflight;
-        let (index, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
         let mut subpieces = torrent_state.allocate_piece(index, key, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         connections[key].handle_message(
@@ -1471,7 +1512,10 @@ fn snubbed_peer() {
             scope,
         );
         connections[key].is_interesting = true;
-        let (index, _) = torrent_state.piece_selector.next_piece(key).unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
         let mut subpieces = torrent_state.allocate_piece(index, key, &file_store);
         connections[key].append_and_fill(&mut subpieces);
         assert_eq!(connections[key].inflight.len(), 2);
@@ -1557,7 +1601,10 @@ fn reject_request_requests_new() {
             scope,
         );
         a.is_interesting = true;
-        let (index, _) = torrent_state.piece_selector.next_piece(a.conn_id).unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(a.conn_id, &mut a.endgame)
+            .unwrap();
         let mut subpieces = torrent_state.allocate_piece(index, a.conn_id, &file_store);
         a.append_and_fill(&mut subpieces);
         assert_eq!(a.inflight.len(), 2);
@@ -1716,8 +1763,11 @@ fn endgame_mode() {
         // Set up so that half of the pieces have been requested and that a part of those have been
         // completed
         for i in 0..torrent_state.num_pieces() / 2 {
-            let (index, endgame) = torrent_state.piece_selector.next_piece(key_a).unwrap();
-            assert!(!endgame);
+            let index = torrent_state
+                .piece_selector
+                .next_piece(key_a, &mut connections[key_a].endgame)
+                .unwrap();
+            assert!(!connections[key_a].endgame);
             let mut subpieces = torrent_state.allocate_piece(index, key_a, &file_store);
             connections[key_a].append_and_fill(&mut subpieces);
             if i % 2 == 0 {
@@ -1755,14 +1805,20 @@ fn endgame_mode() {
             - torrent_state.piece_selector.total_completed();
         // request the rest from the other peer so that everything has been allocated
         for _ in 0..remaining {
-            let (index, endgame) = torrent_state.piece_selector.next_piece(key_b).unwrap();
-            assert!(!endgame);
+            let index = torrent_state
+                .piece_selector
+                .next_piece(key_b, &mut connections[key_b].endgame)
+                .unwrap();
+            assert!(!connections[key_b].endgame);
             let mut subpieces = torrent_state.allocate_piece(index, key_b, &file_store);
             connections[key_b].append_and_fill(&mut subpieces);
         }
         for _ in 0..remaining {
-            let (index, endgame) = torrent_state.piece_selector.next_piece(key_a).unwrap();
-            assert!(endgame);
+            let index = torrent_state
+                .piece_selector
+                .next_piece(key_a, &mut connections[key_a].endgame)
+                .unwrap();
+            assert!(connections[key_a].endgame);
             // Never request something we are in the process of downloading
             assert!(
                 !connections[key_a]
