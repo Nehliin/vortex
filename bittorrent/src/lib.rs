@@ -160,8 +160,12 @@ impl<'f_store> TorrentState<'f_store> {
                         log::debug!("Piece {} completed!", completed_piece.index);
 
                         if self.piece_selector.completed_all() {
-                            // TODO: mark all as not interesting
                             self.is_complete = true;
+                            // We are no longer interestead in any of the
+                            // peers
+                            for (_, peer) in connections.iter_mut() {
+                                peer.not_interested(false);
+                            }
                         }
                     } else {
                         // only need to do that when failing hashing since

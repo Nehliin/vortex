@@ -829,7 +829,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     {
                         if defer_deallocation {
                             defer_deallocation = false;
-                            // Use the old endgame value
                             torrent_state.deallocate_piece(index, self.conn_id);
                         }
                         self.endgame = endgame;
