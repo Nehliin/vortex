@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use bitvec::prelude::{BitBox, Msb0};
 use lava_torrent::torrent::v1::Torrent;
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 
 use crate::file_store::{ReadablePieceFileView, WritablePieceFileView};
 
@@ -30,88 +31,96 @@ pub struct Subpiece {
 
 pub struct PieceSelector {
     //    strategy: T,
+    // Completed -> 1 completed 0 = not completed (global)
     completed_pieces: BitBox<u8, Msb0>,
+    // Allocated -> 1 allocated 0 = not allocated (global)
     allocated_pieces: BitBox<u8, Msb0>,
+    // Hashing -> 1 is currently being hashed 0 = not hashing (global)
+    hashing_pieces: BitBox<u8, Msb0>,
     // These are all pieces the peer have that we have yet to complete
     // it should be kept up to date as the torrent is downloaded, completed
     // pieces are "turned off" and Have messages only set a bit if we do not already
-    // have it.
+    // have it. If a peer requests a piece it is also turned off here to prevent it being
+    // picked again. TODO: feels fragile
     interesting_peer_pieces: HashMap<usize, BitBox<u8, Msb0>>,
     last_piece_length: u32,
     piece_length: u32,
+    rng_gen: SmallRng,
 }
 
 impl PieceSelector {
     pub fn new(torrent_info: &Torrent) -> Self {
         let completed_pieces: BitBox<u8, Msb0> =
             torrent_info.pieces.iter().map(|_| false).collect();
-        let inflight_pieces = completed_pieces.clone();
+        let allocated_pieces = completed_pieces.clone();
+        let hashing_pieces = completed_pieces.clone();
         let piece_length = torrent_info.piece_length;
         let last_piece_length = torrent_info.length % piece_length;
 
         Self {
             completed_pieces,
-            allocated_pieces: inflight_pieces,
+            allocated_pieces,
+            hashing_pieces,
             last_piece_length: last_piece_length as u32,
             piece_length: piece_length as u32,
             interesting_peer_pieces: Default::default(),
+            #[cfg(not(test))]
+            rng_gen: SmallRng::from_os_rng(),
+            #[cfg(test)]
+            rng_gen: SmallRng::seed_from_u64(0xbeefdead),
         }
     }
 
-    fn new_available_pieces(&self, mut field: BitBox<u8, Msb0>) -> BitBox<u8, Msb0> {
-        let mut tmp = self.completed_pieces.clone();
-        tmp |= &self.allocated_pieces;
-        field &= !tmp;
-        field
-    }
+    // Returns index and if the peer is in endgame mode
+    pub fn next_piece(&mut self, connection_id: usize, endgame_mode: &mut bool) -> Option<i32> {
+        let interesting_pieces = self.interesting_peer_pieces.get(&connection_id)?;
+        let pickable = !self.hashing_pieces.clone() & interesting_pieces;
+        // due to lifetime issues
+        let first_pickable = pickable.first_one();
+        let unallocated_pickable = !self.allocated_pieces.clone() & pickable;
 
-    pub fn next_piece(&self, connection_id: usize) -> Option<i32> {
-        let pieces_left = self.completed_pieces.count_zeros();
-        if pieces_left == 0 {
-            log::info!("Torrent is completed, no next piece found");
-            return None;
+        if unallocated_pickable.not_any() {
+            let pickable = first_pickable?;
+            // if we still have interesting pieces not completed we should enter endgame mode
+            // and pick one of those
+            log::debug!("Peer {connection_id} is entering endgame mode");
+            *endgame_mode = true;
+            return Some(pickable as i32);
         }
 
-        let available_pieces =
-            self.new_available_pieces(self.interesting_peer_pieces.get(&connection_id)?.clone());
-
-        if available_pieces.not_any() {
-            log::warn!(
-                "There are no available pieces, allocated_pieces: {}",
-                self.allocated_pieces.count_ones()
-            );
-            return None;
-        }
-
-        let procentage_left = pieces_left as f32 / self.completed_pieces.len() as f32;
-
+        let procentage_left =
+            self.completed_pieces.count_zeros() as f32 / self.completed_pieces.len() as f32;
         if procentage_left > 0.95 {
             for _ in 0..5 {
-                let index = (rand::random::<f32>() * self.completed_pieces.len() as f32) as usize;
-                if available_pieces[index] {
+                let index =
+                    (self.rng_gen.random::<f32>() * self.completed_pieces.len() as f32) as usize;
+                if unallocated_pickable[index] {
+                    *endgame_mode = false;
                     return Some(index as i32);
                 }
             }
             log::warn!("Random piece selection failed");
-            available_pieces.first_one().map(|index| index as i32)
+            let available_index = unallocated_pickable.first_one()?;
+            *endgame_mode = false;
+            Some(available_index as i32)
         } else {
+            // Note: This won't count allocated piece but that should be fine
             // Rarest first
-            let mut count = vec![0; available_pieces.len()];
-            for available in available_pieces.iter_ones() {
+            let mut count = vec![0; unallocated_pickable.len()];
+            for available in unallocated_pickable.iter_ones() {
                 for peer_pieces in self.interesting_peer_pieces.values() {
                     if peer_pieces[available] {
                         count[available] += 1;
                     }
                 }
             }
-            let index = count
+            let (rarest_index, _) = count
                 .into_iter()
                 .enumerate()
                 .filter(|(_pos, count)| count > &0)
-                .min_by_key(|(_pos, val)| *val)
-                .map(|(pos, _)| pos as i32);
-            log::debug!("Picking rarest piece to download, index: {index:?}");
-            index
+                .min_by_key(|(_pos, val)| *val)?;
+            *endgame_mode = false;
+            Some(rarest_index as i32)
         }
     }
 
@@ -131,7 +140,7 @@ impl PieceSelector {
     }
 
     // Updates the interesting peer pieces tracking and returns if the piece index was interesting
-    pub fn peer_have_piece(&mut self, connection_id: usize, piece_index: usize) -> bool {
+    pub fn update_peer_piece_intrest(&mut self, connection_id: usize, piece_index: usize) -> bool {
         let is_interesting = !self.completed_pieces[piece_index];
         let entry = self.interesting_peer_pieces.entry(connection_id);
         entry
@@ -162,19 +171,42 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn mark_allocated(&mut self, index: usize) {
-        // We never pick a completed piece since there might exist
-        // an ReadablePieceFileView alive for that (it also makes no sense to redownload)
+    pub fn mark_hashing(&mut self, index: usize) {
         assert!(!self.completed_pieces[index]);
-        let mut bit = self.allocated_pieces.get_mut(index).unwrap();
-        let old = bit.replace(true);
-        assert!(!old);
+        assert!(!self.hashing_pieces[index]);
+        self.hashing_pieces.set(index, true);
     }
 
     #[inline]
-    pub fn mark_not_allocated(&mut self, index: usize) {
+    pub fn mark_not_hashing(&mut self, index: usize) {
+        assert!(!self.completed_pieces[index]);
+        assert!(self.hashing_pieces[index]);
+        self.hashing_pieces.set(index, false);
+    }
+
+    #[inline]
+    pub fn mark_allocated(&mut self, index: i32, connection_id: usize) {
+        let index = index as usize;
+        self.allocated_pieces.set(index, true);
+        // Mark this as no longer interesting to prevent it from being repicked.
+        // If this is rejected we can mark it as interesting again when deallocating
+        let interesting_pieces = &mut self
+            .interesting_peer_pieces
+            .get_mut(&connection_id)
+            .unwrap();
+        let old = interesting_pieces.replace(index, false);
+        // Must have been interesting to this peer before allocating it
+        assert!(old);
+    }
+
+    #[inline]
+    pub fn mark_not_allocated(&mut self, index: i32, connection_id: usize) {
+        let index = index as usize;
         assert!(self.allocated_pieces[index]);
         self.allocated_pieces.set(index, false);
+        // Mark the piece as interesting again so it can be picked again
+        // if necessary
+        self.update_peer_piece_intrest(connection_id, index);
     }
 
     #[inline]
@@ -193,13 +225,13 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn is_allocated(&self, index: usize) -> bool {
-        self.allocated_pieces[index]
+    pub fn is_hashing(&self, index: usize) -> bool {
+        self.hashing_pieces[index]
     }
 
     #[inline]
-    pub fn pieces(&self) -> usize {
-        self.completed_pieces.len()
+    pub fn is_allocated(&self, index: usize) -> bool {
+        self.allocated_pieces[index]
     }
 
     #[inline]
@@ -208,7 +240,7 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn total_inflight(&self) -> usize {
+    pub fn total_allocated(&self) -> usize {
         self.allocated_pieces.count_ones()
     }
 
@@ -230,6 +262,7 @@ impl PieceSelector {
 #[derive(Debug)]
 pub struct CompletedPiece {
     pub index: usize,
+    pub conn_id: usize,
     pub hash_matched: std::io::Result<bool>,
 }
 

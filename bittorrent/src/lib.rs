@@ -146,26 +146,40 @@ impl<'f_store> TorrentState<'f_store> {
                             if let Some(bitfield) =
                                 self.piece_selector.interesting_peer_pieces(conn_id)
                             {
-                                if !bitfield.any() && peer.is_interesting {
+                                if !bitfield.any()
+                                    && peer.is_interesting
+                                    && peer.queued.is_empty()
+                                    && peer.inflight.is_empty()
+                                {
                                     // We are no longer interestead in this peer
                                     peer.not_interested(false);
                                 }
                             }
                             peer.have(completed_piece.index as i32, false);
                         }
-                        log::debug!(
-                            "Piece {}/{} completed!",
-                            self.piece_selector.total_completed(),
-                            self.piece_selector.pieces()
-                        );
+                        log::debug!("Piece {} completed!", completed_piece.index);
 
                         if self.piece_selector.completed_all() {
                             self.is_complete = true;
+                            // We are no longer interestead in any of the
+                            // peers
+                            for (_, peer) in connections.iter_mut() {
+                                peer.not_interested(false);
+                            }
                         }
                     } else {
+                        // Only need to mark this as not hashing when it fails
+                        // since otherwise it will be marked as completed and this is moot
+                        self.piece_selector.mark_not_hashing(completed_piece.index);
+                        // TODO: disconnect, there also might be a minimal chance of a race
+                        // condition here where the connection id is replaced (by disconnect +
+                        // new connection so that the wrong peer is marked) but this should be
+                        // EXTREMELY rare
                         log::error!("Piece hash didn't match expected hash!");
-                        self.piece_selector
-                            .mark_not_allocated(completed_piece.index);
+                        self.piece_selector.mark_not_allocated(
+                            completed_piece.index as i32,
+                            completed_piece.conn_id,
+                        );
                     }
                 }
                 Err(err) => {
@@ -182,9 +196,11 @@ impl<'f_store> TorrentState<'f_store> {
     fn allocate_piece(
         &mut self,
         index: i32,
+        conn_id: usize,
         file_store: &'f_store FileStore,
     ) -> VecDeque<Subpiece> {
-        self.piece_selector.mark_allocated(index as usize);
+        log::debug!("Allocating piece: conn_id: {conn_id}, index: {index}");
+        self.piece_selector.mark_allocated(index, conn_id);
         match &mut self.pieces[index as usize] {
             Some(allocated_piece) => allocated_piece.allocate_remaining_subpieces(),
             None => {
@@ -201,20 +217,25 @@ impl<'f_store> TorrentState<'f_store> {
         }
     }
 
-    fn deallocate_piece(&mut self, index: i32) {
+    // Deallocate a piece
+    fn deallocate_piece(&mut self, index: i32, conn_id: usize) {
+        log::debug!("Deallocating piece: conn_id: {conn_id}, index: {index}");
+        // Mark the piece as interesting again so it can be picked again
+        // if necessary
+        self.piece_selector
+            .update_peer_piece_intrest(conn_id, index as usize);
         // The piece might have been mid hashing when a timeout is received
         // (two separate peer) which causes to be completed whilst another peer
         // tried to download it. It's fine (TODO: confirm)
         if let Some(piece) = self.pieces[index as usize].as_mut() {
             // Will we reach 0 in the ref count?
             if piece.ref_count == 1 {
-                self.piece_selector.mark_not_allocated(index as usize);
+                log::debug!("marked as not allocated: conn_id: {conn_id}, index: {index}");
+                self.piece_selector.mark_not_allocated(index, conn_id);
             }
             piece.ref_count = piece.ref_count.saturating_sub(1)
         }
     }
-
-    // TODO: Something like release in flight pieces?
 
     pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked

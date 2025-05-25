@@ -151,6 +151,8 @@ pub struct PeerConnection {
     pub queued: VecDeque<Subpiece>,
     // Time since any data was received
     pub last_seen: Instant,
+    // Is this peer in endgame mode?
+    pub endgame: bool,
     // Time since last received subpiece request, used to timeout
     // requests
     pub last_received_subpiece: Option<Instant>,
@@ -183,6 +185,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             sent_allowed_fast: false,
             peer_choking: true,
             peer_interested: false,
+            endgame: false,
             last_received_subpiece: None,
             fast_ext,
             inflight: VecDeque::with_capacity(64),
@@ -214,7 +217,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     acc
                 });
         for piece in pieces {
-            torrent_state.deallocate_piece(piece);
+            torrent_state.deallocate_piece(piece, self.conn_id);
         }
         self.queued.clear();
     }
@@ -374,14 +377,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             .iter()
             .position(|sub| sub.index == m_index && m_begin == sub.offset)
         else {
-            // If this supiece was already considered timed out but then arrived slightly later
-            // we may up here. This means the timeout (based off RTT) is too strict so should be
-            // updated.
-            log::error!(
-                "Received pieced i: {} begin: {} was not found in queue",
-                m_index,
-                m_begin
-            );
+            log::error!("Received unexpected piece message, index: {m_index}");
             return;
         };
         if self.slow_start {
@@ -402,12 +398,22 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         // Prev throughput is used since the mertics are reported at the end of TICK and
         // throughput have been reset and stored here at that point
         gauge.set(self.prev_throughput as u32);
+
         let gauge = metrics::gauge!("peer.target_inflight", "peer_id" => self.peer_id.to_string());
         gauge.set(self.target_inflight as u32);
+
         let gauge = metrics::gauge!("peer.queued", "peer_id" => self.peer_id.to_string());
         gauge.set(self.queued.len() as u32);
+
+        let gauge = metrics::gauge!("peer.snubbed", "peer_id" => self.peer_id.to_string());
+        gauge.set(if self.snubbed { 1 } else { 0 } as u32);
+
+        let gauge = metrics::gauge!("peer.endgame", "peer_id" => self.peer_id.to_string());
+        gauge.set(if self.endgame { 1 } else { 0 } as u32);
+
         let gauge = metrics::gauge!("peer.inflight", "peer_id" => self.peer_id.to_string());
         gauge.set(self.inflight.len() as u32);
+
         let histogram = metrics::histogram!("rtt", "peer_id" => self.peer_id.to_string());
         histogram.record(self.moving_rtt.mean());
     }
@@ -433,16 +439,19 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 subpiece.timed_out = true;
                 // Request a new different piece and do it before clearing
                 // the queue so the same piece isn't picked again
-                let maybe_new_piece = torrent_state.piece_selector.next_piece(self.conn_id);
+                let maybe_new_piece = torrent_state
+                    .piece_selector
+                    .next_piece(self.conn_id, &mut self.endgame);
                 // Ensure this piece specifically is deallocated
                 // TODO: This can be improved probably
-                torrent_state.deallocate_piece(subpiece.index);
+                torrent_state.deallocate_piece(subpiece.index, self.conn_id);
                 self.release_all_pieces(torrent_state);
                 // Make it possible to request one more piece if this
                 // is the final inflight piece
                 self.target_inflight = 2;
                 if let Some(new_piece) = maybe_new_piece {
-                    let mut subpieces = torrent_state.allocate_piece(new_piece, file_store);
+                    let mut subpieces =
+                        torrent_state.allocate_piece(new_piece, self.conn_id, file_store);
                     self.append_and_fill(&mut subpieces);
                 }
                 // Update to actual target
@@ -494,10 +503,14 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     // Not interested so don't do anything
                     return;
                 }
-                if let Some(piece_idx) = torrent_state.piece_selector.next_piece(self.conn_id) {
+                if let Some(piece_idx) = torrent_state
+                    .piece_selector
+                    .next_piece(self.conn_id, &mut self.endgame)
+                {
                     log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
                     self.unchoke(torrent_state, true);
-                    let mut subpieces = torrent_state.allocate_piece(piece_idx, file_store);
+                    let mut subpieces =
+                        torrent_state.allocate_piece(piece_idx, self.conn_id, file_store);
                     // TODO: might be more than the peer can handle
                     self.append_and_fill(&mut subpieces);
                 } else {
@@ -577,7 +590,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 let index = index as usize;
                 let is_interesting = torrent_state
                     .piece_selector
-                    .peer_have_piece(self.conn_id, index);
+                    .update_peer_piece_intrest(self.conn_id, index);
                 if is_interesting && !self.is_interesting {
                     self.interested(false);
                 }
@@ -606,7 +619,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             );
                             // Mark ourselves as interested
                             self.interested(true);
-                            let mut subpieces = torrent_state.allocate_piece(index, file_store);
+                            let mut subpieces =
+                                torrent_state.allocate_piece(index, self.conn_id, file_store);
                             self.append_and_fill(&mut subpieces);
                         }
                     }
@@ -808,17 +822,21 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         self.allowed_fast_pieces.swap_remove(i);
                     }
                 } else if self.inflight.len() < 2 && self.queued.is_empty() {
-                    if let Some(new_index) = torrent_state.piece_selector.next_piece(self.conn_id) {
+                    if let Some(new_index) = torrent_state
+                        .piece_selector
+                        .next_piece(self.conn_id, &mut self.endgame)
+                    {
                         if defer_deallocation {
                             defer_deallocation = false;
-                            torrent_state.deallocate_piece(index);
+                            torrent_state.deallocate_piece(index, self.conn_id);
                         }
-                        let mut subpieces = torrent_state.allocate_piece(new_index, file_store);
+                        let mut subpieces =
+                            torrent_state.allocate_piece(new_index, self.conn_id, file_store);
                         self.append_and_fill(&mut subpieces);
                     }
                 }
                 if defer_deallocation {
-                    torrent_state.deallocate_piece(index);
+                    torrent_state.deallocate_piece(index, self.conn_id);
                 }
                 self.fill_request_queue();
             }
@@ -875,14 +893,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     ));
                     return;
                 }
-                if torrent_state.pieces[index as usize].is_none()
-                    && !torrent_state.piece_selector.has_completed(index as usize)
-                {
-                    // TODO: This might happen in end game mode when multiple peers race to complete the
-                    // piece. Haven't implemented it yet though
-                    log::error!("Recived unexpected piece message, index: {index}",);
-                    return;
-                }
                 // TODO: disconnect on recv piece never requested if fast_ext is enabled
                 log::trace!(
                     "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
@@ -898,14 +908,26 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     })
                     .map(|completed_piece| completed_piece.into_readable())
                 {
-                    log::debug!("Piece {index} completed");
+                    if torrent_state.piece_selector.has_completed(index as usize)
+                        // We assume the hash will match, if not we will just request it again
+                        || torrent_state.piece_selector.is_hashing(index as usize)
+                    {
+                        // This might happen in end game mode when multiple peers race to complete the
+                        // piece. Haven't implemented it yet though
+                        log::debug!("Piece {index} already completed or pending hashing, skipping");
+                        return;
+                    }
+                    log::debug!("Piece {index} download completed, sending to hash thread");
+                    torrent_state.piece_selector.mark_hashing(index as usize);
                     let complete_tx = torrent_state.completed_piece_tx.clone();
+                    let conn_id = self.conn_id;
                     scope.spawn(move |_| {
                         let hash = &torrent_info.pieces[readable_piece_view.index as usize];
                         let hash_check_result = readable_piece_view.sync_and_check_hash(hash);
                         complete_tx
                             .send(CompletedPiece {
                                 index: index as usize,
+                                conn_id,
                                 hash_matched: hash_check_result,
                             })
                             .unwrap();

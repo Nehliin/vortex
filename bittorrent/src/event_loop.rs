@@ -800,8 +800,8 @@ fn report_tick_metrics(
 ) {
     let counter = metrics::counter!("pieces_completed");
     counter.absolute(torrent_state.piece_selector.total_completed() as u64);
-    let gauge = metrics::gauge!("pieces_inflight");
-    gauge.set(torrent_state.piece_selector.total_inflight() as u32);
+    let gauge = metrics::gauge!("pieces_allocated");
+    gauge.set(torrent_state.piece_selector.total_allocated() as u32);
     let gauge = metrics::gauge!("num_unchoked");
     gauge.set(torrent_state.num_unchoked);
     let gauge = metrics::gauge!("num_connections");
@@ -892,8 +892,11 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
             let nothing_queued = peer.queued.is_empty();
             (bandwitdth_available_for_new_piece || nothing_queued) && !peer.peer_choking
         } {
-            if let Some(next_piece) = torrent_state.piece_selector.next_piece(peer_key) {
-                let mut queue = torrent_state.allocate_piece(next_piece, file_store);
+            if let Some(next_piece) = torrent_state
+                .piece_selector
+                .next_piece(peer_key, &mut peer.endgame)
+            {
+                let mut queue = torrent_state.allocate_piece(next_piece, peer.conn_id, file_store);
                 let queue_len = queue.len();
                 peer.append_and_fill(&mut queue);
                 // Remove all subpieces from available bandwidth
