@@ -13,6 +13,25 @@ use super::{
     peer_protocol::PeerMessage,
 };
 
+// Supported extensions and this clients ID for them
+pub const EXTENSIONS: [(&str, u8); 1] = [("ut_metadata", 1)];
+
+/// The handshake message this peer should send to anyone supporting the
+pub fn extension_handshake_msg() -> PeerMessage {
+    let mut handshake = BTreeMap::new();
+    let extensions: BTreeMap<_, _> = BTreeMap::from(EXTENSIONS);
+    handshake.insert("m", bt_bencode::value::to_value(&extensions).unwrap());
+    // TODO: t
+    handshake.insert(
+        "v",
+        bt_bencode::value::to_value(dbg!(&format!("Vortex {}", env!("CARGO_PKG_VERSION")))).unwrap(),
+    );
+    PeerMessage::Extended {
+        id: 0,
+        data: bt_bencode::to_vec(&handshake).unwrap().into(),
+    }
+}
+
 pub trait ExtensionProtocol {
     fn handle_message(
         &mut self,
@@ -23,21 +42,10 @@ pub trait ExtensionProtocol {
     // TODO: fn tick?
 }
 
-// enum MetaDataMessage {
-//     Request { piece: i32 },
-//     Data { piece: i32, total_size: i32, data },
-//     Reject { piece: i32 },
-// }
-
-// impl MetaDataMessage {
 const REQUEST: u8 = 0;
 const DATA: u8 = 1;
 const REJECT: u8 = 2;
 
-//     pub fn encode(&self) -> Bytes {
-//         bt_bencode::
-//     }
-// }
 #[derive(Debug, Deserialize, Serialize)]
 struct MetadataMessage {
     msg_type: u8,
@@ -48,6 +56,7 @@ struct MetadataMessage {
 
 // BEP 9
 pub struct MetadataExtension {
+    // The peers ID for the extension
     id: u8,
     // Box slice?
     metadata: Vec<u8>,
@@ -102,6 +111,8 @@ impl ExtensionProtocol for MetadataExtension {
         let message: MetadataMessage = <MetadataMessage>::deserialize(&mut de).unwrap();
         match message.msg_type {
             REQUEST => {
+                // if we do not have all metadata yet then reject the requests
+                // we also need to hash it first
                 log::error!("Got request");
                 de.end().unwrap();
             }

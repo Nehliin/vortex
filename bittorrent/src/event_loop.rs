@@ -24,6 +24,7 @@ use crate::{
     buf_ring::{Bgid, BufferRing},
     file_store::FileStore,
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue, UserData},
+    peer_comm::extended_protocol::extension_handshake_msg,
     peer_connection::{DisconnectReason, OutgoingMsg, PeerConnection},
     peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
     piece_selector::{self, SUBPIECE_SIZE},
@@ -690,16 +691,8 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     peer_protocol::PeerMessage::Bitfield(completed.into())
                 };
                 if connection.extended_extension {
-                    let mut m = BTreeMap::new();
-                    m.insert("ut_metadata", 1);
-                    let mut handshake = BTreeMap::new();
-                    handshake.insert("m", bt_bencode::value::to_value(&m).unwrap());
-                    handshake.insert("v", bt_bencode::value::to_value("Vortex 0.2.0").unwrap());
                     connection.outgoing_msgs_buffer.push(OutgoingMsg {
-                        message: peer_protocol::PeerMessage::Extended {
-                            id: 0,
-                            data: bt_bencode::to_vec(&handshake).unwrap().into(),
-                        },
+                        message: extension_handshake_msg(),
                         ordered: true,
                     });
                 }

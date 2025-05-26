@@ -15,7 +15,7 @@ use crate::{
     Error, TorrentState,
     event_loop::MAX_QUEUE_SIZE,
     file_store::FileStore,
-    peer_comm::extended_protocol::MetadataExtension,
+    peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension, UT_METADATA_ID},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
 };
@@ -143,7 +143,9 @@ pub struct PeerConnection {
     pub is_interesting: bool,
     /// Have we sent allowed fast set yet too the peer
     pub sent_allowed_fast: bool,
+    /// The peer supports the fast extension
     pub fast_ext: bool,
+    /// The peer supports extended extension
     pub extended_extension: bool,
     /// The peer have informed us that it is choking us.
     pub peer_choking: bool,
@@ -172,6 +174,8 @@ pub struct PeerConnection {
     // because of low througput. (Choke instead?)
     pub pending_disconnect: Option<DisconnectReason>,
     pub stateful_decoder: PeerMessageDecoder,
+    /// Maps our ID:s to respective extension. The ID is the
+    /// one the peer is expected to use when sending to us
     pub extensions: HashMap<u8, Box<dyn ExtensionProtocol>>,
     // Stored here to prevent reallocations
     pub outgoing_msgs_buffer: Vec<OutgoingMsg>,
@@ -950,10 +954,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     // ID for an extension is the message id that should be used
                     // in further communication ex ut_metadata = 3 then the id should be 3
                     // when sending such extension messages
-                    println!("{}", String::from_utf8_lossy(&data[..]));
+                    //println!("{}", String::from_utf8_lossy(&data[..]));
                     let mut de = Deserializer::from_slice(&data[..]);
                     let value: Value = <Value>::deserialize(&mut de).unwrap();
-                    log::info!("{:#?}", value);
+                    //log::info!("{:#?}", value);
                     if let Some(dict) = value.as_dict() {
                         let m = dict
                             .get("m".as_bytes())
@@ -979,8 +983,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                         ordered: false,
                                     });
                                 }
-                                // hard coded
-                                self.extensions.insert(1, Box::new(metadata));
+                                let id = EXTENSIONS
+                                    .iter()
+                                    .find_map(|(str, id)| (str == &"ut_metadata").then_some(id))
+                                    .expect("Extension ID expected to be found");
+                                self.extensions.insert(*id, Box::new(metadata));
                             }
                         }
                     }
