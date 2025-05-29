@@ -2,6 +2,7 @@ use std::{
     cell::OnceCell,
     collections::{BTreeMap, HashSet},
     io,
+    mem::MaybeUninit,
     net::SocketAddrV4,
     os::fd::{AsRawFd, FromRawFd},
     sync::mpsc::{Receiver, TryRecvError},
@@ -271,6 +272,38 @@ pub struct ReadState {
     pub full: OnceCell<FileAndInfo>,
 }
 
+pub struct RefStruct<'a, 'b> {
+    torrent: &'a mut MaybeUninit<TorrentState>,
+    full: &'b OnceCell<FileAndInfo>,
+}
+
+impl<'c, 'a: 'c, 'b> RefStruct<'a, 'b> {
+    pub fn state(&'c mut self) -> Option<(&'b FileAndInfo, &'c mut TorrentState)> {
+        if let Some(f) = self.full.get() {
+            unsafe { Some((f, (self.torrent).assume_init_mut())) }
+        } else {
+            None
+        }
+    }
+
+    pub fn init(&'c mut self, meta: lava_torrent::torrent::v1::Torrent) {
+
+
+    }
+}
+
+impl<'a, 'b> Drop for RefStruct<'a, 'b> {
+    fn drop(&mut self) {
+        if self.full.get().is_some() {
+            // Invariant is that if full is initialized
+            // the torrent MUST be initialized as well
+            unsafe {
+                self.torrent.assume_init_drop();
+            }
+        }
+    }
+}
+
 impl<'scope, 'f_store: 'scope> EventLoop {
     pub fn new(our_id: PeerId, events: Slab<EventType>, command_rc: Receiver<Command>) -> Self {
         Self {
@@ -286,33 +319,39 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
     pub fn run(&mut self, mut ring: IoUring, state: DownloadState) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
-        let (read_state, mut write_state) = match state {
-            DownloadState::Metadata { info_hash } => (
-                ReadState {
-                    info_hash,
-                    full: OnceCell::new(),
-                },
-                None,
-            ),
-            DownloadState::Torrent {
-                file_store,
-                torrent_info,
-                state,
-            } => {
-                let hash = torrent_info.info_hash_bytes().try_into().unwrap();
-                let cell = OnceCell::new();
-                cell.set(FileAndInfo {
-                    file_store,
-                    torrent_info,
-                });
-                (
-                    ReadState {
-                        info_hash: hash,
-                        full: cell,
-                    },
-                    Some(state),
-                )
-            }
+        // let (read_state, mut write_state) = match state {
+        //     DownloadState::Metadata { info_hash } => (
+        //         ReadState {
+        //             info_hash,
+        //             full: OnceCell::new(),
+        //         },
+        //         None,
+        //     ),
+        //     DownloadState::Torrent {
+        //         file_store,
+        //         torrent_info,
+        //         state,
+        //     } => {
+        //         let hash = torrent_info.info_hash_bytes().try_into().unwrap();
+        //         let cell = OnceCell::new();
+        //         cell.set(FileAndInfo {
+        //             file_store,
+        //             torrent_info,
+        //         });
+        //         (
+        //             ReadState {
+        //                 info_hash: hash,
+        //                 full: cell,
+        //             },
+        //             Some(state),
+        //         )
+        //     }
+        // };
+        let mut torrent = MaybeUninit::uninit();
+        let full = OnceCell::new();
+        let mut state = RefStruct {
+            torrent: &mut torrent,
+            full: &full,
         };
         // lambda to be able to catch errors an always unregistering the read ring
         let result = rayon::in_place_scope(|scope| {
@@ -351,8 +390,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                         &tick_delta,
                         &mut self.connections,
                         &self.pending_connections,
-                        &read_state,
-                        &mut write_state,
+                        &mut state,
                     );
 
                     last_tick = Instant::now();
@@ -375,9 +413,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
                 for cqe in &mut cq {
                     let io_event = IoEvent::from(cqe);
-                    if let Err(err) =
-                        self.event_handler(&mut sq, io_event, &mut write_state, &read_state, scope)
-                    {
+                    if let Err(err) = self.event_handler(&mut sq, io_event, &mut state, scope) {
                         log::error!("Error handling event: {err}");
                     }
 
@@ -392,9 +428,9 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     }
                 }
 
-                if let Some(torrent_state) = write_state.as_mut() {
-                    torrent_state.update_torrent_status(&mut self.connections);
-                }
+                // if let Some(torrent_state) = write_state.as_mut() {
+                //     torrent_state.update_torrent_status(&mut self.connections);
+                // }
 
                 for (conn_id, connection) in self.connections.iter_mut() {
                     for msg in connection.outgoing_msgs_buffer.iter_mut() {
@@ -422,12 +458,12 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     return Ok(());
                 }
 
-                if let Some(torrent_state) = write_state.as_mut() {
-                    if torrent_state.is_complete {
-                        log::info!("Torrent complete!");
-                        return Ok(());
-                    }
-                }
+                // if let Some(torrent_state) = write_state.as_mut() {
+                //     if torrent_state.is_complete {
+                //         log::info!("Torrent complete!");
+                //         return Ok(());
+                //     }
+                // }
             }
         });
 
@@ -544,8 +580,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
         io_event: IoEvent,
-        torrent_state: &mut Option<TorrentState>,
-        read_state: &'f_store ReadState,
+        state: &mut RefStruct<'_, 'f_store>,
         scope: &Scope<'scope>,
     ) -> io::Result<()> {
         let ret = match io_event.result {
@@ -784,7 +819,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     .unwrap();
                 let buffer = &buffer[..len];
                 connection.stateful_decoder.append_data(buffer);
-                conn_parse_and_handle_msgs(connection, torrent_state, read_state, scope);
+                conn_parse_and_handle_msgs(connection, state, scope);
             }
             EventType::Close => {
                 self.events.remove(io_event.user_data.event_idx as _);
@@ -798,14 +833,13 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
 fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection: &mut PeerConnection,
-    torrent_state: &mut Option<TorrentState>,
-    read_state: &'f_store ReadState,
+    state: &mut RefStruct<'_, 'f_store>,
     scope: &Scope<'scope>,
 ) {
     while let Some(parse_result) = connection.stateful_decoder.next() {
         match parse_result {
             Ok(peer_message) => {
-                connection.handle_message(peer_message, torrent_state, read_state, scope);
+                connection.handle_message(peer_message, state, scope);
             }
             Err(err) => {
                 log::error!("Failed {} decoding message: {err}", connection.conn_id);
@@ -838,8 +872,7 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
     tick_delta: &Duration,
     connections: &mut Slab<PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
-    read_state: &'f_store ReadState,
-    torrent_state: &mut Option<TorrentState>,
+    torrent_state: &mut RefStruct<'_, 'f_store>,
 ) {
     todo!()
     // log::info!("Tick!: {}", tick_delta.as_secs_f32());

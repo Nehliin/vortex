@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
 use crate::{
-    event_loop::{FileAndInfo, ReadState},
+    event_loop::{FileAndInfo, ReadState, RefStruct},
     file_store::FileStore,
     piece_selector::SUBPIECE_SIZE,
 };
@@ -38,10 +38,10 @@ pub fn extension_handshake_msg() -> PeerMessage {
 }
 
 pub trait ExtensionProtocol {
-    fn handle_message(
+    fn handle_message<'f_store>(
         &mut self,
         data: Bytes,
-        read_state: &ReadState,
+        state: &mut RefStruct<'_, 'f_store>,
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
     ) -> Result<(), DisconnectReason>;
     // TODO: fn tick?
@@ -106,10 +106,10 @@ impl MetadataExtension {
 }
 
 impl ExtensionProtocol for MetadataExtension {
-    fn handle_message(
+    fn handle_message<'f_store>(
         &mut self,
         data: Bytes,
-        read_state: &ReadState,
+        state: &mut RefStruct<'_, 'f_store>,
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
     ) -> Result<(), DisconnectReason> {
         let mut de = Deserializer::from_slice(&data[..]);
@@ -141,29 +141,41 @@ impl ExtensionProtocol for MetadataExtension {
                     hasher.update(&self.metadata);
                     let hash = hasher.finalize();
 
-                    if hash.as_slice() != read_state.info_hash {
-                        log::error!("Wrong hash");
-                        // TODO DIsconnect
-                    } else {
-                        read_state.full.get_or_init(|| {
-                            let metadata: Value = bt_bencode::from_slice(&self.metadata).unwrap();
-                            log::error!("META: {:?}", metadata);
-                            // META is ALREADY the info value so one needs to either construct
-                            let mut parsable = BTreeMap::new();
-                            parsable.insert("info", metadata);
-                            let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(
-                                bt_bencode::to_vec(&parsable).unwrap().as_slice(),
-                            )
-                            .unwrap();
-                            for piece in &torrent.pieces {
-                                log::debug!("{:x?}", piece);
-                            }
-                            FileAndInfo {
-                                file_store: FileStore::new("downloaded", &torrent).unwrap(),
-                                torrent_info: torrent,
-                            }
-                        });
+                    if state.state().is_none() {
+                        let metadata: Value = bt_bencode::from_slice(&self.metadata).unwrap();
+                        log::error!("META: {:?}", metadata);
+                        // META is ALREADY the info value so one needs to either construct
+                        let mut parsable = BTreeMap::new();
+                        parsable.insert("info", metadata);
+                        let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(
+                            bt_bencode::to_vec(&parsable).unwrap().as_slice(),
+                        )
+                        .unwrap();
+                        state.init(torrent);
                     }
+                    // if hash.as_slice() != read_state.info_hash {
+                    //     log::error!("Wrong hash");
+                    //     // TODO DIsconnect
+                    // } else {
+                    //     read_state.full.get_or_init(|| {
+                    //         let metadata: Value = bt_bencode::from_slice(&self.metadata).unwrap();
+                    //         log::error!("META: {:?}", metadata);
+                    //         // META is ALREADY the info value so one needs to either construct
+                    //         let mut parsable = BTreeMap::new();
+                    //         parsable.insert("info", metadata);
+                    //         let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(
+                    //             bt_bencode::to_vec(&parsable).unwrap().as_slice(),
+                    //         )
+                    //         .unwrap();
+                    //         for piece in &torrent.pieces {
+                    //             log::debug!("{:x?}", piece);
+                    //         }
+                    //         FileAndInfo {
+                    //             file_store: FileStore::new("downloaded", &torrent).unwrap(),
+                    //             torrent_info: torrent,
+                    //         }
+                    //     });
+                    // }
                 }
             }
             REJECT => {

@@ -12,12 +12,7 @@ use sha1::Digest;
 use socket2::Socket;
 
 use crate::{
-    Error, TorrentState,
-    event_loop::{MAX_QUEUE_SIZE, ReadState},
-    file_store::FileStore,
-    peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension},
-    peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
-    piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
+    event_loop::{ReadState, RefStruct, MAX_QUEUE_SIZE}, file_store::FileStore, peer_comm::extended_protocol::{MetadataExtension, EXTENSIONS}, peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder}, piece_selector::{CompletedPiece, Subpiece, SUBPIECE_SIZE}, Error, TorrentState
 };
 
 use super::{extended_protocol::ExtensionProtocol, peer_protocol::ParsedHandshake};
@@ -490,8 +485,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     pub fn handle_message(
         &mut self,
         peer_message: PeerMessage,
-        torrent_state: &mut Option<TorrentState>,
-        read_state: &'f_store ReadState,
+        state: &mut RefStruct<'_, 'f_store>,
         scope: &Scope<'scope>,
     ) {
         self.last_seen = Instant::now();
@@ -905,9 +899,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             //    }
             //}
             PeerMessage::Piece { index, begin, data } => {
-                if let Some(torrent_state) = torrent_state {
-                    let file_store = &read_state.full.get().unwrap().file_store;
-                    let torrent_info = &read_state.full.get().unwrap().torrent_info;
+                if let Some((read_state, torrent_state)) = state.state() {
+                    let file_store = &read_state.file_store;
+                    let torrent_info = &read_state.torrent_info;
                     if !self.is_valid_piece(index, begin, data.len(), torrent_state.num_pieces()) {
                         self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                             "Invalid piece message received",
@@ -1007,7 +1001,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 } else if let Some(ext) = self.extensions.get_mut(&id) {
                     ext.handle_message(
                         data,
-                        &read_state,
+                        state,
                         &mut self.outgoing_msgs_buffer,
                     )
                     .unwrap();
