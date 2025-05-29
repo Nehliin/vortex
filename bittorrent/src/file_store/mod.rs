@@ -1,6 +1,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    usize,
 };
 
 use file::MmapFile;
@@ -26,17 +27,18 @@ struct TorrentFile {
 
 #[derive(Debug)]
 /// View of all the files the Piece overlaps with
-pub struct WritablePieceFileView<'a> {
+pub struct WritablePieceFileView {
     index: i32,
     avg_piece_size: u64,
-    files: SmallVec<&'a TorrentFile, 5>,
+    indicies: SmallVec<usize, 4>,
 }
 
-impl<'a> WritablePieceFileView<'a> {
+impl WritablePieceFileView {
     /// Writes the subpiece to disk.
-    pub fn write_subpiece(&mut self, subpiece_offset: usize, data: &[u8]) {
+    pub fn write_subpiece(&mut self, subpiece_offset: usize, data: &[u8], file_store: &FileStore) {
         let mut subpiece_written: usize = 0;
-        for file in self.files.iter_mut() {
+        for file_idx in &self.indicies {
+            let file = &file_store.files[*file_idx];
             // Where in the _file_ does the piece start
             let file_index = (self.index - file.start_piece) as i64;
             // The offset might be negative here if the piece starts before the file
@@ -75,22 +77,22 @@ impl<'a> WritablePieceFileView<'a> {
         assert_eq!(subpiece_written, data.len());
     }
 
-    pub fn into_readable(self) -> ReadablePieceFileView<'a> {
+    pub fn into_readable(self) -> ReadablePieceFileView {
         ReadablePieceFileView {
             index: self.index,
             avg_piece_size: self.avg_piece_size,
-            files: self.files,
+            indicies: self.indicies,
         }
     }
 }
 
-pub struct ReadablePieceFileView<'a> {
+pub struct ReadablePieceFileView {
     pub index: i32,
     avg_piece_size: u64,
-    files: SmallVec<&'a TorrentFile, 5>,
+    indicies: SmallVec<usize, 4>,
 }
 
-impl ReadablePieceFileView<'_> {
+impl ReadablePieceFileView {
     /// Calculate the offset of the subpiece relative to the file start
     #[inline]
     fn subpiece_offset(&self, subpiece_offset: usize, file: &TorrentFile) -> i64 {
@@ -102,9 +104,10 @@ impl ReadablePieceFileView<'_> {
         file_offset + subpiece_offset as i64
     }
 
-    pub fn read_subpiece(&self, subpiece_offset: usize, buffer: &mut [u8]) {
+    pub fn read_subpiece(&self, subpiece_offset: usize, buffer: &mut [u8], file_store: &FileStore) {
         let mut subpiece_read: usize = 0;
-        for file in self.files.iter() {
+        for file_idx in &self.indicies {
+            let file = &file_store.files[*file_idx];
             // Where in the _file_ does the subpiece start
             let subpiece_offset = self.subpiece_offset(subpiece_offset, file);
             // Where should the reading start from (taking into account the already read parts)
@@ -136,10 +139,15 @@ impl ReadablePieceFileView<'_> {
     }
 
     /// Sync the relevant file pieces to disk and compare against expected hash
-    pub fn sync_and_check_hash(&self, expected_piece_hash: &[u8]) -> io::Result<bool> {
+    pub fn sync_and_check_hash(
+        &self,
+        expected_piece_hash: &[u8],
+        file_store: &FileStore,
+    ) -> io::Result<bool> {
         let mut hasher = sha1::Sha1::new();
         let mut total_read = 0;
-        for file in self.files.iter() {
+        for file_idx in &self.indicies {
+            let file = &file_store.files[*file_idx];
             // Where does the piece start relative to the file
             let piece_start_offset = self.subpiece_offset(0, file);
             let file_offset = piece_start_offset + total_read as i64;
@@ -241,42 +249,40 @@ impl FileStore {
 
     // Invariant: Must ensure only one writable_piece_view exists at any given time
     // exclusivly for an index. I.e read + write to the same index is forbidden
-    pub unsafe fn writable_piece_view<'a>(
-        &'a self,
-        index: i32,
-    ) -> io::Result<WritablePieceFileView<'a>> {
-        let files: SmallVec<&'a TorrentFile, 5> = self
+    pub unsafe fn writable_piece_view(&self, index: i32) -> io::Result<WritablePieceFileView> {
+        let indicies: SmallVec<usize, 4> = self
             .files
             .iter()
-            .filter(|file| file.start_piece <= index && index <= file.end_piece)
+            .enumerate()
+            .filter(|(_, file)| file.start_piece <= index && index <= file.end_piece)
+            .map(|(idx, _)| idx)
             .collect();
-        if files.is_empty() {
+        if indicies.is_empty() {
             return Err(io::ErrorKind::NotFound.into());
         }
         Ok(WritablePieceFileView {
             index,
             avg_piece_size: self.avg_piece_size,
-            files,
+            indicies,
         })
     }
 
     // Invariant: Must ensure that no other writable_piece_views exist of this index
-    pub unsafe fn readable_piece_view<'a>(
-        &'a self,
-        index: i32,
-    ) -> io::Result<ReadablePieceFileView<'a>> {
-        let files: SmallVec<&'a TorrentFile, 5> = self
+    pub unsafe fn readable_piece_view(&self, index: i32) -> io::Result<ReadablePieceFileView> {
+        let indicies: SmallVec<usize, 4> = self
             .files
             .iter()
-            .filter(|file| file.start_piece <= index && index <= file.end_piece)
+            .enumerate()
+            .filter(|(_, file)| file.start_piece <= index && index <= file.end_piece)
+            .map(|(idx, _)| idx)
             .collect();
-        if files.is_empty() {
+        if indicies.is_empty() {
             return Err(io::ErrorKind::NotFound.into());
         }
         Ok(ReadablePieceFileView {
             index,
             avg_piece_size: self.avg_piece_size,
-            files,
+            indicies,
         })
     }
 }

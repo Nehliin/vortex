@@ -13,9 +13,9 @@ use socket2::Socket;
 
 use crate::{
     Error, TorrentState,
-    event_loop::MAX_QUEUE_SIZE,
+    event_loop::{MAX_QUEUE_SIZE, ReadState},
     file_store::FileStore,
-    peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension, UT_METADATA_ID},
+    peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
 };
@@ -433,7 +433,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
 
     pub fn on_request_timeout(
         &mut self,
-        torrent_state: &mut TorrentState<'f_store>,
+        torrent_state: &mut TorrentState,
         file_store: &'f_store FileStore,
     ) {
         if !self.snubbed {
@@ -490,461 +490,473 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     pub fn handle_message(
         &mut self,
         peer_message: PeerMessage,
-        torrent_state: &mut TorrentState<'f_store>,
-        file_store: &'f_store FileStore,
-        torrent_info: &'scope lava_torrent::torrent::v1::Torrent,
+        torrent_state: &mut Option<TorrentState>,
+        read_state: &'f_store ReadState,
         scope: &Scope<'scope>,
     ) {
         self.last_seen = Instant::now();
         match peer_message {
-            PeerMessage::Choke => {
-                log::debug!("[Peer: {}] Peer is choking us!", self.peer_id);
-                self.peer_choking = true;
-                // Interpret all sent pieces as rejected
-                if !self.fast_ext {
-                    // Append them to queue so the release_pieces logic can release the inflight
-                    // pieces as well
-                    self.queued.append(&mut self.inflight);
-                    self.inflight.clear();
-                    // TODO handle as reject piece
-                }
-                self.release_all_pieces(torrent_state);
-            }
-            PeerMessage::Unchoke => {
-                self.peer_choking = false;
-                if !self.is_interesting {
-                    // Not interested so don't do anything
-                    return;
-                }
-                if let Some(piece_idx) = torrent_state
-                    .piece_selector
-                    .next_piece(self.conn_id, &mut self.endgame)
-                {
-                    log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
-                    self.unchoke(torrent_state, true);
-                    let mut subpieces =
-                        torrent_state.allocate_piece(piece_idx, self.conn_id, file_store);
-                    // TODO: might be more than the peer can handle
-                    self.append_and_fill(&mut subpieces);
-                } else {
-                    log::warn!("[Peer: {}] No more pieces available", self.peer_id);
-                }
-            }
-            PeerMessage::Interested => {
-                let should_unchoke = torrent_state.should_unchoke();
-                log::info!("[Peer: {}] Peer is interested in us!", self.peer_id);
-                self.peer_interested = true;
-                if !self.sent_allowed_fast && self.fast_ext {
-                    self.sent_allowed_fast = true;
-                    const ALLOWED_FAST_SET_SIZE: usize = 6;
-                    // TODO: don't send pieces the peer already have
-                    if ALLOWED_FAST_SET_SIZE >= torrent_state.num_pieces() {
-                        for index in 0..torrent_state.num_pieces() {
-                            let index = index as i32;
-                            if !self.accept_fast_pieces.contains(&index) {
-                                self.accept_fast_pieces.push(index);
-                            }
-                            self.outgoing_msgs_buffer.push(OutgoingMsg {
-                                message: PeerMessage::AllowedFast { index },
-                                ordered: false,
-                            });
-                        }
-                    } else {
-                        generate_fast_set(
-                            ALLOWED_FAST_SET_SIZE as u32,
-                            torrent_state.num_pieces() as u32,
-                            &torrent_state.info_hash,
-                            *self
-                                .socket
-                                .peer_addr()
-                                .expect("Socket should be connected")
-                                .as_socket_ipv4()
-                                .expect("Only ipv4 addresses are supported")
-                                .ip(),
-                            &mut self.accept_fast_pieces,
-                        );
-                        for index in self.accept_fast_pieces.iter().copied() {
-                            self.outgoing_msgs_buffer.push(OutgoingMsg {
-                                message: PeerMessage::AllowedFast { index },
-                                ordered: false,
-                            });
-                        }
-                    }
-                }
-                if !self.is_choking {
-                    // if we are not choking them we might need to send a
-                    // unchoke to avoid some race conditions. Libtorrent
-                    // uses the same type of logic
-                    self.unchoke(torrent_state, true);
-                } else if should_unchoke {
-                    log::debug!("[Peer: {}] Unchoking peer after intrest", self.peer_id);
-                    self.unchoke(torrent_state, true);
-                }
-            }
-            PeerMessage::NotInterested => {
-                self.peer_interested = false;
-                log::info!(
-                    "[Peer: {}] Peer is no longer interested in us!",
-                    self.peer_id
-                );
-                self.choke(torrent_state, false);
-            }
-            PeerMessage::Have { index } => {
-                if 0 > index || index >= torrent_state.num_pieces() as i32 {
-                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
-                        "Invalid have index received",
-                    ));
-                    return;
-                }
-                log::info!(
-                    "[Peer: {}] Peer have piece with index: {index}",
-                    self.peer_id
-                );
-                let index = index as usize;
-                let is_interesting = torrent_state
-                    .piece_selector
-                    .update_peer_piece_intrest(self.conn_id, index);
-                if is_interesting && !self.is_interesting {
-                    self.interested(false);
-                }
-            }
-            PeerMessage::AllowedFast { index } => {
-                if !self.fast_ext {
-                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
-                        "Allowed fast received when fast_ext wasn't enabled",
-                    ));
-                    return;
-                }
-                if index < 0 || index > torrent_state.num_pieces() as i32 {
-                    log::warn!("[PeerId: {}] Invalid allowed fast message", self.peer_id);
-                } else if !self.allowed_fast_pieces.contains(&index) {
-                    self.allowed_fast_pieces.push(index);
-                    if let Some(interesting_pieces) = torrent_state
-                        .piece_selector
-                        .interesting_peer_pieces(self.conn_id)
-                    {
-                        if interesting_pieces[index as usize]
-                            && !torrent_state.piece_selector.is_allocated(index as usize)
-                        {
-                            log::info!(
-                                "[PeerId: {}] Requesting new piece {index} via Allowed fast set!",
-                                self.peer_id
-                            );
-                            // Mark ourselves as interested
-                            self.interested(true);
-                            let mut subpieces =
-                                torrent_state.allocate_piece(index, self.conn_id, file_store);
-                            self.append_and_fill(&mut subpieces);
-                        }
-                    }
-                }
-            }
-            PeerMessage::HaveAll => {
-                if !self.fast_ext {
-                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
-                        "Have all received when fast_ext wasn't enabled",
-                    ));
-                    return;
-                }
-                if torrent_state.piece_selector.bitfield_received(self.conn_id) {
-                    log::warn!(
-                        "[PeerId: {}] (HaveAll) Bitfield already received",
-                        self.peer_id
-                    );
-                }
-                let num_pieces = torrent_state.num_pieces();
-                log::info!("[Peer: {}] Have all received", self.peer_id);
-                let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
-                torrent_state
-                    .piece_selector
-                    .peer_bitfield(self.conn_id, bitfield.into_boxed_bitslice());
-                if !torrent_state.is_complete {
-                    // Mark ourselves as interested
-                    self.interested(true);
-                }
-            }
-            PeerMessage::HaveNone => {
-                if !self.fast_ext {
-                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
-                        "Have none received when fast_ext wasn't enabled",
-                    ));
-                    return;
-                }
-                if torrent_state.piece_selector.bitfield_received(self.conn_id) {
-                    log::warn!(
-                        "[PeerId: {}] (HaveNone) Bitfield already received",
-                        self.peer_id
-                    );
-                }
-                let num_pieces = torrent_state.num_pieces();
-                log::info!("[Peer: {}] Have None received", self.peer_id);
-                let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
-                self.not_interested(false);
-                torrent_state
-                    .piece_selector
-                    .peer_bitfield(self.conn_id, bitfield.into_boxed_bitslice());
-            }
-            PeerMessage::Bitfield(mut field) => {
-                if torrent_state.piece_selector.bitfield_received(self.conn_id) && self.fast_ext {
-                    log::warn!("[PeerId: {}] Bitfield already received", self.peer_id);
-                }
-                if torrent_state.num_pieces() != field.len() {
-                    if field.len() < torrent_state.num_pieces() {
-                        log::error!(
-                            "[Peer: {}] Received invalid bitfield, expected {}, got: {}",
-                            self.peer_id,
-                            torrent_state.num_pieces(),
-                            field.len()
-                        );
-                        self.pending_disconnect =
-                            Some(DisconnectReason::ProtocolError("Invalid bitfield"));
+            //PeerMessage::Choke => {
+            //    log::debug!("[Peer: {}] Peer is choking us!", self.peer_id);
+            //    self.peer_choking = true;
+            //    // Interpret all sent pieces as rejected
+            //    if !self.fast_ext {
+            //        // Append them to queue so the release_pieces logic can release the inflight
+            //        // pieces as well
+            //        self.queued.append(&mut self.inflight);
+            //        self.inflight.clear();
+            //        // TODO handle as reject piece
+            //    }
+            //    self.release_all_pieces(torrent_state);
+            //}
+            //PeerMessage::Unchoke => {
+            //    self.peer_choking = false;
+            //    if !self.is_interesting {
+            //        // Not interested so don't do anything
+            //        return;
+            //    }
+            //    if let Some(piece_idx) = torrent_state
+            //        .piece_selector
+            //        .next_piece(self.conn_id, &mut self.endgame)
+            //    {
+            //        log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
+            //        self.unchoke(torrent_state, true);
+            //        //let mut subpieces =
+            //         //   torrent_state.allocate_piece(piece_idx, self.conn_id, file_store);
+            //        // TODO: might be more than the peer can handle
+            //        //self.append_and_fill(&mut subpieces);
+            //    } else {
+            //        log::warn!("[Peer: {}] No more pieces available", self.peer_id);
+            //    }
+            //}
+            //PeerMessage::Interested => {
+            //    let should_unchoke = torrent_state.should_unchoke();
+            //    log::info!("[Peer: {}] Peer is interested in us!", self.peer_id);
+            //    self.peer_interested = true;
+            //    if !self.sent_allowed_fast && self.fast_ext {
+            //        self.sent_allowed_fast = true;
+            //        const ALLOWED_FAST_SET_SIZE: usize = 6;
+            //        // TODO: don't send pieces the peer already have
+            //        if ALLOWED_FAST_SET_SIZE >= torrent_state.num_pieces() {
+            //            for index in 0..torrent_state.num_pieces() {
+            //                let index = index as i32;
+            //                if !self.accept_fast_pieces.contains(&index) {
+            //                    self.accept_fast_pieces.push(index);
+            //                }
+            //                self.outgoing_msgs_buffer.push(OutgoingMsg {
+            //                    message: PeerMessage::AllowedFast { index },
+            //                    ordered: false,
+            //                });
+            //            }
+            //        } else {
+            //            generate_fast_set(
+            //                ALLOWED_FAST_SET_SIZE as u32,
+            //                torrent_state.num_pieces() as u32,
+            //                &torrent_state.info_hash,
+            //                *self
+            //                    .socket
+            //                    .peer_addr()
+            //                    .expect("Socket should be connected")
+            //                    .as_socket_ipv4()
+            //                    .expect("Only ipv4 addresses are supported")
+            //                    .ip(),
+            //                &mut self.accept_fast_pieces,
+            //            );
+            //            for index in self.accept_fast_pieces.iter().copied() {
+            //                self.outgoing_msgs_buffer.push(OutgoingMsg {
+            //                    message: PeerMessage::AllowedFast { index },
+            //                    ordered: false,
+            //                });
+            //            }
+            //        }
+            //    }
+            //    if !self.is_choking {
+            //        // if we are not choking them we might need to send a
+            //        // unchoke to avoid some race conditions. Libtorrent
+            //        // uses the same type of logic
+            //        self.unchoke(torrent_state, true);
+            //    } else if should_unchoke {
+            //        log::debug!("[Peer: {}] Unchoking peer after intrest", self.peer_id);
+            //        self.unchoke(torrent_state, true);
+            //    }
+            //}
+            //PeerMessage::NotInterested => {
+            //    self.peer_interested = false;
+            //    log::info!(
+            //        "[Peer: {}] Peer is no longer interested in us!",
+            //        self.peer_id
+            //    );
+            //    self.choke(torrent_state, false);
+            //}
+            //PeerMessage::Have { index } => {
+            //    if 0 > index || index >= torrent_state.num_pieces() as i32 {
+            //        self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+            //            "Invalid have index received",
+            //        ));
+            //        return;
+            //    }
+            //    log::info!(
+            //        "[Peer: {}] Peer have piece with index: {index}",
+            //        self.peer_id
+            //    );
+            //    let index = index as usize;
+            //    let is_interesting = torrent_state
+            //        .piece_selector
+            //        .update_peer_piece_intrest(self.conn_id, index);
+            //    if is_interesting && !self.is_interesting {
+            //        self.interested(false);
+            //    }
+            //}
+            //PeerMessage::AllowedFast { index } => {
+            //    if !self.fast_ext {
+            //        self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+            //            "Allowed fast received when fast_ext wasn't enabled",
+            //        ));
+            //        return;
+            //    }
+            //    if index < 0 || index > torrent_state.num_pieces() as i32 {
+            //        log::warn!("[PeerId: {}] Invalid allowed fast message", self.peer_id);
+            //    } else if !self.allowed_fast_pieces.contains(&index) {
+            //        self.allowed_fast_pieces.push(index);
+            //        if let Some(interesting_pieces) = torrent_state
+            //            .piece_selector
+            //            .interesting_peer_pieces(self.conn_id)
+            //        {
+            //            if interesting_pieces[index as usize]
+            //                && !torrent_state.piece_selector.is_allocated(index as usize)
+            //            {
+            //                log::info!(
+            //                    "[PeerId: {}] Requesting new piece {index} via Allowed fast set!",
+            //                    self.peer_id
+            //                );
+            //                // Mark ourselves as interested
+            //                self.interested(true);
+            //         //       let mut subpieces =
+            //          //          torrent_state.allocate_piece(index, self.conn_id, file_store);
+            //           //     self.append_and_fill(&mut subpieces);
+            //            }
+            //        }
+            //    }
+            //}
+            //PeerMessage::HaveAll => {
+            //    if !self.fast_ext {
+            //        self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+            //            "Have all received when fast_ext wasn't enabled",
+            //        ));
+            //        return;
+            //    }
+            //    if torrent_state.piece_selector.bitfield_received(self.conn_id) {
+            //        log::warn!(
+            //            "[PeerId: {}] (HaveAll) Bitfield already received",
+            //            self.peer_id
+            //        );
+            //    }
+            //    let num_pieces = torrent_state.num_pieces();
+            //    log::info!("[Peer: {}] Have all received", self.peer_id);
+            //    let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
+            //    torrent_state
+            //        .piece_selector
+            //        .peer_bitfield(self.conn_id, bitfield.into_boxed_bitslice());
+            //    if !torrent_state.is_complete {
+            //        // Mark ourselves as interested
+            //        self.interested(true);
+            //    }
+            //}
+            //PeerMessage::HaveNone => {
+            //    if !self.fast_ext {
+            //        self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+            //            "Have none received when fast_ext wasn't enabled",
+            //        ));
+            //        return;
+            //    }
+            //    if torrent_state.piece_selector.bitfield_received(self.conn_id) {
+            //        log::warn!(
+            //            "[PeerId: {}] (HaveNone) Bitfield already received",
+            //            self.peer_id
+            //        );
+            //    }
+            //    let num_pieces = torrent_state.num_pieces();
+            //    log::info!("[Peer: {}] Have None received", self.peer_id);
+            //    let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
+            //    self.not_interested(false);
+            //    torrent_state
+            //        .piece_selector
+            //        .peer_bitfield(self.conn_id, bitfield.into_boxed_bitslice());
+            //}
+            //PeerMessage::Bitfield(mut field) => {
+            //    if torrent_state.piece_selector.bitfield_received(self.conn_id) && self.fast_ext {
+            //        log::warn!("[PeerId: {}] Bitfield already received", self.peer_id);
+            //    }
+            //    if torrent_state.num_pieces() != field.len() {
+            //        if field.len() < torrent_state.num_pieces() {
+            //            log::error!(
+            //                "[Peer: {}] Received invalid bitfield, expected {}, got: {}",
+            //                self.peer_id,
+            //                torrent_state.num_pieces(),
+            //                field.len()
+            //            );
+            //            self.pending_disconnect =
+            //                Some(DisconnectReason::ProtocolError("Invalid bitfield"));
+            //            return;
+            //        }
+            //        // The bitfield might be padded with zeros, remove them first
+            //        log::debug!(
+            //            "[Peer: {}] Received padded bitfield, expected {}, got: {}",
+            //            self.peer_id,
+            //            torrent_state.num_pieces(),
+            //            field.len()
+            //        );
+            //        field.truncate(torrent_state.num_pieces());
+            //    }
+            //    let field = field.into_boxed_bitslice();
+            //    log::info!("[Peer: {}] Bifield received", self.peer_id);
+            //    let is_interesting = torrent_state
+            //        .piece_selector
+            //        .peer_bitfield(self.conn_id, field.clone());
+
+            //    // Mark ourselves as interested if there are pieces we would like request
+            //    if !self.is_interesting && is_interesting {
+            //        self.interested(true);
+            //    }
+            //    // TODO: if unchocked already we should request stuff (in case they are recvd out
+            //    // of order)
+            //}
+            //PeerMessage::SuggestPiece { index } => {
+            //    if !self.fast_ext {
+            //        self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+            //            "Received suggest piece without fast_ext being enabled",
+            //        ));
+            //        return;
+            //    }
+            //    log::info!("[Peer: {}] received suggested piece: {index}", self.peer_id);
+            //}
+            //PeerMessage::Request {
+            //    index,
+            //    begin,
+            //    length,
+            //} => {
+            //    // returns if it was accepted or not
+            //    let mut handle_req = || {
+            //        if !self.is_valid_piece_req(
+            //            index,
+            //            begin,
+            //            length,
+            //            torrent_state.num_pieces() as i32,
+            //        ) {
+            //            log::warn!(
+            //                "[Peer: {}] Piece request ignored/rejected, invalid request",
+            //                self.peer_id
+            //            );
+            //            None
+            //        } else {
+            //            if !self.peer_interested {
+            //                self.peer_interested = true;
+            //            }
+            //            let should_unchoke = torrent_state.should_unchoke();
+            //            if should_unchoke && self.is_choking {
+            //                self.unchoke(torrent_state, true);
+            //            }
+            //            // We are either not choking or the piece is part of the fast set and they
+            //            // support the fast ext
+            //            if !self.is_choking
+            //                || (self.accept_fast_pieces.contains(&index) && self.fast_ext)
+            //            {
+            //                if !torrent_state.piece_selector.has_completed(index as usize) {
+            //                    return None;
+            //                }
+            //                assert!(torrent_state.pieces[index as usize].is_none());
+            //                // TODO: cache this
+            //                // SAFETY: we've check that this is completed and the writable piece is gone
+            //                // from the piece vector in that case no other writers should exist for the piece
+            //                // let Ok(readable_piece_view) =
+            //                //     (unsafe { file_store.readable_piece_view(index) })
+            //                // else {
+            //                //     return None;
+            //                // };
+            //                // // TODO: consider using maybe uninit
+            //                // let mut subpiece_data = vec![0; length as usize].into_boxed_slice();
+            //                // readable_piece_view.read_subpiece(
+            //                //     begin as usize,
+            //                //     &mut subpiece_data,
+            //                //     &file_store,
+            //                // );
+            //                //Some(subpiece_data)
+            //                None
+            //            } else {
+            //                log::warn!(
+            //                    "[Peer: {}] Piece request ignored/rejected, peer can't be unchoked",
+            //                    self.peer_id
+            //                );
+            //                None
+            //            }
+            //        }
+            //    };
+            //    if let Some(piece_data) = handle_req() {
+            //        todo!()
+            //        //self.send_piece(index, begin, piece_data.into(), false);
+            //    } else if self.fast_ext {
+            //        self.reject_request(index, begin, length, false);
+            //    }
+            //}
+            //PeerMessage::RejectRequest {
+            //    index,
+            //    begin,
+            //    length,
+            //} => {
+            //    if !self.fast_ext {
+            //        self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+            //            "Received reject request without fast_ext being enabled",
+            //        ));
+            //        return;
+            //    }
+            //    if !self.is_valid_piece_req(index, begin, length, torrent_state.num_pieces() as i32)
+            //    {
+            //        log::warn!(
+            //            "[Peer: {}] Piece Reject request ignored, invalid request",
+            //            self.peer_id
+            //        );
+            //    }
+            //    let mut defer_deallocation = false;
+            //    if let Some(i) = self.inflight.iter().position(|q_sub| {
+            //        q_sub.index == index && q_sub.offset == begin && q_sub.size == length
+            //    }) {
+            //        log::warn!(
+            //            "[PeerId {}]: Subpiece request rejected: {index}, {begin}",
+            //            self.peer_id,
+            //        );
+            //        self.inflight.remove(i).unwrap();
+            //        defer_deallocation = true;
+            //    } else {
+            //        log::error!(
+            //            "[PeerId {}]: Subpiece not inflight rejected: {index}, {begin}",
+            //            self.peer_id,
+            //        );
+            //    }
+            //    // TODO disconnect if receiving a reject for a never requested piece
+            //    if self.peer_choking {
+            //        // Remove from the allowed fast set if it was reported there since it
+            //        // apparently wasn't allowed fast
+            //        if let Some(i) = self.allowed_fast_pieces.iter().position(|i| index == *i) {
+            //            self.allowed_fast_pieces.swap_remove(i);
+            //        }
+            //    } else if self.inflight.len() < 2 && self.queued.is_empty() {
+            //        if let Some(new_index) = torrent_state
+            //            .piece_selector
+            //            .next_piece(self.conn_id, &mut self.endgame)
+            //        {
+            //            if defer_deallocation {
+            //                defer_deallocation = false;
+            //                torrent_state.deallocate_piece(index, self.conn_id);
+            //            }
+            //            // let mut subpieces =
+            //            //     torrent_state.allocate_piece(new_index, self.conn_id, file_store);
+            //            // self.append_and_fill(&mut subpieces);
+            //        }
+            //    }
+            //    if defer_deallocation {
+            //        torrent_state.deallocate_piece(index, self.conn_id);
+            //    }
+            //    self.fill_request_queue();
+            //}
+            //PeerMessage::Cancel {
+            //    index,
+            //    begin,
+            //    length,
+            //} => {
+            //    log::trace!(
+            //        "[Peer: {}] Received cancel request, index: {index}, begin: {begin}, length: {length}",
+            //        self.peer_id
+            //    );
+            //    // if we are talking to a fast_ext peer we need to respond with something here,
+            //    // either reject or a piece
+            //    if self.fast_ext {
+            //        let subpiece = Subpiece {
+            //            index,
+            //            offset: begin,
+            //            size: length,
+            //            timed_out: false,
+            //        };
+            //        if !self
+            //            .outgoing_msgs_buffer
+            //            .iter()
+            //            .any(|msg| match msg.message {
+            //                PeerMessage::RejectRequest {
+            //                    index,
+            //                    begin,
+            //                    length,
+            //                } if index == subpiece.index
+            //                    && subpiece.offset == begin
+            //                    && subpiece.size == length =>
+            //                {
+            //                    true
+            //                }
+            //                PeerMessage::Piece { index, begin, .. }
+            //                    if index == subpiece.index && subpiece.offset == begin =>
+            //                {
+            //                    true
+            //                }
+            //                _ => false,
+            //            })
+            //        {
+            //            // We've not already queued up a response
+            //            // so reject the request
+            //            self.reject_request(subpiece.index, subpiece.offset, subpiece.size, false);
+            //        }
+            //    }
+            //}
+            PeerMessage::Piece { index, begin, data } => {
+                if let Some(torrent_state) = torrent_state {
+                    let file_store = &read_state.full.get().unwrap().file_store;
+                    let torrent_info = &read_state.full.get().unwrap().torrent_info;
+                    if !self.is_valid_piece(index, begin, data.len(), torrent_state.num_pieces()) {
+                        self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+                            "Invalid piece message received",
+                        ));
                         return;
                     }
-                    // The bitfield might be padded with zeros, remove them first
-                    log::debug!(
-                        "[Peer: {}] Received padded bitfield, expected {}, got: {}",
+                    // TODO: disconnect on recv piece never requested if fast_ext is enabled
+                    log::trace!(
+                        "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
                         self.peer_id,
-                        torrent_state.num_pieces(),
-                        field.len()
+                        data.len(),
                     );
-                    field.truncate(torrent_state.num_pieces());
-                }
-                let field = field.into_boxed_bitslice();
-                log::info!("[Peer: {}] Bifield received", self.peer_id);
-                let is_interesting = torrent_state
-                    .piece_selector
-                    .peer_bitfield(self.conn_id, field.clone());
+                    self.update_stats(index, begin, data.len() as u32);
 
-                // Mark ourselves as interested if there are pieces we would like request
-                if !self.is_interesting && is_interesting {
-                    self.interested(true);
-                }
-                // TODO: if unchocked already we should request stuff (in case they are recvd out
-                // of order)
-            }
-            PeerMessage::SuggestPiece { index } => {
-                if !self.fast_ext {
-                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
-                        "Received suggest piece without fast_ext being enabled",
-                    ));
-                    return;
-                }
-                log::info!("[Peer: {}] received suggested piece: {index}", self.peer_id);
-            }
-            PeerMessage::Request {
-                index,
-                begin,
-                length,
-            } => {
-                // returns if it was accepted or not
-                let mut handle_req = || {
-                    if !self.is_valid_piece_req(
-                        index,
-                        begin,
-                        length,
-                        torrent_state.num_pieces() as i32,
-                    ) {
-                        log::warn!(
-                            "[Peer: {}] Piece request ignored/rejected, invalid request",
-                            self.peer_id
-                        );
-                        None
-                    } else {
-                        if !self.peer_interested {
-                            self.peer_interested = true;
-                        }
-                        let should_unchoke = torrent_state.should_unchoke();
-                        if should_unchoke && self.is_choking {
-                            self.unchoke(torrent_state, true);
-                        }
-                        // We are either not choking or the piece is part of the fast set and they
-                        // support the fast ext
-                        if !self.is_choking
-                            || (self.accept_fast_pieces.contains(&index) && self.fast_ext)
-                        {
-                            if !torrent_state.piece_selector.has_completed(index as usize) {
-                                return None;
-                            }
-                            assert!(torrent_state.pieces[index as usize].is_none());
-                            // TODO: cache this
-                            // SAFETY: we've check that this is completed and the writable piece is gone
-                            // from the piece vector in that case no other writers should exist for the piece
-                            let Ok(readable_piece_view) =
-                                (unsafe { file_store.readable_piece_view(index) })
-                            else {
-                                return None;
-                            };
-                            // TODO: consider using maybe uninit
-                            let mut subpiece_data = vec![0; length as usize].into_boxed_slice();
-                            readable_piece_view.read_subpiece(begin as usize, &mut subpiece_data);
-                            Some(subpiece_data)
-                        } else {
-                            log::warn!(
-                                "[Peer: {}] Piece request ignored/rejected, peer can't be unchoked",
-                                self.peer_id
-                            );
-                            None
-                        }
-                    }
-                };
-                if let Some(piece_data) = handle_req() {
-                    self.send_piece(index, begin, piece_data.into(), false);
-                } else if self.fast_ext {
-                    self.reject_request(index, begin, length, false);
-                }
-            }
-            PeerMessage::RejectRequest {
-                index,
-                begin,
-                length,
-            } => {
-                if !self.fast_ext {
-                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
-                        "Received reject request without fast_ext being enabled",
-                    ));
-                    return;
-                }
-                if !self.is_valid_piece_req(index, begin, length, torrent_state.num_pieces() as i32)
-                {
-                    log::warn!(
-                        "[Peer: {}] Piece Reject request ignored, invalid request",
-                        self.peer_id
-                    );
-                }
-                let mut defer_deallocation = false;
-                if let Some(i) = self.inflight.iter().position(|q_sub| {
-                    q_sub.index == index && q_sub.offset == begin && q_sub.size == length
-                }) {
-                    log::warn!(
-                        "[PeerId {}]: Subpiece request rejected: {index}, {begin}",
-                        self.peer_id,
-                    );
-                    self.inflight.remove(i).unwrap();
-                    defer_deallocation = true;
-                } else {
-                    log::error!(
-                        "[PeerId {}]: Subpiece not inflight rejected: {index}, {begin}",
-                        self.peer_id,
-                    );
-                }
-                // TODO disconnect if receiving a reject for a never requested piece
-                if self.peer_choking {
-                    // Remove from the allowed fast set if it was reported there since it
-                    // apparently wasn't allowed fast
-                    if let Some(i) = self.allowed_fast_pieces.iter().position(|i| index == *i) {
-                        self.allowed_fast_pieces.swap_remove(i);
-                    }
-                } else if self.inflight.len() < 2 && self.queued.is_empty() {
-                    if let Some(new_index) = torrent_state
-                        .piece_selector
-                        .next_piece(self.conn_id, &mut self.endgame)
-                    {
-                        if defer_deallocation {
-                            defer_deallocation = false;
-                            torrent_state.deallocate_piece(index, self.conn_id);
-                        }
-                        let mut subpieces =
-                            torrent_state.allocate_piece(new_index, self.conn_id, file_store);
-                        self.append_and_fill(&mut subpieces);
-                    }
-                }
-                if defer_deallocation {
-                    torrent_state.deallocate_piece(index, self.conn_id);
-                }
-                self.fill_request_queue();
-            }
-            PeerMessage::Cancel {
-                index,
-                begin,
-                length,
-            } => {
-                log::trace!(
-                    "[Peer: {}] Received cancel request, index: {index}, begin: {begin}, length: {length}",
-                    self.peer_id
-                );
-                // if we are talking to a fast_ext peer we need to respond with something here,
-                // either reject or a piece
-                if self.fast_ext {
-                    let subpiece = Subpiece {
-                        index,
-                        offset: begin,
-                        size: length,
-                        timed_out: false,
-                    };
-                    if !self
-                        .outgoing_msgs_buffer
-                        .iter()
-                        .any(|msg| match msg.message {
-                            PeerMessage::RejectRequest {
-                                index,
-                                begin,
-                                length,
-                            } if index == subpiece.index
-                                && subpiece.offset == begin
-                                && subpiece.size == length =>
-                            {
-                                true
-                            }
-                            PeerMessage::Piece { index, begin, .. }
-                                if index == subpiece.index && subpiece.offset == begin =>
-                            {
-                                true
-                            }
-                            _ => false,
+                    if let Some(readable_piece_view) = torrent_state.pieces[index as usize]
+                        .take_if(|piece| {
+                            piece.on_subpiece(index, begin, &data[..], file_store);
+                            piece.is_complete()
                         })
+                        .map(|completed_piece| completed_piece.into_readable())
                     {
-                        // We've not already queued up a response
-                        // so reject the request
-                        self.reject_request(subpiece.index, subpiece.offset, subpiece.size, false);
-                    }
-                }
-            }
-            PeerMessage::Piece { index, begin, data } => {
-                if !self.is_valid_piece(index, begin, data.len(), torrent_state.num_pieces()) {
-                    self.pending_disconnect = Some(DisconnectReason::ProtocolError(
-                        "Invalid piece message received",
-                    ));
-                    return;
-                }
-                // TODO: disconnect on recv piece never requested if fast_ext is enabled
-                log::trace!(
-                    "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
-                    self.peer_id,
-                    data.len(),
-                );
-                self.update_stats(index, begin, data.len() as u32);
-
-                if let Some(readable_piece_view) = torrent_state.pieces[index as usize]
-                    .take_if(|piece| {
-                        piece.on_subpiece(index, begin, &data[..]);
-                        piece.is_complete()
-                    })
-                    .map(|completed_piece| completed_piece.into_readable())
-                {
-                    if torrent_state.piece_selector.has_completed(index as usize)
+                        if torrent_state.piece_selector.has_completed(index as usize)
                         // We assume the hash will match, if not we will just request it again
                         || torrent_state.piece_selector.is_hashing(index as usize)
-                    {
-                        // This might happen in end game mode when multiple peers race to complete the
-                        // piece. Haven't implemented it yet though
-                        log::debug!("Piece {index} already completed or pending hashing, skipping");
-                        return;
+                        {
+                            // This might happen in end game mode when multiple peers race to complete the
+                            // piece. Haven't implemented it yet though
+                            log::debug!(
+                                "Piece {index} already completed or pending hashing, skipping"
+                            );
+                            return;
+                        }
+                        log::debug!("Piece {index} download completed, sending to hash thread");
+                        torrent_state.piece_selector.mark_hashing(index as usize);
+                        let complete_tx = torrent_state.completed_piece_tx.clone();
+                        let conn_id = self.conn_id;
+                        scope.spawn(move |_| {
+                            let hash = &torrent_info.pieces[readable_piece_view.index as usize];
+                            let hash_check_result =
+                                readable_piece_view.sync_and_check_hash(hash, file_store);
+                            complete_tx
+                                .send(CompletedPiece {
+                                    index: index as usize,
+                                    conn_id,
+                                    hash_matched: hash_check_result,
+                                })
+                                .unwrap();
+                        });
                     }
-                    log::debug!("Piece {index} download completed, sending to hash thread");
-                    torrent_state.piece_selector.mark_hashing(index as usize);
-                    let complete_tx = torrent_state.completed_piece_tx.clone();
-                    let conn_id = self.conn_id;
-                    scope.spawn(move |_| {
-                        let hash = &torrent_info.pieces[readable_piece_view.index as usize];
-                        let hash_check_result = readable_piece_view.sync_and_check_hash(hash);
-                        complete_tx
-                            .send(CompletedPiece {
-                                index: index as usize,
-                                conn_id,
-                                hash_matched: hash_check_result,
-                            })
-                            .unwrap();
-                    });
                 }
             }
             // TODO: we do not send handshake yet
@@ -995,7 +1007,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 } else if let Some(ext) = self.extensions.get_mut(&id) {
                     ext.handle_message(
                         data,
-                        &torrent_info.info_hash_bytes(),
+                        &read_state,
                         &mut self.outgoing_msgs_buffer,
                     )
                     .unwrap();
@@ -1003,6 +1015,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     log::error!("Unexpected extended msg");
                 }
             }
+            _ => todo!()
         }
     }
 }

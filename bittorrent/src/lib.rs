@@ -84,25 +84,42 @@ impl Torrent {
             ring.submission().push(&accept_op).unwrap();
         }
         ring.submission().sync();
-        let file_store = FileStore::new(downloads_path, &self.torrent_info).unwrap();
-        let torrent_state = TorrentState::new(&self.torrent_info);
+        //let file_store = FileStore::new(downloads_path, &self.torrent_info).unwrap();
+        //let torrent_state = TorrentState::new(&self.torrent_info);
         let mut event_loop = EventLoop::new(self.our_id, events, command_rc);
-        event_loop.run(ring, torrent_state, &file_store, &self.torrent_info)
+        event_loop.run(
+            ring,
+            DownloadState::Metadata {
+                info_hash: self.torrent_info.info_hash_bytes().try_into().unwrap(),
+            },
+        )
     }
 }
 
-struct TorrentState<'f_store> {
+struct TorrentState {
     info_hash: [u8; 20],
     piece_selector: PieceSelector,
     num_unchoked: u32,
     max_unchoked: u32,
     completed_piece_rc: Receiver<CompletedPiece>,
     completed_piece_tx: Sender<CompletedPiece>,
-    pieces: Vec<Option<Piece<'f_store>>>,
+    pieces: Vec<Option<Piece>>,
     is_complete: bool,
 }
 
-impl<'f_store> TorrentState<'f_store> {
+// not necessary
+enum DownloadState {
+    Metadata {
+        info_hash: [u8; 20],
+    },
+    Torrent {
+        file_store: FileStore,
+        torrent_info: lava_torrent::torrent::v1::Torrent,
+        state: TorrentState,
+    },
+}
+
+impl TorrentState {
     pub fn new(torrent: &lava_torrent::torrent::v1::Torrent) -> Self {
         let info_hash = torrent.info_hash_bytes().try_into().unwrap();
         let mut pieces = Vec::with_capacity(torrent.pieces.len());
@@ -197,7 +214,7 @@ impl<'f_store> TorrentState<'f_store> {
         &mut self,
         index: i32,
         conn_id: usize,
-        file_store: &'f_store FileStore,
+        file_store: &FileStore,
     ) -> VecDeque<Subpiece> {
         log::debug!("Allocating piece: conn_id: {conn_id}, index: {index}");
         self.piece_selector.mark_allocated(index, conn_id);
