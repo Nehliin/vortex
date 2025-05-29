@@ -12,7 +12,12 @@ use sha1::Digest;
 use socket2::Socket;
 
 use crate::{
-    event_loop::{ReadState, RefStruct, MAX_QUEUE_SIZE}, file_store::FileStore, peer_comm::extended_protocol::{MetadataExtension, EXTENSIONS}, peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder}, piece_selector::{CompletedPiece, Subpiece, SUBPIECE_SIZE}, Error, TorrentState
+    Error, TorrentState,
+    event_loop::{MAX_QUEUE_SIZE, StateRef},
+    file_store::FileStore,
+    peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension},
+    peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
+    piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
 };
 
 use super::{extended_protocol::ExtensionProtocol, peer_protocol::ParsedHandshake};
@@ -485,7 +490,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     pub fn handle_message(
         &mut self,
         peer_message: PeerMessage,
-        state: &mut RefStruct<'f_store>,
+        state: &mut StateRef<'f_store>,
         scope: &Scope<'scope>,
     ) {
         self.last_seen = Instant::now();
@@ -901,7 +906,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             PeerMessage::Piece { index, begin, data } => {
                 if let Some((read_state, torrent_state)) = state.state() {
                     let file_store = &read_state.file_store;
-                    let torrent_info = &read_state.torrent_info;
+                    let torrent_info = &read_state.metadata;
                     if !self.is_valid_piece(index, begin, data.len(), torrent_state.num_pieces()) {
                         self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                             "Invalid piece message received",
@@ -999,17 +1004,13 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                     // TODO: Deal with reqq as well
                 } else if let Some(ext) = self.extensions.get_mut(&id) {
-                    ext.handle_message(
-                        data,
-                        state,
-                        &mut self.outgoing_msgs_buffer,
-                    )
-                    .unwrap();
+                    ext.handle_message(data, state, &mut self.outgoing_msgs_buffer)
+                        .unwrap();
                 } else {
                     log::error!("Unexpected extended msg");
                 }
             }
-            _ => todo!()
+            _ => todo!(),
         }
     }
 }

@@ -5,6 +5,7 @@ use std::{
     mem::MaybeUninit,
     net::SocketAddrV4,
     os::fd::{AsRawFd, FromRawFd},
+    path::Path,
     sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
 };
@@ -264,35 +265,44 @@ pub struct EventLoop {
 
 pub struct FileAndInfo {
     pub file_store: FileStore,
-    pub torrent_info: Torrent,
+    pub metadata: Torrent,
 }
 
-pub struct ReadState {
-    pub info_hash: [u8; 20],
-    pub full: OnceCell<FileAndInfo>,
+pub struct StateRef<'state> {
+    info_hash: [u8; 20],
+    // TODO: Consider checking this is accessible at construction
+    root: &'state Path,
+    torrent: &'state mut MaybeUninit<TorrentState>,
+    full: &'state OnceCell<FileAndInfo>,
 }
 
-pub struct RefStruct<'a> {
-    torrent: &'a mut MaybeUninit<TorrentState>,
-    full: &'a OnceCell<FileAndInfo>,
-}
-
-impl<'c, 'a: 'c> RefStruct<'a> {
-    pub fn state(&'c mut self) -> Option<(&'a FileAndInfo, &'c mut TorrentState)> {
+impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
+    pub fn info_hash(&self) -> &[u8; 20] {
+        &self.info_hash
+    }
+    pub fn state(&'e_iter mut self) -> Option<(&'state FileAndInfo, &'e_iter mut TorrentState)> {
         if let Some(f) = self.full.get() {
+            // SAFETY: If full has been initialized the torrent must have been initialized
+            // as well
             unsafe { Some((f, (self.torrent).assume_init_mut())) }
         } else {
             None
         }
     }
 
-    pub fn init(&'c mut self, meta: lava_torrent::torrent::v1::Torrent) {
-
-
+    pub fn init(&'e_iter mut self, metadata: lava_torrent::torrent::v1::Torrent) -> io::Result<()> {
+        self.full
+            .set(FileAndInfo {
+                file_store: FileStore::new(self.root, &metadata)?,
+                metadata: metadata.clone(),
+            })
+            .map_err(|_e| io::Error::other("State initialized twice"))?;
+        self.torrent.write(TorrentState::new(&metadata));
+        Ok(())
     }
 }
 
-impl<'a> Drop for RefStruct<'a> {
+impl<'state> Drop for StateRef<'state> {
     fn drop(&mut self) {
         if self.full.get().is_some() {
             // Invariant is that if full is initialized
@@ -304,7 +314,7 @@ impl<'a> Drop for RefStruct<'a> {
     }
 }
 
-impl<'scope, 'f_store: 'scope> EventLoop {
+impl<'scope, 'state: 'scope> EventLoop {
     pub fn new(our_id: PeerId, events: Slab<EventType>, command_rc: Receiver<Command>) -> Self {
         Self {
             events,
@@ -319,39 +329,23 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
     pub fn run(&mut self, mut ring: IoUring, state: DownloadState) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
-        // let (read_state, mut write_state) = match state {
-        //     DownloadState::Metadata { info_hash } => (
-        //         ReadState {
-        //             info_hash,
-        //             full: OnceCell::new(),
-        //         },
-        //         None,
-        //     ),
-        //     DownloadState::Torrent {
-        //         file_store,
-        //         torrent_info,
-        //         state,
-        //     } => {
-        //         let hash = torrent_info.info_hash_bytes().try_into().unwrap();
-        //         let cell = OnceCell::new();
-        //         cell.set(FileAndInfo {
-        //             file_store,
-        //             torrent_info,
-        //         });
-        //         (
-        //             ReadState {
-        //                 info_hash: hash,
-        //                 full: cell,
-        //             },
-        //             Some(state),
-        //         )
-        //     }
-        // };
+        let (info_hash, root) = match state {
+            DownloadState::Metadata { info_hash, root } => ((info_hash, root)),
+            DownloadState::Torrent {
+                file_store,
+                torrent_info,
+                state,
+            } => {
+                unimplemented!()
+            }
+        };
         let mut torrent = MaybeUninit::uninit();
         let full = OnceCell::new();
-        let mut state = RefStruct {
+        let mut state = StateRef {
             torrent: &mut torrent,
             full: &full,
+            info_hash,
+            root: root.as_path(),
         };
         // lambda to be able to catch errors an always unregistering the read ring
         let result = rayon::in_place_scope(|scope| {
@@ -428,9 +422,9 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     }
                 }
 
-                // if let Some(torrent_state) = write_state.as_mut() {
-                //     torrent_state.update_torrent_status(&mut self.connections);
-                // }
+                if let Some((_, torrent_state)) = state.state() {
+                    torrent_state.update_torrent_status(&mut self.connections);
+                }
 
                 for (conn_id, connection) in self.connections.iter_mut() {
                     for msg in connection.outgoing_msgs_buffer.iter_mut() {
@@ -458,12 +452,12 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     return Ok(());
                 }
 
-                // if let Some(torrent_state) = write_state.as_mut() {
-                //     if torrent_state.is_complete {
-                //         log::info!("Torrent complete!");
-                //         return Ok(());
-                //     }
-                // }
+                if let Some((_, torrent_state)) = state.state() {
+                    if torrent_state.is_complete {
+                        log::info!("Torrent complete!");
+                        return Ok(());
+                    }
+                }
             }
         });
 
@@ -580,7 +574,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
         io_event: IoEvent,
-        state: &mut RefStruct<'f_store>,
+        state: &mut StateRef<'state>,
         scope: &Scope<'scope>,
     ) -> io::Result<()> {
         let ret = match io_event.result {
@@ -833,7 +827,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
 fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection: &mut PeerConnection,
-    state: &mut RefStruct<'f_store>,
+    state: &mut StateRef<'f_store>,
     scope: &Scope<'scope>,
 ) {
     while let Some(parse_result) = connection.stateful_decoder.next() {
@@ -852,122 +846,130 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
 }
 
 fn report_tick_metrics(
-    torrent_state: &TorrentState,
+    state: &mut StateRef<'_>,
     connections: &Slab<PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
 ) {
-    let counter = metrics::counter!("pieces_completed");
-    counter.absolute(torrent_state.piece_selector.total_completed() as u64);
-    let gauge = metrics::gauge!("pieces_allocated");
-    gauge.set(torrent_state.piece_selector.total_allocated() as u32);
-    let gauge = metrics::gauge!("num_unchoked");
-    gauge.set(torrent_state.num_unchoked);
+    if let Some((_, torrent_state)) = state.state() {
+        let counter = metrics::counter!("pieces_completed");
+        counter.absolute(torrent_state.piece_selector.total_completed() as u64);
+        let gauge = metrics::gauge!("pieces_allocated");
+        gauge.set(torrent_state.piece_selector.total_allocated() as u32);
+        let gauge = metrics::gauge!("num_unchoked");
+        gauge.set(torrent_state.num_unchoked);
+    }
     let gauge = metrics::gauge!("num_connections");
     gauge.set(connections.len() as u32);
     let gauge = metrics::gauge!("num_pending_connections");
     gauge.set(pending_connections.len() as u32);
 }
 
-pub(crate) fn tick<'scope, 'f_store: 'scope>(
+pub(crate) fn tick<'scope, 'state: 'scope>(
     tick_delta: &Duration,
     connections: &mut Slab<PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
-    torrent_state: &mut RefStruct<'f_store>,
+    torrent_state: &mut StateRef<'state>,
 ) {
-    todo!()
-    // log::info!("Tick!: {}", tick_delta.as_secs_f32());
-    // // 1. Calculate bandwidth (deal with initial start up)
-    // // 2. Go through them in order
-    // // 3. select pieces
-    // for (_, connection) in connections
-    //     .iter_mut()
-    //     // Filter out connections that are pending diconnect
-    //     .filter(|(_, conn)| conn.pending_disconnect.is_none())
-    // {
-    //     if connection.last_seen.elapsed() > Duration::from_secs(120) {
-    //         log::warn!("Timeout due to inactivity: {}", connection.peer_id);
-    //         connection.pending_disconnect = Some(DisconnectReason::Idle);
-    //         continue;
-    //     }
-    //     // TODO: If we are not using fast extension this might be triggered by a snub
-    //     if let Some(time) = connection.last_received_subpiece {
-    //         if time.elapsed() > connection.request_timeout() {
-    //             // error just to make more visible
-    //             log::error!("TIMEOUT: {}", connection.peer_id);
-    //             connection.on_request_timeout(torrent_state, file_store);
-    //         } else if connection.snubbed {
-    //             // Did not timeout
-    //             connection.snubbed = false;
-    //         }
-    //     }
+    log::info!("Tick!: {}", tick_delta.as_secs_f32());
+    // 1. Calculate bandwidth (deal with initial start up)
+    // 2. Go through them in order
+    // 3. select pieces
+    for (_, connection) in connections
+        .iter_mut()
+        // Filter out connections that are pending diconnect
+        .filter(|(_, conn)| conn.pending_disconnect.is_none())
+    {
+        if connection.last_seen.elapsed() > Duration::from_secs(120) {
+            log::warn!("Timeout due to inactivity: {}", connection.peer_id);
+            connection.pending_disconnect = Some(DisconnectReason::Idle);
+            continue;
+        }
+        if let Some((file_and_info, torrent_state)) = torrent_state.state() {
+            // TODO: If we are not using fast extension this might be triggered by a snub
+            if let Some(time) = connection.last_received_subpiece {
+                if time.elapsed() > connection.request_timeout() {
+                    // error just to make more visible
+                    log::error!("TIMEOUT: {}", connection.peer_id);
+                    connection.on_request_timeout(torrent_state, &file_and_info.file_store);
+                } else if connection.snubbed {
+                    // Did not timeout
+                    connection.snubbed = false;
+                }
+            }
 
-    //     // Take delta into account when calculating throughput
-    //     connection.throughput =
-    //         (connection.throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
-    //     if !connection.peer_choking {
-    //         // slow start win size increase is handled in update_stats
-    //         if !connection.slow_start {
-    //             // From the libtorrent impl, request queue time = 3
-    //             let new_queue_capacity =
-    //                 3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
-    //             connection.update_target_inflight(new_queue_capacity as usize);
-    //         }
-    //     }
+            // Take delta into account when calculating throughput
+            connection.throughput =
+                (connection.throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
+            if !connection.peer_choking {
+                // slow start win size increase is handled in update_stats
+                if !connection.slow_start {
+                    // From the libtorrent impl, request queue time = 3
+                    let new_queue_capacity =
+                        3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
+                    connection.update_target_inflight(new_queue_capacity as usize);
+                }
+            }
 
-    //     if !connection.peer_choking
-    //         && connection.slow_start
-    //         && connection.throughput > 0
-    //         && connection.throughput < connection.prev_throughput + 5000
-    //     {
-    //         log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
-    //         connection.slow_start = false;
-    //     }
-    //     connection.prev_throughput = connection.throughput;
-    //     connection.throughput = 0;
-    //     // TODO: add to throughput total stats
-    // }
+            if !connection.peer_choking
+                && connection.slow_start
+                && connection.throughput > 0
+                && connection.throughput < connection.prev_throughput + 5000
+            {
+                log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
+                connection.slow_start = false;
+            }
+            connection.prev_throughput = connection.throughput;
+            connection.throughput = 0;
+            // TODO: add to throughput total stats
+        }
+    }
+    if let Some((file_and_info, torrent_state)) = torrent_state.state() {
+        // Request new pieces and fill up request queues
+        let mut peer_bandwidth: Vec<_> = connections
+            .iter_mut()
+            .filter_map(|(key, peer)| {
+                // Skip connections that are pending disconnect
+                if peer.pending_disconnect.is_none() {
+                    Some((key, peer.remaining_request_queue_spots()))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-    // // Request new pieces and fill up request queues
-    // let mut peer_bandwidth: Vec<_> = connections
-    //     .iter_mut()
-    //     .filter_map(|(key, peer)| {
-    //         // Skip connections that are pending disconnect
-    //         if peer.pending_disconnect.is_none() {
-    //             Some((key, peer.remaining_request_queue_spots()))
-    //         } else {
-    //             None
-    //         }
-    //     })
-    //     .collect();
+        peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
+        for (peer_key, mut bandwidth) in peer_bandwidth {
+            let peer = &mut connections[peer_key];
 
-    // peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
-    // for (peer_key, mut bandwidth) in peer_bandwidth {
-    //     let peer = &mut connections[peer_key];
+            while {
+                let bandwitdth_available_for_new_piece =
+                    bandwidth > (torrent_state.piece_selector.avg_num_subpieces() as usize / 2);
+                let nothing_queued = peer.queued.is_empty();
+                (bandwitdth_available_for_new_piece || nothing_queued) && !peer.peer_choking
+            } {
+                if let Some(next_piece) = torrent_state
+                    .piece_selector
+                    .next_piece(peer_key, &mut peer.endgame)
+                {
+                    let mut queue = torrent_state.allocate_piece(
+                        next_piece,
+                        peer.conn_id,
+                        &file_and_info.file_store,
+                    );
+                    let queue_len = queue.len();
+                    peer.append_and_fill(&mut queue);
+                    // Remove all subpieces from available bandwidth
+                    bandwidth -= (queue_len).min(bandwidth);
+                } else {
+                    break;
+                }
+            }
+            peer.fill_request_queue();
+            peer.report_metrics();
+        }
+    }
 
-    //     while {
-    //         let bandwitdth_available_for_new_piece =
-    //             bandwidth > (torrent_state.piece_selector.avg_num_subpieces() as usize / 2);
-    //         let nothing_queued = peer.queued.is_empty();
-    //         (bandwitdth_available_for_new_piece || nothing_queued) && !peer.peer_choking
-    //     } {
-    //         if let Some(next_piece) = torrent_state
-    //             .piece_selector
-    //             .next_piece(peer_key, &mut peer.endgame)
-    //         {
-    //             let mut queue = torrent_state.allocate_piece(next_piece, peer.conn_id, file_store);
-    //             let queue_len = queue.len();
-    //             peer.append_and_fill(&mut queue);
-    //             // Remove all subpieces from available bandwidth
-    //             bandwidth -= (queue_len).min(bandwidth);
-    //         } else {
-    //             break;
-    //         }
-    //     }
-    //     peer.fill_request_queue();
-    //     peer.report_metrics();
-    // }
-
-    // report_tick_metrics(torrent_state, connections, pending_connections);
+    report_tick_metrics(torrent_state, connections, pending_connections);
 }
 
 #[cfg(test)]

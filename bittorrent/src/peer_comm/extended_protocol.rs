@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
 use crate::{
-    event_loop::{FileAndInfo, ReadState, RefStruct},
+    event_loop::{FileAndInfo, StateRef},
     file_store::FileStore,
     piece_selector::SUBPIECE_SIZE,
 };
@@ -41,7 +41,7 @@ pub trait ExtensionProtocol {
     fn handle_message<'f_store>(
         &mut self,
         data: Bytes,
-        state: &mut RefStruct<'f_store>,
+        state: &mut StateRef<'f_store>,
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
     ) -> Result<(), DisconnectReason>;
     // TODO: fn tick?
@@ -106,10 +106,10 @@ impl MetadataExtension {
 }
 
 impl ExtensionProtocol for MetadataExtension {
-    fn handle_message<'f_store>(
+    fn handle_message<'state>(
         &mut self,
         data: Bytes,
-        state: &mut RefStruct<'f_store>,
+        state: &mut StateRef<'state>,
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
     ) -> Result<(), DisconnectReason> {
         let mut de = Deserializer::from_slice(&data[..]);
@@ -141,8 +141,14 @@ impl ExtensionProtocol for MetadataExtension {
                     hasher.update(&self.metadata);
                     let hash = hasher.finalize();
 
-                    if state.state().is_none() {
-                        let metadata: Value = bt_bencode::from_slice(&self.metadata).unwrap();
+                    if hash.as_slice() != state.info_hash() {
+                        log::error!("Got wrong hash for metadata");
+                        return Err(DisconnectReason::ProtocolError("Metadata hash mismatch"));
+                    } else if state.state().is_none() {
+                        let metadata: Value =
+                            bt_bencode::from_slice(&self.metadata).map_err(|_err| {
+                                DisconnectReason::ProtocolError("Metadata not parsable")
+                            })?;
                         log::error!("META: {:?}", metadata);
                         // META is ALREADY the info value so one needs to either construct
                         let mut parsable = BTreeMap::new();
@@ -153,29 +159,6 @@ impl ExtensionProtocol for MetadataExtension {
                         .unwrap();
                         state.init(torrent);
                     }
-                    // if hash.as_slice() != read_state.info_hash {
-                    //     log::error!("Wrong hash");
-                    //     // TODO DIsconnect
-                    // } else {
-                    //     read_state.full.get_or_init(|| {
-                    //         let metadata: Value = bt_bencode::from_slice(&self.metadata).unwrap();
-                    //         log::error!("META: {:?}", metadata);
-                    //         // META is ALREADY the info value so one needs to either construct
-                    //         let mut parsable = BTreeMap::new();
-                    //         parsable.insert("info", metadata);
-                    //         let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(
-                    //             bt_bencode::to_vec(&parsable).unwrap().as_slice(),
-                    //         )
-                    //         .unwrap();
-                    //         for piece in &torrent.pieces {
-                    //             log::debug!("{:x?}", piece);
-                    //         }
-                    //         FileAndInfo {
-                    //             file_store: FileStore::new("downloaded", &torrent).unwrap(),
-                    //             torrent_info: torrent,
-                    //         }
-                    //     });
-                    // }
                 }
             }
             REJECT => {

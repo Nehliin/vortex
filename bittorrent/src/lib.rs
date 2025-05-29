@@ -3,7 +3,7 @@ use std::{
     io::{self},
     net::TcpListener,
     os::fd::AsRawFd,
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
 };
 
@@ -91,6 +91,7 @@ impl Torrent {
             ring,
             DownloadState::Metadata {
                 info_hash: self.torrent_info.info_hash_bytes().try_into().unwrap(),
+                root: downloads_path.as_ref().to_owned(),
             },
         )
     }
@@ -111,6 +112,7 @@ struct TorrentState {
 enum DownloadState {
     Metadata {
         info_hash: [u8; 20],
+        root: PathBuf,
     },
     Torrent {
         file_store: FileStore,
