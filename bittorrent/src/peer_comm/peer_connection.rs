@@ -183,6 +183,8 @@ pub struct PeerConnection {
     pub allowed_fast_pieces: Vec<i32>,
     // The pieces we allow others to request when choked
     pub accept_fast_pieces: Vec<i32>,
+    // improve
+    pub pre_meta_have_msgs: Vec<PeerMessage>,
 }
 
 impl<'scope, 'f_store: 'scope> PeerConnection {
@@ -215,6 +217,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
             allowed_fast_pieces: Default::default(),
             accept_fast_pieces: Default::default(),
+            pre_meta_have_msgs: Default::default(),
         }
     }
 
@@ -599,7 +602,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 }
             }
             PeerMessage::Have { index } => {
-                // TODO: Keep track of this pre-metadata
                 if let Some((_, torrent_state)) = state.state() {
                     if 0 > index || index >= torrent_state.num_pieces() as i32 {
                         self.pending_disconnect = Some(DisconnectReason::ProtocolError(
@@ -618,6 +620,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     if is_interesting && !self.is_interesting {
                         self.interested(false);
                     }
+                } else {
+                    self.pre_meta_have_msgs.push(PeerMessage::Have { index });
                 }
             }
             PeerMessage::AllowedFast { index } => {
@@ -685,6 +689,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         // Mark ourselves as interested
                         self.interested(true);
                     }
+                } else {
+                    self.pre_meta_have_msgs.push(PeerMessage::HaveAll);
                 }
             }
             PeerMessage::HaveNone => {
@@ -709,6 +715,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     torrent_state
                         .piece_selector
                         .peer_bitfield(self.conn_id, bitfield.into_boxed_bitslice());
+                } else {
+                    self.pre_meta_have_msgs.push(PeerMessage::HaveNone);
                 }
             }
             PeerMessage::Bitfield(mut field) => {
@@ -750,6 +758,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                     // TODO: if unchocked already we should request stuff (in case they are recvd out
                     // of order)
+                } else {
+                    self.pre_meta_have_msgs.push(PeerMessage::Bitfield(field));
                 }
             }
             PeerMessage::SuggestPiece { index } => {
@@ -768,9 +778,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             } => {
                 // returns if it was accepted or not
                 let mut handle_req = || {
-                    let Some((file_info, torrent_state)) = state.state() else {
-                        return None;
-                    };
+                    let (file_info, torrent_state) = state.state()?;
                     if !self.is_valid_piece_req(
                         index,
                         begin,

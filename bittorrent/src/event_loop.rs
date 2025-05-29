@@ -354,6 +354,8 @@ impl<'scope, 'state: 'scope> EventLoop {
             info_hash,
             root: root.as_path(),
         };
+        // consider putting in stateref
+        let mut meta_init = false;
         // lambda to be able to catch errors an always unregistering the read ring
         let result = rayon::in_place_scope(|scope| {
             let (submitter, sq, mut cq) = ring.split();
@@ -393,6 +395,18 @@ impl<'scope, 'state: 'scope> EventLoop {
                         &self.pending_connections,
                         &mut state,
                     );
+
+                    if !meta_init && state.state().is_some() {
+                        meta_init = true;
+                        for (_, connection) in self.connections.iter_mut() {
+                            let msgs = std::mem::take(&mut connection.pre_meta_have_msgs);
+                            // Get all piece msgs
+                            for msg in msgs {
+                                connection.handle_message(msg, &mut state, scope);
+                            }
+                            // TODO: Trigger unchoked peers
+                        }
+                    }
 
                     last_tick = Instant::now();
                     // Dealt with here to make tick easier to test
