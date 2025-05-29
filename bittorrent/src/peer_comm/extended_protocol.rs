@@ -41,7 +41,7 @@ pub trait ExtensionProtocol {
     fn handle_message<'f_store>(
         &mut self,
         data: Bytes,
-        state: &mut RefStruct<'_, 'f_store>,
+        state: &mut RefStruct<'f_store>,
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
     ) -> Result<(), DisconnectReason>;
     // TODO: fn tick?
@@ -109,7 +109,7 @@ impl ExtensionProtocol for MetadataExtension {
     fn handle_message<'f_store>(
         &mut self,
         data: Bytes,
-        state: &mut RefStruct<'_, 'f_store>,
+        state: &mut RefStruct<'f_store>,
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
     ) -> Result<(), DisconnectReason> {
         let mut de = Deserializer::from_slice(&data[..]);

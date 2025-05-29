@@ -272,13 +272,13 @@ pub struct ReadState {
     pub full: OnceCell<FileAndInfo>,
 }
 
-pub struct RefStruct<'a, 'b> {
+pub struct RefStruct<'a> {
     torrent: &'a mut MaybeUninit<TorrentState>,
-    full: &'b OnceCell<FileAndInfo>,
+    full: &'a OnceCell<FileAndInfo>,
 }
 
-impl<'c, 'a: 'c, 'b> RefStruct<'a, 'b> {
-    pub fn state(&'c mut self) -> Option<(&'b FileAndInfo, &'c mut TorrentState)> {
+impl<'c, 'a: 'c> RefStruct<'a> {
+    pub fn state(&'c mut self) -> Option<(&'a FileAndInfo, &'c mut TorrentState)> {
         if let Some(f) = self.full.get() {
             unsafe { Some((f, (self.torrent).assume_init_mut())) }
         } else {
@@ -292,7 +292,7 @@ impl<'c, 'a: 'c, 'b> RefStruct<'a, 'b> {
     }
 }
 
-impl<'a, 'b> Drop for RefStruct<'a, 'b> {
+impl<'a> Drop for RefStruct<'a> {
     fn drop(&mut self) {
         if self.full.get().is_some() {
             // Invariant is that if full is initialized
@@ -580,7 +580,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
         io_event: IoEvent,
-        state: &mut RefStruct<'_, 'f_store>,
+        state: &mut RefStruct<'f_store>,
         scope: &Scope<'scope>,
     ) -> io::Result<()> {
         let ret = match io_event.result {
@@ -833,7 +833,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
 fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection: &mut PeerConnection,
-    state: &mut RefStruct<'_, 'f_store>,
+    state: &mut RefStruct<'f_store>,
     scope: &Scope<'scope>,
 ) {
     while let Some(parse_result) = connection.stateful_decoder.next() {
@@ -872,7 +872,7 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
     tick_delta: &Duration,
     connections: &mut Slab<PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
-    torrent_state: &mut RefStruct<'_, 'f_store>,
+    torrent_state: &mut RefStruct<'f_store>,
 ) {
     todo!()
     // log::info!("Tick!: {}", tick_delta.as_secs_f32());

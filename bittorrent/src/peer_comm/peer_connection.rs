@@ -485,7 +485,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     pub fn handle_message(
         &mut self,
         peer_message: PeerMessage,
-        state: &mut RefStruct<'_, 'f_store>,
+        state: &mut RefStruct<'f_store>,
         scope: &Scope<'scope>,
     ) {
         self.last_seen = Instant::now();
