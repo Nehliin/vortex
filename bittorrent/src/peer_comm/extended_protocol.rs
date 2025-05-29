@@ -149,7 +149,7 @@ impl ExtensionProtocol for MetadataExtension {
                             bt_bencode::from_slice(&self.metadata).map_err(|_err| {
                                 DisconnectReason::ProtocolError("Metadata not parsable")
                             })?;
-                        log::error!("META: {:?}", metadata);
+                        //log::error!("META: {:?}", metadata);
                         // META is ALREADY the info value so one needs to either construct
                         let mut parsable = BTreeMap::new();
                         parsable.insert("info", metadata);
@@ -157,7 +157,7 @@ impl ExtensionProtocol for MetadataExtension {
                             bt_bencode::to_vec(&parsable).unwrap().as_slice(),
                         )
                         .unwrap();
-                        state.init(torrent);
+                        state.init(torrent).unwrap();
                     }
                 }
             }

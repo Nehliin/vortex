@@ -1060,7 +1060,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     log::error!("Unexpected extended msg");
                 }
             }
-            _ => todo!(),
         }
     }
 }
