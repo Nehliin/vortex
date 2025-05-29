@@ -1046,11 +1046,13 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                         .as_u64()
                                         .unwrap() as usize,
                                 );
-                                for i in 0..16.min(metadata.num_pieces()) {
-                                    self.outgoing_msgs_buffer.push(OutgoingMsg {
-                                        message: metadata.request(i as i32),
-                                        ordered: false,
-                                    });
+                                if state.state().is_none() {
+                                    for i in 0..16.min(metadata.num_pieces()) {
+                                        self.outgoing_msgs_buffer.push(OutgoingMsg {
+                                            message: metadata.request(i as i32),
+                                            ordered: false,
+                                        });
+                                    }
                                 }
                                 let id = EXTENSIONS
                                     .iter()

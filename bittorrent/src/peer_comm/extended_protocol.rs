@@ -28,8 +28,7 @@ pub fn extension_handshake_msg() -> PeerMessage {
     // TODO: t
     handshake.insert(
         "v",
-        bt_bencode::value::to_value(dbg!(&format!("Vortex {}", env!("CARGO_PKG_VERSION"))))
-            .unwrap(),
+        bt_bencode::value::to_value(&format!("Vortex {}", env!("CARGO_PKG_VERSION"))).unwrap(),
     );
     PeerMessage::Extended {
         id: 0,
