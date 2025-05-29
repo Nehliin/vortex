@@ -64,12 +64,12 @@ pub enum Command {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn event_error_handler<Q: SubmissionQueue>(
+fn event_error_handler<'state, Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     error_code: u32,
     user_data: UserData,
     events: &mut Slab<EventType>,
-    torrent_state: &mut TorrentState,
+    state: &mut StateRef<'state>,
     connections: &mut Slab<PeerConnection>,
     pending_connections: &mut HashSet<SockAddr>,
     bgid: Bgid,
@@ -128,10 +128,13 @@ fn event_error_handler<Q: SubmissionQueue>(
                 | EventType::ConnectedWrite { connection_idx } => {
                     let mut connection = connections.remove(connection_idx);
                     log::error!("Peer [{}] Connection reset", connection.peer_id);
-                    connection.release_all_pieces(torrent_state);
-                    if !connection.is_choking {
-                        torrent_state.num_unchoked -= 1;
+                    if let Some((_, torrent_state)) = state.state() {
+                        connection.release_all_pieces(torrent_state);
+                        if !connection.is_choking {
+                            torrent_state.num_unchoked -= 1;
+                        }
                     }
+
                     io_utils::close_socket(sq, connection.socket, events);
                 }
                 _ => unreachable!(),
@@ -152,10 +155,12 @@ fn event_error_handler<Q: SubmissionQueue>(
                         "Peer [{}] EPIPE received when writing to connection",
                         connection.peer_id
                     );
-                    connection.release_all_pieces(torrent_state);
-                    // Don't count disconnected peers
-                    if !connection.is_choking {
-                        torrent_state.num_unchoked -= 1;
+                    if let Some((_, torrent_state)) = state.state() {
+                        connection.release_all_pieces(torrent_state);
+                        // Don't count disconnected peers
+                        if !connection.is_choking {
+                            torrent_state.num_unchoked -= 1;
+                        }
                     }
                     io_utils::close_socket(sq, connection.socket, events);
                 }
@@ -207,10 +212,12 @@ fn event_error_handler<Q: SubmissionQueue>(
                     | EventType::Shutdown { connection_idx } => {
                         let mut connection = connections.remove(connection_idx);
                         log::error!("Peer [{}] unhandled error: {err}", connection.peer_id);
-                        connection.release_all_pieces(torrent_state);
-                        // Don't count disconnected peers
-                        if !connection.is_choking {
-                            torrent_state.num_unchoked -= 1;
+                        if let Some((_, torrent_state)) = state.state() {
+                            connection.release_all_pieces(torrent_state);
+                            // Don't count disconnected peers
+                            if !connection.is_choking {
+                                torrent_state.num_unchoked -= 1;
+                            }
                         }
                         io_utils::close_socket(sq, connection.socket, events);
                     }
@@ -580,17 +587,16 @@ impl<'scope, 'state: 'scope> EventLoop {
         let ret = match io_event.result {
             Ok(ret) => ret,
             Err(error_code) => {
-                // return event_error_handler(
-                //     sq,
-                //     error_code,
-                //     io_event.user_data,
-                //     &mut self.events,
-                //     torrent_state,
-                //     &mut self.connections,
-                //     &mut self.pending_connections,
-                //     self.read_ring.bgid(),
-                // );
-                todo!()
+                return event_error_handler(
+                    sq,
+                    error_code,
+                    io_event.user_data,
+                    &mut self.events,
+                    state,
+                    &mut self.connections,
+                    &mut self.pending_connections,
+                    self.read_ring.bgid(),
+                );
             }
         };
         let mut event = EventType::Dummy;
@@ -599,184 +605,174 @@ impl<'scope, 'state: 'scope> EventLoop {
             &mut self.events[io_event.user_data.event_idx as usize],
         );
         match event {
-            // EventType::Accept => {
-            //     // The event is reused and not replaced
-            //     std::mem::swap(
-            //         &mut event,
-            //         &mut self.events[io_event.user_data.event_idx as usize],
-            //     );
-            //     let fd = ret;
-            //     let socket = unsafe { Socket::from_raw_fd(fd) };
-            //     let addr = socket.peer_addr()?;
-            //     if addr.is_ipv6() {
-            //         log::error!("Received connection from non ipv4 addr");
-            //         return Ok(());
-            //     };
+            EventType::Accept => {
+                // The event is reused and not replaced
+                std::mem::swap(
+                    &mut event,
+                    &mut self.events[io_event.user_data.event_idx as usize],
+                );
+                let fd = ret;
+                let socket = unsafe { Socket::from_raw_fd(fd) };
+                let addr = socket.peer_addr()?;
+                if addr.is_ipv6() {
+                    log::error!("Received connection from non ipv4 addr");
+                    return Ok(());
+                };
 
-            //     log::info!("Accepted connection: {addr:?}");
-            //     // Construct new recv token on accept, after that it lives forever and or is reused
-            //     // since this is a recvmulti operation
-            //     let read_token = self.events.insert(EventType::Recv { socket, addr });
-            //     let user_data = UserData::new(read_token, None);
-            //     let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
-            //         .build()
-            //         .user_data(user_data.as_u64())
-            //         .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-            //     sq.push(read_op);
-            // }
-            // EventType::Connect { socket, addr } => {
-            //     log::info!("Connected to: {addr:?}");
-            //     let connect_success_counter = metrics::counter!("peer_connect_success");
-            //     connect_success_counter.increment(1);
+                log::info!("Accepted connection: {addr:?}");
+                // Construct new recv token on accept, after that it lives forever and or is reused
+                // since this is a recvmulti operation
+                let read_token = self.events.insert(EventType::Recv { socket, addr });
+                let user_data = UserData::new(read_token, None);
+                let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
+                    .build()
+                    .user_data(user_data.as_u64())
+                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
+                sq.push(read_op);
+            }
+            EventType::Connect { socket, addr } => {
+                log::info!("Connected to: {addr:?}");
+                let connect_success_counter = metrics::counter!("peer_connect_success");
+                connect_success_counter.increment(1);
 
-            //     let buffer = self.write_pool.get_buffer();
-            //     write_handshake(self.our_id, torrent_state.info_hash, buffer.inner);
-            //     let fd = socket.as_raw_fd();
-            //     // The event is replaced (this removes the dummy)
-            //     let old = std::mem::replace(
-            //         &mut self.events[io_event.user_data.event_idx as usize],
-            //         EventType::Write { socket, addr },
-            //     );
-            //     debug_assert!(matches!(old, EventType::Dummy));
-            //     let write_token = io_event.user_data.event_idx as usize;
-            //     let user_data = UserData::new(write_token, Some(buffer.index));
-            //     let write_op = opcode::Write::new(
-            //         types::Fd(fd),
-            //         buffer.inner.as_ptr(),
-            //         // TODO: Handle this better
-            //         HANDSHAKE_SIZE as u32,
-            //     )
-            //     .build()
-            //     .user_data(user_data.as_u64());
-            //     sq.push(write_op);
-            // }
-            // EventType::Write { socket, addr } => {
-            //     let fd = socket.as_raw_fd();
-            //     log::debug!("Wrote to unestablsihed connection");
-            //     // The event is replaced (this removes the dummy)
-            //     let old = std::mem::replace(
-            //         &mut self.events[io_event.user_data.event_idx as usize],
-            //         EventType::Recv { socket, addr },
-            //     );
-            //     // Write is only used for unestablished connections aka when doing handshake
-            //     let handshake_counter = metrics::counter!("peer_handshake_attempt");
-            //     handshake_counter.increment(1);
-            //     debug_assert!(matches!(old, EventType::Dummy));
-            //     let read_token = io_event.user_data.event_idx as usize;
-            //     let user_data = UserData::new(read_token, None);
-            //     // Multishot isn't used here to simplify error handling
-            //     // when the read is invalid or otherwise doesn't lead to
-            //     // a full connection which does have graceful shutdown mechanisms
-            //     io_utils::recv(
-            //         sq,
-            //         user_data,
-            //         fd,
-            //         self.read_ring.bgid(),
-            //         HANDSHAKE_TIMEOUT_SECS,
-            //     );
-            // }
-            // EventType::ConnectedWrite { connection_idx: _ }
-            // | EventType::Cancel { connection_idx: _ }
-            // | EventType::Shutdown { connection_idx: _ } => {
-            //     // neither replaced nor modified
-            //     // TODO: add to metrics for writes?
-            //     self.events.remove(io_event.user_data.event_idx as _);
-            // }
-            // EventType::Recv { socket, addr: _ } => {
-            //     let fd = socket.as_raw_fd();
-            //     let len = ret as usize;
-            //     if len == 0 {
-            //         log::debug!("No more data when expecting handshake");
-            //         self.events.remove(io_event.user_data.event_idx as _);
-            //         return Ok(());
-            //     }
-            //     // TODO: This could happen due to networks splitting the handshake up
-            //     // so it should be dealt with better, but since the handshake is so
-            //     // small (well below MTU) I suspect that to be rare
-            //     if len < HANDSHAKE_SIZE {
-            //         log::error!("Didn't receive enough data to parse handshake");
-            //         self.events.remove(io_event.user_data.event_idx as _);
-            //         return Err(io::ErrorKind::InvalidData.into());
-            //     }
-            //     // We always have a buffer associated
-            //     let buffer = io_event
-            //         .read_bid
-            //         .map(|bid| self.read_ring.get(bid))
-            //         .unwrap();
-            //     let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
-            //     // Expect this to be the handshake response
-            //     let parsed_handshake =
-            //         parse_handshake(torrent_state.info_hash, handshake_data).unwrap();
-            //     assert!(
-            //         self.pending_connections
-            //             .remove(&socket.peer_addr().unwrap())
-            //     );
+                let buffer = self.write_pool.get_buffer();
+                write_handshake(self.our_id, state.info_hash, buffer.inner);
+                let fd = socket.as_raw_fd();
+                // The event is replaced (this removes the dummy)
+                let old = std::mem::replace(
+                    &mut self.events[io_event.user_data.event_idx as usize],
+                    EventType::Write { socket, addr },
+                );
+                debug_assert!(matches!(old, EventType::Dummy));
+                let write_token = io_event.user_data.event_idx as usize;
+                let user_data = UserData::new(write_token, Some(buffer.index));
+                let write_op = opcode::Write::new(
+                    types::Fd(fd),
+                    buffer.inner.as_ptr(),
+                    // TODO: Handle this better
+                    HANDSHAKE_SIZE as u32,
+                )
+                .build()
+                .user_data(user_data.as_u64());
+                sq.push(write_op);
+            }
+            EventType::Write { socket, addr } => {
+                let fd = socket.as_raw_fd();
+                log::debug!("Wrote to unestablsihed connection");
+                // The event is replaced (this removes the dummy)
+                let old = std::mem::replace(
+                    &mut self.events[io_event.user_data.event_idx as usize],
+                    EventType::Recv { socket, addr },
+                );
+                // Write is only used for unestablished connections aka when doing handshake
+                let handshake_counter = metrics::counter!("peer_handshake_attempt");
+                handshake_counter.increment(1);
+                debug_assert!(matches!(old, EventType::Dummy));
+                let read_token = io_event.user_data.event_idx as usize;
+                let user_data = UserData::new(read_token, None);
+                // Multishot isn't used here to simplify error handling
+                // when the read is invalid or otherwise doesn't lead to
+                // a full connection which does have graceful shutdown mechanisms
+                io_utils::recv(
+                    sq,
+                    user_data,
+                    fd,
+                    self.read_ring.bgid(),
+                    HANDSHAKE_TIMEOUT_SECS,
+                );
+            }
+            EventType::ConnectedWrite { connection_idx: _ }
+            | EventType::Cancel { connection_idx: _ }
+            | EventType::Shutdown { connection_idx: _ } => {
+                // neither replaced nor modified
+                // TODO: add to metrics for writes?
+                self.events.remove(io_event.user_data.event_idx as _);
+            }
+            EventType::Recv { socket, addr: _ } => {
+                let fd = socket.as_raw_fd();
+                let len = ret as usize;
+                if len == 0 {
+                    log::debug!("No more data when expecting handshake");
+                    self.events.remove(io_event.user_data.event_idx as _);
+                    return Ok(());
+                }
+                // TODO: This could happen due to networks splitting the handshake up
+                // so it should be dealt with better, but since the handshake is so
+                // small (well below MTU) I suspect that to be rare
+                if len < HANDSHAKE_SIZE {
+                    log::error!("Didn't receive enough data to parse handshake");
+                    self.events.remove(io_event.user_data.event_idx as _);
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                // We always have a buffer associated
+                let buffer = io_event
+                    .read_bid
+                    .map(|bid| self.read_ring.get(bid))
+                    .unwrap();
+                let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
+                // Expect this to be the handshake response
+                let parsed_handshake = parse_handshake(state.info_hash, handshake_data).unwrap();
+                assert!(
+                    self.pending_connections
+                        .remove(&socket.peer_addr().unwrap())
+                );
 
-            //     let entry = self.connections.vacant_entry();
-            //     let conn_id = entry.key();
-            //     let peer_connection = PeerConnection::new(socket, conn_id, parsed_handshake);
-            //     let id = peer_connection.peer_id;
-            //     entry.insert(peer_connection);
-            //     log::info!("Finished handshake! [{conn_id}]: {id}");
-            //     let handshake_success_counter = metrics::counter!("peer_handshake_success");
-            //     handshake_success_counter.increment(1);
-            //     // We are now connected!
-            //     // The event is replaced (this removes the dummy)
-            //     let old = std::mem::replace(
-            //         &mut self.events[io_event.user_data.event_idx as usize],
-            //         EventType::ConnectedRecv {
-            //             connection_idx: conn_id,
-            //         },
-            //     );
-            //     debug_assert!(matches!(old, EventType::Dummy));
+                let entry = self.connections.vacant_entry();
+                let conn_id = entry.key();
+                let peer_connection = PeerConnection::new(socket, conn_id, parsed_handshake);
+                let id = peer_connection.peer_id;
+                entry.insert(peer_connection);
+                log::info!("Finished handshake! [{conn_id}]: {id}");
+                let handshake_success_counter = metrics::counter!("peer_handshake_success");
+                handshake_success_counter.increment(1);
+                // We are now connected!
+                // The event is replaced (this removes the dummy)
+                let old = std::mem::replace(
+                    &mut self.events[io_event.user_data.event_idx as usize],
+                    EventType::ConnectedRecv {
+                        connection_idx: conn_id,
+                    },
+                );
+                debug_assert!(matches!(old, EventType::Dummy));
 
-            //     // The initial Recv might have contained more data
-            //     // than just the handshake so need to handle that here
-            //     // since the read_buffer will be overwritten by the next
-            //     // incoming recv cqe
-            //     let connection = &mut self.connections[conn_id];
-            //     connection.stateful_decoder.append_data(remainder);
-            //     let completed = torrent_state.piece_selector.completed_clone();
-            //     conn_parse_and_handle_msgs(
-            //         connection,
-            //         torrent_state,
-            //         read_state,
-            //         scope,
-            //     );
-            //     // Recv has been complete, move over to multishot, same user data
-            //     io_utils::recv_multishot(sq, io_event.user_data, fd, self.read_ring.bgid());
-            //     let message = if completed.all() {
-            //         peer_protocol::PeerMessage::HaveAll
-            //     } else if completed.not_any() {
-            //         peer_protocol::PeerMessage::HaveNone
-            //     } else {
-            //         peer_protocol::PeerMessage::Bitfield(completed.into())
-            //     };
-            //     if connection.extended_extension {
-            //         connection.outgoing_msgs_buffer.push(OutgoingMsg {
-            //             message: extension_handshake_msg(),
-            //             ordered: true,
-            //         });
-            //     }
-            //     // sent as first message after handshake
-            //     let bitfield_msg = OutgoingMsg {
-            //         message,
-            //         ordered: true,
-            //     };
-            //     connection.outgoing_msgs_buffer.push(bitfield_msg);
-            //     // let buffer = self.write_pool.get_buffer();
-            //     // bitfield_msg.message.encode(buffer.inner);
-            //     // let size = bitfield_msg.message.encoded_size();
-            //     // io_utils::write_to_connection(
-            //     //     conn_id,
-            //     //     fd,
-            //     //     &mut self.events,
-            //     //     sq,
-            //     //     buffer.index,
-            //     //     &buffer.inner[..size],
-            //     //     bitfield_msg.ordered,
-            //     // );
-            // }
+                // The initial Recv might have contained more data
+                // than just the handshake so need to handle that here
+                // since the read_buffer will be overwritten by the next
+                // incoming recv cqe
+                let connection = &mut self.connections[conn_id];
+                connection.stateful_decoder.append_data(remainder);
+                conn_parse_and_handle_msgs(connection, state, scope);
+                if connection.extended_extension {
+                    connection.outgoing_msgs_buffer.push(OutgoingMsg {
+                        message: extension_handshake_msg(),
+                        ordered: true,
+                    });
+                }
+                // Recv has been complete, move over to multishot, same user data
+                io_utils::recv_multishot(sq, io_event.user_data, fd, self.read_ring.bgid());
+
+                let bitfield_msg = if let Some((_, torrent_state)) = state.state() {
+                    let completed = torrent_state.piece_selector.completed_clone();
+                    let message = if completed.all() {
+                        peer_protocol::PeerMessage::HaveAll
+                    } else if completed.not_any() {
+                        peer_protocol::PeerMessage::HaveNone
+                    } else {
+                        peer_protocol::PeerMessage::Bitfield(completed.into())
+                    };
+                    // sent as first message after handshake
+                    OutgoingMsg {
+                        message,
+                        ordered: true,
+                    }
+                } else {
+                    OutgoingMsg {
+                        message: peer_protocol::PeerMessage::HaveNone,
+                        ordered: true,
+                    }
+                };
+                connection.outgoing_msgs_buffer.push(bitfield_msg);
+            }
             EventType::ConnectedRecv { connection_idx } => {
                 // The event is reused and not replaced
                 std::mem::swap(
@@ -791,11 +787,14 @@ impl<'scope, 'state: 'scope> EventLoop {
                         connection.peer_id
                     );
                     self.events.remove(io_event.user_data.event_idx as _);
-                    // connection.release_all_pieces(torrent_state);
-                    // // Don't count disconnected peers
-                    // if !connection.is_choking {
-                    //     torrent_state.num_unchoked -= 1;
-                    // }
+                    // Consider moving to func
+                    if let Some((_, torrent_state)) = state.state() {
+                        connection.release_all_pieces(torrent_state);
+                        // Don't count disconnected peers
+                        if !connection.is_choking {
+                            torrent_state.num_unchoked -= 1;
+                        }
+                    }
                     io_utils::close_socket(sq, connection.socket, &mut self.events);
                     return Ok(());
                 }
@@ -819,7 +818,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                 self.events.remove(io_event.user_data.event_idx as _);
             }
             EventType::Dummy => unreachable!(),
-            _ => todo!(),
         }
         Ok(())
     }
