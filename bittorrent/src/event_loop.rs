@@ -150,19 +150,24 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                     io_utils::close_socket(sq, socket, events);
                 }
                 EventType::ConnectedWrite { connection_idx } => {
-                    let mut connection = connections.remove(connection_idx);
-                    log::error!(
-                        "Peer [{}] EPIPE received when writing to connection",
-                        connection.peer_id
-                    );
-                    if let Some((_, torrent_state)) = state.state() {
-                        connection.release_all_pieces(torrent_state);
-                        // Don't count disconnected peers
-                        if !connection.is_choking {
-                            torrent_state.num_unchoked -= 1;
+                    if let Some(mut connection) = connections.try_remove(connection_idx) {
+                        log::error!(
+                            "Peer [{}] EPIPE received when writing to connection",
+                            connection.peer_id
+                        );
+                        if let Some((_, torrent_state)) = state.state() {
+                            connection.release_all_pieces(torrent_state);
+                            // Don't count disconnected peers
+                            if !connection.is_choking {
+                                torrent_state.num_unchoked -= 1;
+                            }
                         }
+                        io_utils::close_socket(sq, connection.socket, events);
+                    } else {
+                        // I guess this might happpen when multiple writes are queued up after
+                        // each other
+                        log::warn!("PIPE received after connection has already been removed",);
                     }
-                    io_utils::close_socket(sq, connection.socket, events);
                 }
 
                 _ => unreachable!(),
