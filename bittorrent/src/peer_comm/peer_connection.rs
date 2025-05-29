@@ -13,7 +13,7 @@ use socket2::Socket;
 
 use crate::{
     Error, TorrentState,
-    event_loop::{MAX_QUEUE_SIZE, StateRef},
+    event_loop::StateRef,
     file_store::FileStore,
     peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
@@ -153,6 +153,7 @@ pub struct PeerConnection {
     pub peer_interested: bool,
     // Target number of inflight requests
     pub target_inflight: usize,
+    pub max_queue_size: usize,
     // Current inflight requests, may have timed out
     pub inflight: VecDeque<Subpiece>,
     // Queued requests
@@ -208,6 +209,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             last_seen: Instant::now(),
             slow_start: true,
             snubbed: false,
+            max_queue_size: 200,
             moving_rtt: Default::default(),
             pending_disconnect: None,
             throughput: 0,
@@ -313,7 +315,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             self.target_inflight = 1;
             return;
         }
-        self.target_inflight = target_inflight.clamp(0, MAX_QUEUE_SIZE);
+        self.target_inflight = target_inflight.clamp(0, self.max_queue_size);
         self.target_inflight = self.target_inflight.max(1);
     }
 
@@ -1060,6 +1062,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                     .expect("Extension ID expected to be found");
                                 self.extensions.insert(*id, Box::new(metadata));
                             }
+                        }
+
+                        if let Some(max_queue_size) = dict.get("reqq".as_bytes()).and_then(|val| val.as_u64()) {
+                            self.max_queue_size = max_queue_size as usize;
                         }
                     }
                     // TODO: Deal with reqq as well
