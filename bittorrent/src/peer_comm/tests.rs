@@ -9,7 +9,10 @@ use crate::{
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
     peer_connection::OutgoingMsg,
     piece_selector::{SUBPIECE_SIZE, Subpiece},
-    test_utils::{generate_peer, setup_test, setup_uninitialized_test, setup_uninitialized_test_with_metadata_size},
+    test_utils::{
+        generate_peer, setup_test, setup_uninitialized_test,
+        setup_uninitialized_test_with_metadata_size,
+    },
 };
 
 use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};
@@ -2031,7 +2034,7 @@ fn extension_handshake_generates_correct_message() {
     if let PeerMessage::Extended { id, data } = handshake {
         assert_eq!(id, 0); // Handshake uses ID 0
 
-         let expected_size = state_ref
+        let expected_size = state_ref
             .state()
             .unwrap()
             .0
@@ -2042,14 +2045,14 @@ fn extension_handshake_generates_correct_message() {
         // Parse the bencoded data to verify structure
         let parsed: bt_bencode::Value = bt_bencode::from_slice(&data).unwrap();
         let dict = parsed.as_dict().unwrap();
-        
+
         // Should contain 'm' field with ut_metadata
         assert!(dict.contains_key("m".as_bytes()));
         let m = dict.get("m".as_bytes()).unwrap().as_dict().unwrap();
         assert!(m.contains_key("ut_metadata".as_bytes()));
-        
+
         assert!(dict.contains_key("v".as_bytes()));
-        
+
         assert_eq!(
             dict.get("reqq".as_bytes()).unwrap().as_u64().unwrap(),
             MAX_OUTSTANDING_REQUESTS
@@ -2066,24 +2069,23 @@ fn extension_handshake_generates_correct_message() {
     }
 }
 
-
-#[test] 
+#[test]
 fn metadata_download_single_piece() {
     let (mut download_state, torrent_info) = setup_uninitialized_test();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
-        
+
         // Verify state is not initialized
         assert!(!state_ref.is_initialzied());
         assert!(state_ref.state().is_none());
-        
+
         let mut a = generate_peer(true, 0);
         a.extended_extension = true;
-        
+
         // Get the actual metadata that should be downloaded
         let metadata_bytes = torrent_info.construct_info().encode();
-        
+
         // Set up extension handshake - peer tells us they have metadata of this size
         let handshake_data = format!(
             "d1:md11:ut_metadatai3ee13:metadata_sizei{}ee",
@@ -2097,51 +2099,59 @@ fn metadata_download_single_piece() {
             &mut state_ref,
             scope,
         );
-        
+
         // Should have created metadata extension and sent requests
         assert!(!a.extensions.is_empty());
         assert!(a.extensions.contains_key(&1)); // ut_metadata extension ID
         assert!(!a.outgoing_msgs_buffer.is_empty()); // Should have sent metadata requests
-        
-        // Clear outgoing messages 
+
+        // Clear outgoing messages
         a.outgoing_msgs_buffer.clear();
-        
+
         // Since metadata is small (< 16KiB), it should be a single piece
-        let mut data_msg = format!("d8:msg_typei1e5:piecei0e10:total_sizei{}ee", metadata_bytes.len())
-            .as_bytes()
-            .to_vec();
+        let mut data_msg = format!(
+            "d8:msg_typei1e5:piecei0e10:total_sizei{}ee",
+            metadata_bytes.len()
+        )
+        .as_bytes()
+        .to_vec();
         data_msg.extend_from_slice(&metadata_bytes);
-        
-                 // Send the metadata as a DATA message
-         a.handle_message(
-             PeerMessage::Extended {
-                 id: 1, // ut_metadata extension ID from our side
-                 data: data_msg.into(),
-             },
-             &mut state_ref,
-             scope,
-         );
-         
-         // Check if there was a hash mismatch or other error
-         if let Some(reason) = &a.pending_disconnect {
-             panic!("Peer got disconnected: {:?}", reason);
-         }
-         
-         // State should now be initialized with the downloaded metadata
-         if !state_ref.is_initialzied() {
-             // Let's check what went wrong - maybe the metadata size doesn't match?
-             panic!("State was not initialized after receiving metadata. Metadata size: {}, Expected info hash: {:?}", 
-                    metadata_bytes.len(), 
-                    state_ref.info_hash());
-         }
-         
-         let (file_and_meta, torrent_state) = state_ref.state().unwrap();
-         
-         // Verify the metadata matches what we sent
-         assert_eq!(file_and_meta.metadata.construct_info().encode(), metadata_bytes);
-         assert_eq!(torrent_state.num_pieces(), torrent_info.pieces.len());
-         
-         assert!(a.pending_disconnect.is_none());
+
+        // Send the metadata as a DATA message
+        a.handle_message(
+            PeerMessage::Extended {
+                id: 1, // ut_metadata extension ID from our side
+                data: data_msg.into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        // Check if there was a hash mismatch or other error
+        if let Some(reason) = &a.pending_disconnect {
+            panic!("Peer got disconnected: {:?}", reason);
+        }
+
+        // State should now be initialized with the downloaded metadata
+        if !state_ref.is_initialzied() {
+            // Let's check what went wrong - maybe the metadata size doesn't match?
+            panic!(
+                "State was not initialized after receiving metadata. Metadata size: {}, Expected info hash: {:?}",
+                metadata_bytes.len(),
+                state_ref.info_hash()
+            );
+        }
+
+        let (file_and_meta, torrent_state) = state_ref.state().unwrap();
+
+        // Verify the metadata matches what we sent
+        assert_eq!(
+            file_and_meta.metadata.construct_info().encode(),
+            metadata_bytes
+        );
+        assert_eq!(torrent_state.num_pieces(), torrent_info.pieces.len());
+
+        assert!(a.pending_disconnect.is_none());
     });
 }
 
@@ -2152,22 +2162,28 @@ fn metadata_download_multiple_pieces() {
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
-        
+
         // Verify state is not initialized
         assert!(!state_ref.is_initialzied());
-        
+
         let mut a = generate_peer(true, 0);
         a.extended_extension = true;
-        
+
         // Get the actual metadata - this should now be large enough to require multiple pieces
         let metadata_bytes = torrent_info.construct_info().encode();
-        println!("Metadata size: {} bytes (should be > {} for multi-piece)", 
-                 metadata_bytes.len(), SUBPIECE_SIZE);
-        
+        println!(
+            "Metadata size: {} bytes (should be > {} for multi-piece)",
+            metadata_bytes.len(),
+            SUBPIECE_SIZE
+        );
+
         // Verify we have large enough metadata to test multi-piece download
-        assert!(metadata_bytes.len() > SUBPIECE_SIZE as usize, 
-                "Metadata should be larger than {} bytes to test multi-piece download", SUBPIECE_SIZE);
-        
+        assert!(
+            metadata_bytes.len() > SUBPIECE_SIZE as usize,
+            "Metadata should be larger than {} bytes to test multi-piece download",
+            SUBPIECE_SIZE
+        );
+
         // Set up extension handshake
         let handshake_data = format!(
             "d1:md11:ut_metadatai3ee13:metadata_sizei{}ee",
@@ -2181,27 +2197,34 @@ fn metadata_download_multiple_pieces() {
             &mut state_ref,
             scope,
         );
-        
+
         // Should have requested multiple pieces
         assert!(!a.outgoing_msgs_buffer.is_empty());
         a.outgoing_msgs_buffer.clear();
-        
+
         // Calculate the number of pieces needed
         let piece_size = SUBPIECE_SIZE as usize;
-        let num_pieces = (metadata_bytes.len() + piece_size - 1) / piece_size;
-        println!("Will need {} pieces to download {} bytes of metadata", num_pieces, metadata_bytes.len());
-        
+        let num_pieces = metadata_bytes.len().div_ceil(piece_size);
+        println!(
+            "Will need {} pieces to download {} bytes of metadata",
+            num_pieces,
+            metadata_bytes.len()
+        );
+
         // Send all pieces except the last one
         for piece_idx in 0..(num_pieces - 1) {
             let start_offset = piece_idx * piece_size;
             let end_offset = start_offset + piece_size;
-            
-            let mut data_msg = format!("d8:msg_typei1e5:piecei{}e10:total_sizei{}ee", 
-                                      piece_idx, metadata_bytes.len())
-                .as_bytes()
-                .to_vec();
+
+            let mut data_msg = format!(
+                "d8:msg_typei1e5:piecei{}e10:total_sizei{}ee",
+                piece_idx,
+                metadata_bytes.len()
+            )
+            .as_bytes()
+            .to_vec();
             data_msg.extend_from_slice(&metadata_bytes[start_offset..end_offset]);
-            
+
             a.handle_message(
                 PeerMessage::Extended {
                     id: 1,
@@ -2210,22 +2233,25 @@ fn metadata_download_multiple_pieces() {
                 &mut state_ref,
                 scope,
             );
-            
+
             // Should still not be initialized, but may request next piece
             assert!(!state_ref.is_initialzied());
             a.outgoing_msgs_buffer.clear();
         }
-        
+
         // Send the final piece
         let final_piece_idx = num_pieces - 1;
         let start_offset = final_piece_idx * piece_size;
-        
-        let mut data_msg = format!("d8:msg_typei1e5:piecei{}e10:total_sizei{}ee", 
-                                  final_piece_idx, metadata_bytes.len())
-            .as_bytes()
-            .to_vec();
+
+        let mut data_msg = format!(
+            "d8:msg_typei1e5:piecei{}e10:total_sizei{}ee",
+            final_piece_idx,
+            metadata_bytes.len()
+        )
+        .as_bytes()
+        .to_vec();
         data_msg.extend_from_slice(&metadata_bytes[start_offset..]);
-        
+
         a.handle_message(
             PeerMessage::Extended {
                 id: 1,
@@ -2234,19 +2260,25 @@ fn metadata_download_multiple_pieces() {
             &mut state_ref,
             scope,
         );
-        
+
         // Now the state should be initialized with the complete metadata
         if let Some(reason) = &a.pending_disconnect {
             panic!("Peer got disconnected: {:?}", reason);
         }
-        
-        assert!(state_ref.is_initialzied(), "State should be initialized after receiving all metadata pieces");
+
+        assert!(
+            state_ref.is_initialzied(),
+            "State should be initialized after receiving all metadata pieces"
+        );
         let (file_and_meta, torrent_state) = state_ref.state().unwrap();
-        
+
         // Verify the metadata matches what we sent
-        assert_eq!(file_and_meta.metadata.construct_info().encode(), metadata_bytes);
+        assert_eq!(
+            file_and_meta.metadata.construct_info().encode(),
+            metadata_bytes
+        );
         assert_eq!(torrent_state.num_pieces(), torrent_info.pieces.len());
-        
+
         assert!(a.pending_disconnect.is_none());
     });
 }

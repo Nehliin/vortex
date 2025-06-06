@@ -1,11 +1,13 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     net::Ipv4Addr,
     time::{Duration, Instant},
 };
 
+use bt_bencode::{Deserializer, Value};
 use bytes::Bytes;
 use rayon::Scope;
+use serde::Deserialize;
 use sha1::Digest;
 use socket2::Socket;
 

@@ -144,6 +144,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                     io_utils::close_socket(sq, socket, events);
                 }
                 EventType::ConnectedWrite { connection_idx } => {
+                    // TODO: CANCEL EPIPE CONNS
                     if let Some(mut connection) = connections.try_remove(connection_idx) {
                         log::error!(
                             "Peer [{}] EPIPE received when writing to connection",
@@ -163,7 +164,6 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         log::warn!("PIPE received after connection has already been removed",);
                     }
                 }
-
                 _ => unreachable!(),
             }
             Ok(())
@@ -199,6 +199,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                 );
             } else {
                 let event = events.remove(user_data.event_idx as _);
+                log::error!("Unhandled error of typ: {event:?}");
                 match event {
                     EventType::Connect { socket, addr: _ }
                     | EventType::Write { socket, addr: _ }
