@@ -938,8 +938,7 @@ mod tests {
         let debbuging = DebuggingRecorder::new();
         let snapshotter = debbuging.snapshotter();
         // Setup test environment
-        let (file_store, torrent_info) = setup_test();
-        let torrent_state = TorrentState::new(&torrent_info);
+
         let (tx, rx) = mpsc::channel();
 
         // Create a listener that will accept connections but not respond
@@ -955,6 +954,7 @@ mod tests {
             std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
         });
         let event_loop_thread = std::thread::spawn(move || {
+            let download_state = setup_test();
             metrics::with_local_recorder(&debbuging, || {
                 let our_id = generate_peer_id();
                 let mut event_loop = EventLoop::new(our_id, Slab::new(), rx);
@@ -966,7 +966,7 @@ mod tests {
                     .setup_coop_taskrun()
                     .build(4096)
                     .unwrap();
-                let result = event_loop.run(ring, torrent_state, &file_store, &torrent_info);
+                let result = event_loop.run(ring, download_state);
                 assert!(result.is_ok());
             })
         });
