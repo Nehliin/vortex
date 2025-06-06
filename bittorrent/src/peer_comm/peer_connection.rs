@@ -10,12 +10,14 @@ use sha1::Digest;
 use socket2::Socket;
 
 use crate::{
-    Error, TorrentState,
-    event_loop::MAX_QUEUE_SIZE,
+    Error, InitializedState, StateRef,
     file_store::FileStore,
+    peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
 };
+
+use super::{extended_protocol::ExtensionProtocol, peer_protocol::ParsedHandshake};
 
 // Taken from
 // https://github.com/arvidn/moving_average/blob/master/moving_average.hpp
@@ -138,13 +140,17 @@ pub struct PeerConnection {
     pub is_interesting: bool,
     /// Have we sent allowed fast set yet too the peer
     pub sent_allowed_fast: bool,
+    /// The peer supports the fast extension
     pub fast_ext: bool,
+    /// The peer supports extended extension
+    pub extended_extension: bool,
     /// The peer have informed us that it is choking us.
     pub peer_choking: bool,
     /// The peer is interested what we have to offer
     pub peer_interested: bool,
     // Target number of inflight requests
     pub target_inflight: usize,
+    pub max_queue_size: usize,
     // Current inflight requests, may have timed out
     pub inflight: VecDeque<Subpiece>,
     // Queued requests
@@ -166,20 +172,25 @@ pub struct PeerConnection {
     // because of low througput. (Choke instead?)
     pub pending_disconnect: Option<DisconnectReason>,
     pub stateful_decoder: PeerMessageDecoder,
+    /// Maps our ID:s to respective extension. The ID is the
+    /// one the peer is expected to use when sending to us
+    pub extensions: HashMap<u8, Box<dyn ExtensionProtocol>>,
     // Stored here to prevent reallocations
     pub outgoing_msgs_buffer: Vec<OutgoingMsg>,
     // Uses vec instead of hashset since this is expected to be small
     pub allowed_fast_pieces: Vec<i32>,
     // The pieces we allow others to request when choked
     pub accept_fast_pieces: Vec<i32>,
+    // improve
+    pub pre_meta_have_msgs: Vec<PeerMessage>,
 }
 
 impl<'scope, 'f_store: 'scope> PeerConnection {
-    pub fn new(socket: Socket, peer_id: PeerId, conn_id: usize, fast_ext: bool) -> Self {
+    pub fn new(socket: Socket, conn_id: usize, parsed_handshake: ParsedHandshake) -> Self {
         PeerConnection {
             socket,
             conn_id,
-            peer_id,
+            peer_id: parsed_handshake.peer_id,
             is_choking: true,
             is_interesting: false,
             sent_allowed_fast: false,
@@ -187,7 +198,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             peer_interested: false,
             endgame: false,
             last_received_subpiece: None,
-            fast_ext,
+            fast_ext: parsed_handshake.fast_ext,
+            extended_extension: parsed_handshake.extension_protocol,
             inflight: VecDeque::with_capacity(64),
             queued: VecDeque::with_capacity(64),
             target_inflight: 4,
@@ -200,9 +212,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             throughput: 0,
             prev_throughput: 0,
             outgoing_msgs_buffer: Default::default(),
+            extensions: Default::default(),
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
             allowed_fast_pieces: Default::default(),
             accept_fast_pieces: Default::default(),
+            pre_meta_have_msgs: Default::default(),
         }
     }
 
@@ -998,6 +1012,92 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             })
                             .unwrap();
                     });
+                }
+            }
+            PeerMessage::Extended { id, data } => {
+                if id == 0 {
+                    log::debug!("Extended message handshake");
+                    // ID for an extension is the message id that should be used
+                    // in further communication ex ut_metadata = 3 then the id should be 3
+                    // when sending such extension messages
+                    let mut de = Deserializer::from_slice(&data[..]);
+                    let Ok(value) = <Value>::deserialize(&mut de) else {
+                        self.pending_disconnect = Some(DisconnectReason::InvalidMessage);
+                        return;
+                    };
+                    if let Some(dict) = value.as_dict() {
+                        let Some(m) = dict.get("m".as_bytes()).and_then(|val| val.as_dict()) else {
+                            self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+                                "Missing m member of metadata",
+                            ));
+                            return;
+                        };
+
+                        for (key, val) in m {
+                            if key.as_slice() == b"ut_metadata".as_slice() {
+                                let Some(id) = val.as_u64().and_then(|val| u8::try_from(val).ok())
+                                else {
+                                    self.pending_disconnect = Some(
+                                        DisconnectReason::ProtocolError("metadata id not an u8"),
+                                    );
+                                    return;
+                                };
+                                if self.extensions.contains_key(&id) {
+                                    continue;
+                                }
+                                let Some(metadata_size) = dict
+                                    .get("metadata_size".as_bytes())
+                                    .and_then(|val| val.as_u64())
+                                else {
+                                    self.pending_disconnect = Some(
+                                        DisconnectReason::ProtocolError("metadata size not valid"),
+                                    );
+                                    return;
+                                };
+                                if let Some((file_and_meta, _)) = state_ref.state() {
+                                    let expected_size =
+                                        file_and_meta.metadata.construct_info().encode().len();
+                                    if metadata_size != expected_size as u64 {
+                                        self.pending_disconnect =
+                                            Some(DisconnectReason::ProtocolError(
+                                                "metadata size not valid",
+                                            ));
+                                        return;
+                                    }
+                                }
+
+                                let mut metadata =
+                                    MetadataExtension::new(id, metadata_size as usize);
+                                if !state_ref.is_initialzied() {
+                                    for i in 0..16.min(metadata.num_pieces()) {
+                                        self.outgoing_msgs_buffer.push(OutgoingMsg {
+                                            message: metadata.request(i as i32),
+                                            ordered: false,
+                                        });
+                                    }
+                                }
+                                let id = EXTENSIONS
+                                    .iter()
+                                    .find_map(|(str, id)| (str == &"ut_metadata").then_some(id))
+                                    .expect("Extension ID expected to be found");
+                                self.extensions.insert(*id, Box::new(metadata));
+                            }
+                        }
+
+                        if let Some(max_queue_size) =
+                            dict.get("reqq".as_bytes()).and_then(|val| val.as_u64())
+                        {
+                            self.max_queue_size = max_queue_size as usize;
+                        }
+                    }
+                } else if let Some(ext) = self.extensions.get_mut(&id) {
+                    if let Err(disconnect_reason) =
+                        ext.handle_message(data, state_ref, &mut self.outgoing_msgs_buffer)
+                    {
+                        self.pending_disconnect = Some(disconnect_reason);
+                    }
+                } else {
+                    log::error!("Unexpected extended msg");
                 }
             }
         }

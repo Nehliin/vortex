@@ -22,14 +22,15 @@ use crate::{
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue, UserData},
+    peer_comm::extended_protocol::extension_handshake_msg,
     peer_connection::{DisconnectReason, OutgoingMsg, PeerConnection},
     peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
     piece_selector::{self, SUBPIECE_SIZE},
 };
 
-pub const MAX_QUEUE_SIZE: usize = 200;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 7;
 const MAX_CONNECTIONS: usize = 100;
+pub const MAX_OUTSTANDING_REQUESTS: u64 = 512;
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
 
 #[derive(Debug)]
@@ -656,8 +657,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                     .unwrap();
                 let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
-                let parsed_handshake =
-                    parse_handshake(torrent_state.info_hash, handshake_data).unwrap();
+                let parsed_handshake = parse_handshake(state.info_hash, handshake_data).unwrap();
                 assert!(
                     self.pending_connections
                         .remove(&socket.peer_addr().unwrap())
@@ -665,12 +665,7 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                 let entry = self.connections.vacant_entry();
                 let conn_id = entry.key();
-                let peer_connection = PeerConnection::new(
-                    socket,
-                    parsed_handshake.peer_id,
-                    conn_id,
-                    parsed_handshake.fast_ext,
-                );
+                let peer_connection = PeerConnection::new(socket, conn_id, parsed_handshake);
                 let id = peer_connection.peer_id;
                 entry.insert(peer_connection);
                 log::info!("Finished handshake! [{conn_id}]: {id}");
@@ -693,6 +688,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                 let connection = &mut self.connections[conn_id];
                 connection.stateful_decoder.append_data(remainder);
                 conn_parse_and_handle_msgs(connection, state, scope);
+                if connection.extended_extension {
+                    connection.outgoing_msgs_buffer.push(OutgoingMsg {
+                        message: extension_handshake_msg(state),
+                        ordered: true,
+                    });
+                }
                 // Recv has been complete, move over to multishot, same user data
                 io_utils::recv_multishot(sq, io_event.user_data, fd, self.read_ring.bgid());
 
