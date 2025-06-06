@@ -1,10 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 
-use bitvec::prelude::{BitBox, Msb0};
+use bitvec::{
+    prelude::{BitBox, Msb0},
+    vec::BitVec,
+};
 use lava_torrent::torrent::v1::Torrent;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
-use crate::file_store::{ReadablePieceFileView, WritablePieceFileView};
+use crate::file_store::{FileStore, ReadablePieceFileView, WritablePieceFileView};
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -51,7 +54,7 @@ pub struct PieceSelector {
 impl PieceSelector {
     pub fn new(torrent_info: &Torrent) -> Self {
         let completed_pieces: BitBox<u8, Msb0> =
-            torrent_info.pieces.iter().map(|_| false).collect();
+            BitVec::repeat(false, torrent_info.pieces.len()).into();
         let allocated_pieces = completed_pieces.clone();
         let hashing_pieces = completed_pieces.clone();
         let piece_length = torrent_info.piece_length;
@@ -147,7 +150,7 @@ impl PieceSelector {
             .and_modify(|pieces| pieces.set(piece_index, is_interesting))
             .or_insert_with(|| {
                 let mut all_pieces: BitBox<u8, Msb0> =
-                    (0..self.completed_pieces.len()).map(|_| false).collect();
+                    BitVec::repeat(false, self.completed_pieces.len()).into();
                 all_pieces.set(piece_index, is_interesting);
                 all_pieces
             });
@@ -268,17 +271,17 @@ pub struct CompletedPiece {
 
 #[derive(Debug)]
 // TODO flatten this
-pub struct Piece<'f_store> {
+pub struct Piece {
     pub index: i32,
     // Contains only completed subpieces
     pub completed_subpieces: BitBox,
     pub last_subpiece_length: i32,
-    pub piece_view: WritablePieceFileView<'f_store>,
+    pub piece_view: WritablePieceFileView,
     pub ref_count: u8,
 }
 
-impl<'f_store> Piece<'f_store> {
-    pub fn new(index: i32, lenght: u32, piece_view: WritablePieceFileView<'f_store>) -> Self {
+impl Piece {
+    pub fn new(index: i32, lenght: u32, piece_view: WritablePieceFileView) -> Self {
         let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
             SUBPIECE_SIZE
         } else {
@@ -322,11 +325,11 @@ impl<'f_store> Piece<'f_store> {
         deque
     }
 
-    pub fn into_readable(self) -> ReadablePieceFileView<'f_store> {
+    pub fn into_readable(self) -> ReadablePieceFileView {
         self.piece_view.into_readable()
     }
 
-    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) {
+    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], file_store: &FileStore) {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
@@ -340,7 +343,8 @@ impl<'f_store> Piece<'f_store> {
         } else {
             debug_assert_eq!(data.len() as i32, SUBPIECE_SIZE);
         }
-        self.piece_view.write_subpiece(begin as usize, data);
+        self.piece_view
+            .write_subpiece(begin as usize, data, file_store);
         self.completed_subpieces.set(subpiece_index as usize, true);
     }
 

@@ -1,9 +1,10 @@
 use std::{
+    cell::OnceCell,
     collections::VecDeque,
     io::{self},
     net::TcpListener,
     os::fd::AsRawFd,
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
 };
 
@@ -84,34 +85,37 @@ impl Torrent {
             ring.submission().push(&accept_op).unwrap();
         }
         ring.submission().sync();
-        let file_store = FileStore::new(downloads_path, &self.torrent_info).unwrap();
-        let torrent_state = TorrentState::new(&self.torrent_info);
+        //let file_store = FileStore::new(downloads_path, &self.torrent_info).unwrap();
+        //let torrent_state = TorrentState::new(&self.torrent_info);
         let mut event_loop = EventLoop::new(self.our_id, events, command_rc);
-        event_loop.run(ring, torrent_state, &file_store, &self.torrent_info)
+        event_loop.run(
+            ring,
+            State::unstarted(
+                self.torrent_info.info_hash_bytes().try_into().unwrap(),
+                downloads_path.as_ref().to_owned(),
+            ),
+        )
     }
 }
 
-struct TorrentState<'f_store> {
-    info_hash: [u8; 20],
+pub struct InitializedState {
     piece_selector: PieceSelector,
     num_unchoked: u32,
     max_unchoked: u32,
     completed_piece_rc: Receiver<CompletedPiece>,
     completed_piece_tx: Sender<CompletedPiece>,
-    pieces: Vec<Option<Piece<'f_store>>>,
+    pieces: Vec<Option<Piece>>,
     is_complete: bool,
 }
 
-impl<'f_store> TorrentState<'f_store> {
+impl InitializedState {
     pub fn new(torrent: &lava_torrent::torrent::v1::Torrent) -> Self {
-        let info_hash = torrent.info_hash_bytes().try_into().unwrap();
         let mut pieces = Vec::with_capacity(torrent.pieces.len());
         for _ in 0..torrent.pieces.len() {
             pieces.push(None);
         }
         let (tx, rc) = std::sync::mpsc::channel();
         Self {
-            info_hash,
             piece_selector: PieceSelector::new(torrent),
             num_unchoked: 0,
             max_unchoked: 8,
@@ -197,7 +201,7 @@ impl<'f_store> TorrentState<'f_store> {
         &mut self,
         index: i32,
         conn_id: usize,
-        file_store: &'f_store FileStore,
+        file_store: &FileStore,
     ) -> VecDeque<Subpiece> {
         log::debug!("Allocating piece: conn_id: {conn_id}, index: {index}");
         self.piece_selector.mark_allocated(index, conn_id);
@@ -239,6 +243,101 @@ impl<'f_store> TorrentState<'f_store> {
 
     pub fn should_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
+    }
+}
+
+pub struct FileAndMetadata {
+    pub file_store: FileStore,
+    pub metadata: Box<lava_torrent::torrent::v1::Torrent>,
+}
+
+pub struct State {
+    info_hash: [u8; 20],
+    // TODO: Consider checking this is accessible at construction
+    root: PathBuf,
+    torrent_state: Option<InitializedState>,
+    file: OnceCell<FileAndMetadata>,
+}
+
+impl State {
+    pub fn unstarted(info_hash: [u8; 20], root: PathBuf) -> Self {
+        Self {
+            info_hash,
+            root,
+            torrent_state: None,
+            file: OnceCell::new(),
+        }
+    }
+
+    pub fn inprogress(
+        info_hash: [u8; 20],
+        root: PathBuf,
+        file_store: FileStore,
+        metadata: lava_torrent::torrent::v1::Torrent,
+        state: InitializedState,
+    ) -> Self {
+        Self {
+            info_hash,
+            root,
+            torrent_state: Some(state),
+            file: OnceCell::from(FileAndMetadata {
+                file_store,
+                metadata: Box::new(metadata),
+            }),
+        }
+    }
+
+    pub fn as_ref(&mut self) -> StateRef<'_> {
+        StateRef {
+            info_hash: self.info_hash,
+            root: &self.root,
+            torrent: &mut self.torrent_state,
+            full: &self.file,
+        }
+    }
+}
+
+pub struct StateRef<'state> {
+    info_hash: [u8; 20],
+    root: &'state Path,
+    torrent: &'state mut Option<InitializedState>,
+    full: &'state OnceCell<FileAndMetadata>,
+}
+
+impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
+    pub fn info_hash(&self) -> &[u8; 20] {
+        &self.info_hash
+    }
+
+    pub fn state(
+        &'e_iter mut self,
+    ) -> Option<(&'state FileAndMetadata, &'e_iter mut InitializedState)> {
+        if let Some(f) = self.full.get() {
+            // SAFETY: If full has been initialized the torrent must have been initialized
+            // as well
+            unsafe { Some((f, self.torrent.as_mut().unwrap_unchecked())) }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn is_initialzied(&self) -> bool {
+        self.full.get().is_some()
+    }
+
+    pub fn init(&'e_iter mut self, metadata: lava_torrent::torrent::v1::Torrent) -> io::Result<()> {
+        if self.is_initialzied() {
+            return Err(io::Error::other("State initialized twice"));
+        }
+        *self.torrent = Some(InitializedState::new(&metadata));
+        self.full
+            .set(FileAndMetadata {
+                file_store: FileStore::new(self.root, &metadata)?,
+                metadata: Box::new(metadata),
+            })
+            .map_err(|_e| io::Error::other("State initialized twice"))?;
+        Ok(())
     }
 }
 
