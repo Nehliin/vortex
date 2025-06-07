@@ -28,10 +28,10 @@ use crate::{
     piece_selector::{self, SUBPIECE_SIZE},
 };
 
-const HANDSHAKE_TIMEOUT_SECS: u64 = 7;
 const MAX_CONNECTIONS: usize = 100;
 pub const MAX_OUTSTANDING_REQUESTS: u64 = 512;
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
+const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
 
 #[derive(Debug)]
 pub enum EventType {
@@ -78,7 +78,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             match event {
                 EventType::Recv { socket, addr: _ } => {
                     let fd = socket.as_raw_fd();
-                    io_utils::recv(sq, user_data, fd, bgid, HANDSHAKE_TIMEOUT_SECS);
+                    io_utils::recv(sq, user_data, fd, bgid, &HANDSHAKE_TIMEOUT);
                     Ok(())
                 }
                 EventType::ConnectedRecv { connection_idx } => {
@@ -620,13 +620,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // Multishot isn't used here to simplify error handling
                 // when the read is invalid or otherwise doesn't lead to
                 // a full connection which does have graceful shutdown mechanisms
-                io_utils::recv(
-                    sq,
-                    user_data,
-                    fd,
-                    self.read_ring.bgid(),
-                    HANDSHAKE_TIMEOUT_SECS,
-                );
+                io_utils::recv(sq, user_data, fd, self.read_ring.bgid(), &HANDSHAKE_TIMEOUT);
             }
             EventType::ConnectedWrite { connection_idx: _ }
             | EventType::Cancel { connection_idx: _ }
@@ -942,6 +936,8 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
 
+        const HANDSHAKE_SHOULD_TIMEOUT: u64 = 8;
+
         // Create a listener that will accept connections but not respond
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -952,7 +948,7 @@ mod tests {
             // Send a connection attempt to our listener
             let (_socket, _) = listener.accept().unwrap();
             // Keep the socket open but don't send any data
-            std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
+            std::thread::sleep(Duration::from_secs(HANDSHAKE_SHOULD_TIMEOUT));
         });
         let event_loop_thread = std::thread::spawn(move || {
             let mut download_state = setup_test();
@@ -973,7 +969,7 @@ mod tests {
         });
 
         tx.send(Command::ConnectToPeers(vec![addr])).unwrap();
-        std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
+        std::thread::sleep(Duration::from_secs(HANDSHAKE_SHOULD_TIMEOUT));
         tx.send(Command::Stop).unwrap();
         event_loop_thread.join().unwrap();
         simulated_peer_thread.join().unwrap();
