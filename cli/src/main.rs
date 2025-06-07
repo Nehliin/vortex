@@ -8,6 +8,11 @@ use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use vortex_bittorrent::{Command, State, Torrent, generate_peer_id};
 
+use tikv_jemallocator::Jemalloc;
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 pub fn decode_info_hash_hex(s: &str) -> [u8; 20] {
     (0..s.len())
         .step_by(2)

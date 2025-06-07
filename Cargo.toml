@@ -21,7 +21,7 @@ sha1 = "0.10"
 
 [profile.release]
 overflow-checks = true
-debug-assertions = true
+# debug = true 
 lto = true
 
 [profile.release.package."*"]
