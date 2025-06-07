@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bitvec::vec::BitVec;
 use bt_bencode::{Deserializer, Value};
 use bytes::Bytes;
 use rayon::Scope;
@@ -21,7 +22,7 @@ use crate::{
 
 use super::{extended_protocol::ExtensionProtocol, peer_protocol::ParsedHandshake};
 
-// Taken from
+// Inspired by
 // https://github.com/arvidn/moving_average/blob/master/moving_average.hpp
 #[derive(Debug)]
 pub struct MovingRttAverage {
@@ -183,7 +184,7 @@ pub struct PeerConnection {
     pub allowed_fast_pieces: Vec<i32>,
     // The pieces we allow others to request when choked
     pub accept_fast_pieces: Vec<i32>,
-    // improve
+    // TODO improve
     pub pre_meta_have_msgs: Vec<PeerMessage>,
 }
 
@@ -636,8 +637,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 let valid_range = state_ref
                     .state()
                     .map(|(_, state)| index < state.num_pieces() as i32)
+                    // Assume it's valid
                     .unwrap_or(true);
-                if index < 0 && valid_range {
+                if index < 0 || !valid_range {
                     log::warn!("[PeerId: {}] Invalid allowed fast message", self.peer_id);
                 } else if !self.allowed_fast_pieces.contains(&index) {
                     self.allowed_fast_pieces.push(index);
@@ -682,10 +684,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                     let num_pieces = torrent_state.num_pieces();
                     log::info!("[Peer: {}] Have all received", self.peer_id);
-                    let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
+                    let bitfield = BitVec::repeat(true, num_pieces).into();
                     torrent_state
                         .piece_selector
-                        .peer_bitfield(self.conn_id, bitfield.into_boxed_bitslice());
+                        .peer_bitfield(self.conn_id, bitfield);
                     if !torrent_state.is_complete {
                         // Mark ourselves as interested
                         self.interested(true);
@@ -710,12 +712,15 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                     let num_pieces = torrent_state.num_pieces();
                     log::info!("[Peer: {}] Have None received", self.peer_id);
-                    let bitfield = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
+                    let bitfield = BitVec::repeat(false, num_pieces).into();
                     self.not_interested(false);
                     torrent_state
                         .piece_selector
-                        .peer_bitfield(self.conn_id, bitfield.into_boxed_bitslice());
+                        .peer_bitfield(self.conn_id, bitfield);
                 } else {
+                    // TODO: Send not interested regardless if metadata is available
+                    // and ensure it's not sent again when this is handled, it should only
+                    // populate bifield
                     self.pre_meta_have_msgs.push(PeerMessage::HaveNone);
                 }
             }
@@ -750,7 +755,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     log::info!("[Peer: {}] Bifield received", self.peer_id);
                     let is_interesting = torrent_state
                         .piece_selector
-                        .peer_bitfield(self.conn_id, field.clone());
+                        .peer_bitfield(self.conn_id, field);
 
                     // Mark ourselves as interested if there are pieces we would like request
                     if !self.is_interesting && is_interesting {
