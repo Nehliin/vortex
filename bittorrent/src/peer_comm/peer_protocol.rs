@@ -72,7 +72,7 @@ impl<'a> arbitrary::Arbitrary<'a> for PeerMessage {
 
 pub fn generate_peer_id() -> PeerId {
     // Based on http://www.bittorrent.org/beps/bep_0020.html
-    const PREFIX: [u8; 8] = *b"-VT0010-";
+    const PREFIX: [u8; 8] = *b"-VT0020-";
     let generatated = rand::random::<[u8; 12]>();
     let mut result: [u8; 20] = [0; 20];
     result[0..8].copy_from_slice(&PREFIX);
