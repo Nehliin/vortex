@@ -44,10 +44,10 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef) -> PeerMessage {
 }
 
 pub trait ExtensionProtocol {
-    fn handle_message<'f_store>(
+    fn handle_message<'state>(
         &mut self,
         data: Bytes,
-        state: &mut StateRef<'f_store>,
+        state: &mut StateRef<'state>,
         outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
     ) -> Result<(), DisconnectReason>;
     // TODO: fn tick?
@@ -70,18 +70,17 @@ pub struct MetadataExtension {
     // The peers ID for the extension
     id: u8,
     metadata: Vec<u8>,
+    // These are only kept up to date
+    // if we are activly downloading the metadata.
+    // If the state is completed there is no guarantee
+    // that these are accurate
     inflight: BitBox,
     completed: BitBox,
 }
 
 impl MetadataExtension {
     pub fn new(id: u8, metadata_size: usize) -> Self {
-        let num_pieces = metadata_size / SUBPIECE_SIZE as usize
-            + if metadata_size % SUBPIECE_SIZE as usize != 0 {
-                1
-            } else {
-                0
-            };
+        let num_pieces = metadata_size.div_ceil(SUBPIECE_SIZE as usize);
         let inflight: BitBox = BitVec::repeat(false, num_pieces).into();
         let completed: BitBox = BitVec::repeat(false, num_pieces).into();
         Self {
@@ -152,19 +151,18 @@ impl ExtensionProtocol for MetadataExtension {
             "Got metadata extension message of type: {}",
             message.msg_type
         );
+        let piece_idx = usize::try_from(message.piece)
+            .map_err(|_err| DisconnectReason::ProtocolError("Invalid metadata piece index"))?;
+        let Some(start_offset) = piece_idx.checked_mul(SUBPIECE_SIZE as usize) else {
+            return Err(DisconnectReason::ProtocolError(
+                "Invalid metadata piece index",
+            ));
+        };
         match message.msg_type {
             REQUEST => {
                 // if we do not have all metadata yet then reject the requests
                 if let Some((file_and_meta, _)) = state.state() {
                     let info_bytes = file_and_meta.metadata.construct_info().encode();
-                    let piece_idx = usize::try_from(message.piece).map_err(|_err| {
-                        DisconnectReason::ProtocolError("Invalid metadata piece index")
-                    })?;
-                    let Some(start_offset) = piece_idx.checked_mul(SUBPIECE_SIZE as usize) else {
-                        return Err(DisconnectReason::ProtocolError(
-                            "Invalid metadata piece index",
-                        ));
-                    };
                     if start_offset >= info_bytes.len() {
                         outgoing_msgs_buffer.push(OutgoingMsg {
                             message: self.reject(message.piece),
@@ -193,13 +191,11 @@ impl ExtensionProtocol for MetadataExtension {
                 if state.is_initialzied() {
                     return Ok(());
                 }
-                let end = ((SUBPIECE_SIZE * message.piece + SUBPIECE_SIZE) as usize)
-                    .min(self.metadata.len());
+                let end = (start_offset + SUBPIECE_SIZE as usize).min(self.metadata.len());
                 let actual_data = &data[de.byte_offset()..];
-                self.metadata[(SUBPIECE_SIZE * message.piece) as usize..end]
-                    .copy_from_slice(actual_data);
+                self.metadata[start_offset..end].copy_from_slice(actual_data);
 
-                self.completed.set(message.piece as usize, true);
+                self.completed.set(piece_idx, true);
                 if let Some(index) = self.inflight.first_zero() {
                     outgoing_msgs_buffer.push(OutgoingMsg {
                         message: self.request(index as i32),
@@ -230,7 +226,7 @@ impl ExtensionProtocol for MetadataExtension {
                 }
             }
             REJECT => {
-                self.inflight.set(message.piece as usize, true);
+                self.inflight.set(piece_idx, true);
                 log::warn!("Got reject request");
                 de.end().map_err(|_err| {
                     DisconnectReason::ProtocolError("Metadata request message longer than expected")
