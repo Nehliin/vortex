@@ -19,4 +19,5 @@ vortex-bittorrent = { path = "../bittorrent" }
 # NOTE: The 5.4.0 version doesn't seem to have been posted to GIT so do not update unless the code is public
 mainline = { version = "=5.3.1", default-features = false, features = ["node"]}
 metrics-exporter-prometheus = "0.16"
+clap = { version = "4.5.39", features = ["derive"] }
 
