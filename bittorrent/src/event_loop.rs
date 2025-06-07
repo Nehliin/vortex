@@ -13,25 +13,24 @@ use io_uring::{
     opcode,
     types::{self, Timespec},
 };
-use lava_torrent::torrent::v1::Torrent;
 use rayon::Scope;
 use slab::Slab;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    Error, TorrentState,
+    Error, State, StateRef,
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
-    file_store::FileStore,
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue, UserData},
+    peer_comm::extended_protocol::extension_handshake_msg,
     peer_connection::{DisconnectReason, OutgoingMsg, PeerConnection},
     peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
     piece_selector::{self, SUBPIECE_SIZE},
 };
 
-pub const MAX_QUEUE_SIZE: usize = 200;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 7;
 const MAX_CONNECTIONS: usize = 100;
+pub const MAX_OUTSTANDING_REQUESTS: u64 = 512;
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
 
 #[derive(Debug)]
@@ -60,12 +59,12 @@ pub enum Command {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn event_error_handler<Q: SubmissionQueue>(
+fn event_error_handler<'state, Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     error_code: u32,
     user_data: UserData,
     events: &mut Slab<EventType>,
-    torrent_state: &mut TorrentState<'_>,
+    state_ref: &mut StateRef<'state>,
     connections: &mut Slab<PeerConnection>,
     pending_connections: &mut HashSet<SockAddr>,
     bgid: Bgid,
@@ -124,9 +123,11 @@ fn event_error_handler<Q: SubmissionQueue>(
                 | EventType::ConnectedWrite { connection_idx } => {
                     let mut connection = connections.remove(connection_idx);
                     log::error!("Peer [{}] Connection reset", connection.peer_id);
-                    connection.release_all_pieces(torrent_state);
-                    if !connection.is_choking {
-                        torrent_state.num_unchoked -= 1;
+                    if let Some((_, torrent_state)) = state_ref.state() {
+                        connection.release_all_pieces(torrent_state);
+                        if !connection.is_choking {
+                            torrent_state.num_unchoked -= 1;
+                        }
                     }
                     io_utils::close_socket(sq, connection.socket, events);
                 }
@@ -143,19 +144,26 @@ fn event_error_handler<Q: SubmissionQueue>(
                     io_utils::close_socket(sq, socket, events);
                 }
                 EventType::ConnectedWrite { connection_idx } => {
-                    let mut connection = connections.remove(connection_idx);
-                    log::error!(
-                        "Peer [{}] EPIPE received when writing to connection",
-                        connection.peer_id
-                    );
-                    connection.release_all_pieces(torrent_state);
-                    // Don't count disconnected peers
-                    if !connection.is_choking {
-                        torrent_state.num_unchoked -= 1;
+                    // TODO: CANCEL EPIPE CONNS
+                    if let Some(mut connection) = connections.try_remove(connection_idx) {
+                        log::error!(
+                            "Peer [{}] EPIPE received when writing to connection",
+                            connection.peer_id
+                        );
+                        if let Some((_, torrent_state)) = state_ref.state() {
+                            connection.release_all_pieces(torrent_state);
+                            // Don't count disconnected peers
+                            if !connection.is_choking {
+                                torrent_state.num_unchoked -= 1;
+                            }
+                        }
+                        io_utils::close_socket(sq, connection.socket, events);
+                    } else {
+                        // I guess this might happpen when multiple writes are queued up after
+                        // each other
+                        log::warn!("PIPE received after connection has already been removed",);
                     }
-                    io_utils::close_socket(sq, connection.socket, events);
                 }
-
                 _ => unreachable!(),
             }
             Ok(())
@@ -191,6 +199,7 @@ fn event_error_handler<Q: SubmissionQueue>(
                 );
             } else {
                 let event = events.remove(user_data.event_idx as _);
+                log::error!("Unhandled error of typ: {event:?}");
                 match event {
                     EventType::Connect { socket, addr: _ }
                     | EventType::Write { socket, addr: _ }
@@ -203,10 +212,12 @@ fn event_error_handler<Q: SubmissionQueue>(
                     | EventType::Shutdown { connection_idx } => {
                         let mut connection = connections.remove(connection_idx);
                         log::error!("Peer [{}] unhandled error: {err}", connection.peer_id);
-                        connection.release_all_pieces(torrent_state);
-                        // Don't count disconnected peers
-                        if !connection.is_choking {
-                            torrent_state.num_unchoked -= 1;
+                        if let Some((_, torrent_state)) = state_ref.state() {
+                            connection.release_all_pieces(torrent_state);
+                            // Don't count disconnected peers
+                            if !connection.is_choking {
+                                torrent_state.num_unchoked -= 1;
+                            }
                         }
                         io_utils::close_socket(sq, connection.socket, events);
                     }
@@ -259,7 +270,7 @@ pub struct EventLoop {
     our_id: PeerId,
 }
 
-impl<'scope, 'f_store: 'scope> EventLoop {
+impl<'scope, 'state: 'scope> EventLoop {
     pub fn new(our_id: PeerId, events: Slab<EventType>, command_rc: Receiver<Command>) -> Self {
         Self {
             events,
@@ -272,14 +283,12 @@ impl<'scope, 'f_store: 'scope> EventLoop {
         }
     }
 
-    pub fn run(
-        &mut self,
-        mut ring: IoUring,
-        mut torrent_state: TorrentState<'f_store>,
-        file_store: &'f_store FileStore,
-        torrent_info: &'f_store Torrent,
-    ) -> Result<(), Error> {
+    pub fn run(&mut self, mut ring: IoUring, mut state: State) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
+
+        let mut state_ref = state.as_ref();
+
+        let mut prev_state_initialized = state_ref.is_initialzied();
         // lambda to be able to catch errors an always unregistering the read ring
         let result = rayon::in_place_scope(|scope| {
             let (submitter, sq, mut cq) = ring.split();
@@ -317,9 +326,21 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                         &tick_delta,
                         &mut self.connections,
                         &self.pending_connections,
-                        file_store,
-                        &mut torrent_state,
+                        &mut state_ref,
                     );
+
+                    if !prev_state_initialized && state_ref.is_initialzied() {
+                        prev_state_initialized = true;
+                        for (_, connection) in self.connections.iter_mut() {
+                            let msgs = std::mem::take(&mut connection.pre_meta_have_msgs);
+                            // Get all piece msgs
+                            for msg in msgs {
+                                connection.handle_message(msg, &mut state_ref, scope);
+                            }
+                            // TODO: Trigger unchoked peers
+                        }
+                    }
+
                     last_tick = Instant::now();
                     // Dealt with here to make tick easier to test
                     for (conn_id, connection) in self.connections.iter_mut() {
@@ -340,16 +361,10 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
                 for cqe in &mut cq {
                     let io_event = IoEvent::from(cqe);
-                    if let Err(err) = self.event_handler(
-                        &mut sq,
-                        io_event,
-                        &mut torrent_state,
-                        file_store,
-                        torrent_info,
-                        scope,
-                    ) {
+                    if let Err(err) = self.event_handler(&mut sq, io_event, &mut state_ref, scope) {
                         log::error!("Error handling event: {err}");
                     }
+
                     // time to return any potential write buffers
                     if let Some(write_idx) = io_event.user_data.buffer_idx {
                         self.write_pool.return_buffer(write_idx as usize);
@@ -361,7 +376,9 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     }
                 }
 
-                torrent_state.update_torrent_status(&mut self.connections);
+                if let Some((_, torrent_state)) = state_ref.state() {
+                    torrent_state.update_torrent_status(&mut self.connections);
+                }
 
                 for (conn_id, connection) in self.connections.iter_mut() {
                     for msg in connection.outgoing_msgs_buffer.iter_mut() {
@@ -389,9 +406,11 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     return Ok(());
                 }
 
-                if torrent_state.is_complete {
-                    log::info!("Torrent complete!");
-                    return Ok(());
+                if let Some((_, torrent_state)) = state_ref.state() {
+                    if torrent_state.is_complete {
+                        log::info!("Torrent complete!");
+                        return Ok(());
+                    }
                 }
             }
         });
@@ -509,9 +528,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
         io_event: IoEvent,
-        torrent_state: &mut TorrentState<'f_store>,
-        file_store: &'f_store FileStore,
-        torrent_info: &'scope Torrent,
+        state: &mut StateRef<'state>,
         scope: &Scope<'scope>,
     ) -> io::Result<()> {
         let ret = match io_event.result {
@@ -522,7 +539,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     error_code,
                     io_event.user_data,
                     &mut self.events,
-                    torrent_state,
+                    state,
                     &mut self.connections,
                     &mut self.pending_connections,
                     self.read_ring.bgid(),
@@ -566,7 +583,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 connect_success_counter.increment(1);
 
                 let buffer = self.write_pool.get_buffer();
-                write_handshake(self.our_id, torrent_state.info_hash, buffer.inner);
+                write_handshake(self.our_id, state.info_hash, buffer.inner);
                 let fd = socket.as_raw_fd();
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
@@ -641,8 +658,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     .unwrap();
                 let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
-                let parsed_handshake =
-                    parse_handshake(torrent_state.info_hash, handshake_data).unwrap();
+                let parsed_handshake = parse_handshake(state.info_hash, handshake_data).unwrap();
                 assert!(
                     self.pending_connections
                         .remove(&socket.peer_addr().unwrap())
@@ -650,12 +666,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
                 let entry = self.connections.vacant_entry();
                 let conn_id = entry.key();
-                let peer_connection = PeerConnection::new(
-                    socket,
-                    parsed_handshake.peer_id,
-                    conn_id,
-                    parsed_handshake.fast_ext,
-                );
+                let peer_connection = PeerConnection::new(socket, conn_id, parsed_handshake);
                 let id = peer_connection.peer_id;
                 entry.insert(peer_connection);
                 log::info!("Finished handshake! [{conn_id}]: {id}");
@@ -677,40 +688,37 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                 // incoming recv cqe
                 let connection = &mut self.connections[conn_id];
                 connection.stateful_decoder.append_data(remainder);
-                let completed = torrent_state.piece_selector.completed_clone();
-                conn_parse_and_handle_msgs(
-                    connection,
-                    torrent_state,
-                    file_store,
-                    torrent_info,
-                    scope,
-                );
+                conn_parse_and_handle_msgs(connection, state, scope);
+                if connection.extended_extension {
+                    connection.outgoing_msgs_buffer.push(OutgoingMsg {
+                        message: extension_handshake_msg(state),
+                        ordered: true,
+                    });
+                }
                 // Recv has been complete, move over to multishot, same user data
                 io_utils::recv_multishot(sq, io_event.user_data, fd, self.read_ring.bgid());
-                let message = if completed.all() {
-                    peer_protocol::PeerMessage::HaveAll
-                } else if completed.not_any() {
-                    peer_protocol::PeerMessage::HaveNone
+
+                let bitfield_msg = if let Some((_, torrent_state)) = state.state() {
+                    let completed = torrent_state.piece_selector.completed_clone();
+                    let message = if completed.all() {
+                        peer_protocol::PeerMessage::HaveAll
+                    } else if completed.not_any() {
+                        peer_protocol::PeerMessage::HaveNone
+                    } else {
+                        peer_protocol::PeerMessage::Bitfield(completed.into())
+                    };
+                    // sent as first message after handshake
+                    OutgoingMsg {
+                        message,
+                        ordered: true,
+                    }
                 } else {
-                    peer_protocol::PeerMessage::Bitfield(completed.into())
+                    OutgoingMsg {
+                        message: peer_protocol::PeerMessage::HaveNone,
+                        ordered: true,
+                    }
                 };
-                // sent as first message after handshake
-                let bitfield_msg = OutgoingMsg {
-                    message,
-                    ordered: true,
-                };
-                let buffer = self.write_pool.get_buffer();
-                bitfield_msg.message.encode(buffer.inner);
-                let size = bitfield_msg.message.encoded_size();
-                io_utils::write_to_connection(
-                    conn_id,
-                    fd,
-                    &mut self.events,
-                    sq,
-                    buffer.index,
-                    &buffer.inner[..size],
-                    bitfield_msg.ordered,
-                );
+                connection.outgoing_msgs_buffer.push(bitfield_msg);
             }
             EventType::ConnectedRecv { connection_idx } => {
                 // The event is reused and not replaced
@@ -726,10 +734,13 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                         connection.peer_id
                     );
                     self.events.remove(io_event.user_data.event_idx as _);
-                    connection.release_all_pieces(torrent_state);
-                    // Don't count disconnected peers
-                    if !connection.is_choking {
-                        torrent_state.num_unchoked -= 1;
+                    // Consider moving to func
+                    if let Some((_, torrent_state)) = state.state() {
+                        connection.release_all_pieces(torrent_state);
+                        // Don't count disconnected peers
+                        if !connection.is_choking {
+                            torrent_state.num_unchoked -= 1;
+                        }
                     }
                     io_utils::close_socket(sq, connection.socket, &mut self.events);
                     return Ok(());
@@ -748,13 +759,7 @@ impl<'scope, 'f_store: 'scope> EventLoop {
                     .unwrap();
                 let buffer = &buffer[..len];
                 connection.stateful_decoder.append_data(buffer);
-                conn_parse_and_handle_msgs(
-                    connection,
-                    torrent_state,
-                    file_store,
-                    torrent_info,
-                    scope,
-                );
+                conn_parse_and_handle_msgs(connection, state, scope);
             }
             EventType::Close => {
                 self.events.remove(io_event.user_data.event_idx as _);
@@ -767,21 +772,13 @@ impl<'scope, 'f_store: 'scope> EventLoop {
 
 fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection: &mut PeerConnection,
-    torrent_state: &mut TorrentState<'f_store>,
-    file_store: &'f_store FileStore,
-    torrent_info: &'scope Torrent,
+    state: &mut StateRef<'f_store>,
     scope: &Scope<'scope>,
 ) {
     while let Some(parse_result) = connection.stateful_decoder.next() {
         match parse_result {
             Ok(peer_message) => {
-                connection.handle_message(
-                    peer_message,
-                    torrent_state,
-                    file_store,
-                    torrent_info,
-                    scope,
-                );
+                connection.handle_message(peer_message, state, scope);
             }
             Err(err) => {
                 log::error!("Failed {} decoding message: {err}", connection.conn_id);
@@ -794,28 +791,29 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
 }
 
 fn report_tick_metrics(
-    torrent_state: &TorrentState<'_>,
+    state: &mut StateRef<'_>,
     connections: &Slab<PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
 ) {
-    let counter = metrics::counter!("pieces_completed");
-    counter.absolute(torrent_state.piece_selector.total_completed() as u64);
-    let gauge = metrics::gauge!("pieces_allocated");
-    gauge.set(torrent_state.piece_selector.total_allocated() as u32);
-    let gauge = metrics::gauge!("num_unchoked");
-    gauge.set(torrent_state.num_unchoked);
+    if let Some((_, torrent_state)) = state.state() {
+        let counter = metrics::counter!("pieces_completed");
+        counter.absolute(torrent_state.piece_selector.total_completed() as u64);
+        let gauge = metrics::gauge!("pieces_allocated");
+        gauge.set(torrent_state.piece_selector.total_allocated() as u32);
+        let gauge = metrics::gauge!("num_unchoked");
+        gauge.set(torrent_state.num_unchoked);
+    }
     let gauge = metrics::gauge!("num_connections");
     gauge.set(connections.len() as u32);
     let gauge = metrics::gauge!("num_pending_connections");
     gauge.set(pending_connections.len() as u32);
 }
 
-pub(crate) fn tick<'scope, 'f_store: 'scope>(
+pub(crate) fn tick<'scope, 'state: 'scope>(
     tick_delta: &Duration,
     connections: &mut Slab<PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
-    file_store: &'f_store FileStore,
-    torrent_state: &mut TorrentState<'scope>,
+    torrent_state: &mut StateRef<'state>,
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
     // 1. Calculate bandwidth (deal with initial start up)
@@ -831,82 +829,89 @@ pub(crate) fn tick<'scope, 'f_store: 'scope>(
             connection.pending_disconnect = Some(DisconnectReason::Idle);
             continue;
         }
-        // TODO: If we are not using fast extension this might be triggered by a snub
-        if let Some(time) = connection.last_received_subpiece {
-            if time.elapsed() > connection.request_timeout() {
-                // error just to make more visible
-                log::error!("TIMEOUT: {}", connection.peer_id);
-                connection.on_request_timeout(torrent_state, file_store);
-            } else if connection.snubbed {
-                // Did not timeout
-                connection.snubbed = false;
+        if let Some((file_and_info, torrent_state)) = torrent_state.state() {
+            // TODO: If we are not using fast extension this might be triggered by a snub
+            if let Some(time) = connection.last_received_subpiece {
+                if time.elapsed() > connection.request_timeout() {
+                    // error just to make more visible
+                    log::error!("TIMEOUT: {}", connection.peer_id);
+                    connection.on_request_timeout(torrent_state, &file_and_info.file_store);
+                } else if connection.snubbed {
+                    // Did not timeout
+                    connection.snubbed = false;
+                }
             }
-        }
 
-        // Take delta into account when calculating throughput
-        connection.throughput =
-            (connection.throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
-        if !connection.peer_choking {
-            // slow start win size increase is handled in update_stats
-            if !connection.slow_start {
-                // From the libtorrent impl, request queue time = 3
-                let new_queue_capacity =
-                    3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
-                connection.update_target_inflight(new_queue_capacity as usize);
+            // Take delta into account when calculating throughput
+            connection.throughput =
+                (connection.throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
+            if !connection.peer_choking {
+                // slow start win size increase is handled in update_stats
+                if !connection.slow_start {
+                    // From the libtorrent impl, request queue time = 3
+                    let new_queue_capacity =
+                        3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
+                    connection.update_target_inflight(new_queue_capacity as usize);
+                }
             }
-        }
 
-        if !connection.peer_choking
-            && connection.slow_start
-            && connection.throughput > 0
-            && connection.throughput < connection.prev_throughput + 5000
-        {
-            log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
-            connection.slow_start = false;
-        }
-        connection.prev_throughput = connection.throughput;
-        connection.throughput = 0;
-        // TODO: add to throughput total stats
-    }
-
-    // Request new pieces and fill up request queues
-    let mut peer_bandwidth: Vec<_> = connections
-        .iter_mut()
-        .filter_map(|(key, peer)| {
-            // Skip connections that are pending disconnect
-            if peer.pending_disconnect.is_none() {
-                Some((key, peer.remaining_request_queue_spots()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
-    for (peer_key, mut bandwidth) in peer_bandwidth {
-        let peer = &mut connections[peer_key];
-
-        while {
-            let bandwitdth_available_for_new_piece =
-                bandwidth > (torrent_state.piece_selector.avg_num_subpieces() as usize / 2);
-            let nothing_queued = peer.queued.is_empty();
-            (bandwitdth_available_for_new_piece || nothing_queued) && !peer.peer_choking
-        } {
-            if let Some(next_piece) = torrent_state
-                .piece_selector
-                .next_piece(peer_key, &mut peer.endgame)
+            if !connection.peer_choking
+                && connection.slow_start
+                && connection.throughput > 0
+                && connection.throughput < connection.prev_throughput + 5000
             {
-                let mut queue = torrent_state.allocate_piece(next_piece, peer.conn_id, file_store);
-                let queue_len = queue.len();
-                peer.append_and_fill(&mut queue);
-                // Remove all subpieces from available bandwidth
-                bandwidth -= (queue_len).min(bandwidth);
-            } else {
-                break;
+                log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
+                connection.slow_start = false;
             }
+            connection.prev_throughput = connection.throughput;
+            connection.throughput = 0;
+            // TODO: add to throughput total stats
         }
-        peer.fill_request_queue();
-        peer.report_metrics();
+    }
+    if let Some((file_and_info, torrent_state)) = torrent_state.state() {
+        // Request new pieces and fill up request queues
+        let mut peer_bandwidth: Vec<_> = connections
+            .iter_mut()
+            .filter_map(|(key, peer)| {
+                // Skip connections that are pending disconnect
+                if peer.pending_disconnect.is_none() {
+                    Some((key, peer.remaining_request_queue_spots()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
+        for (peer_key, mut bandwidth) in peer_bandwidth {
+            let peer = &mut connections[peer_key];
+
+            while {
+                let bandwitdth_available_for_new_piece =
+                    bandwidth > (torrent_state.piece_selector.avg_num_subpieces() as usize / 2);
+                let nothing_queued = peer.queued.is_empty();
+                (bandwitdth_available_for_new_piece || nothing_queued) && !peer.peer_choking
+            } {
+                if let Some(next_piece) = torrent_state
+                    .piece_selector
+                    .next_piece(peer_key, &mut peer.endgame)
+                {
+                    let mut queue = torrent_state.allocate_piece(
+                        next_piece,
+                        peer.conn_id,
+                        &file_and_info.file_store,
+                    );
+                    let queue_len = queue.len();
+                    peer.append_and_fill(&mut queue);
+                    // Remove all subpieces from available bandwidth
+                    bandwidth -= (queue_len).min(bandwidth);
+                } else {
+                    break;
+                }
+            }
+            peer.fill_request_queue();
+            peer.report_metrics();
+        }
     }
 
     report_tick_metrics(torrent_state, connections, pending_connections);
@@ -934,8 +939,7 @@ mod tests {
         let debbuging = DebuggingRecorder::new();
         let snapshotter = debbuging.snapshotter();
         // Setup test environment
-        let (file_store, torrent_info) = setup_test();
-        let torrent_state = TorrentState::new(&torrent_info);
+
         let (tx, rx) = mpsc::channel();
 
         // Create a listener that will accept connections but not respond
@@ -951,6 +955,7 @@ mod tests {
             std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
         });
         let event_loop_thread = std::thread::spawn(move || {
+            let download_state = setup_test();
             metrics::with_local_recorder(&debbuging, || {
                 let our_id = generate_peer_id();
                 let mut event_loop = EventLoop::new(our_id, Slab::new(), rx);
@@ -962,7 +967,7 @@ mod tests {
                     .setup_coop_taskrun()
                     .build(4096)
                     .unwrap();
-                let result = event_loop.run(ring, torrent_state, &file_store, &torrent_info);
+                let result = event_loop.run(ring, download_state);
                 assert!(result.is_ok());
             })
         });

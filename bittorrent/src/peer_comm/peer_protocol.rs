@@ -72,7 +72,7 @@ impl<'a> arbitrary::Arbitrary<'a> for PeerMessage {
 
 pub fn generate_peer_id() -> PeerId {
     // Based on http://www.bittorrent.org/beps/bep_0020.html
-    const PREFIX: [u8; 8] = *b"-VT0010-";
+    const PREFIX: [u8; 8] = *b"-VT0020-";
     let generatated = rand::random::<[u8; 12]>();
     let mut result: [u8; 20] = [0; 20];
     result[0..8].copy_from_slice(&PREFIX);
@@ -87,6 +87,7 @@ pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], mut buffer: &mu
     buffer.put_u8(PROTOCOL.len() as u8);
     buffer.put_slice(PROTOCOL);
     let mut extension = [0_u8; 8];
+    extension[5] |= 0x10;
     extension[7] |= 0x04;
     buffer.put_slice(&extension as &[u8]);
     buffer.put_slice(&info_hash as &[u8]);
@@ -117,6 +118,7 @@ impl Display for PeerId {
 pub struct ParsedHandshake {
     pub peer_id: PeerId,
     pub fast_ext: bool,
+    pub extension_protocol: bool,
 }
 
 pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<ParsedHandshake> {
@@ -129,8 +131,9 @@ pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<Par
         return Err(ErrorKind::InvalidData.into());
     }
     buffer.advance(str_len);
-    // Extensions, only fast ext is checked for now
+    // Extensions
     let fast_ext = buffer[7] & 0x04 != 0;
+    let extension_protocol = buffer[5] & 0x10 != 0;
     buffer.advance(8);
     let peer_info_hash: [u8; 20] = buffer[..20]
         .try_into()
@@ -144,6 +147,7 @@ pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<Par
         .map_err(|_err| ErrorKind::InvalidData)?;
     Ok(ParsedHandshake {
         peer_id: PeerId(peer_id),
+        extension_protocol,
         fast_ext,
     })
 }
@@ -164,23 +168,25 @@ pub enum PeerMessage {
     SuggestPiece { index: i32 },
     Cancel { index: i32, begin: i32, length: i32 },
     Piece { index: i32, begin: i32, data: Bytes },
+    Extended { id: u8, data: Bytes },
 }
 
 impl PeerMessage {
-    pub const CHOKE: u8 = 0;
-    pub const UNCHOKE: u8 = 1;
-    pub const INTERESTED: u8 = 2;
-    pub const NOT_INTERESTED: u8 = 3;
-    pub const HAVE: u8 = 4;
-    pub const BITFIELD: u8 = 5;
-    pub const REQUEST: u8 = 6;
-    pub const PIECE: u8 = 7;
-    pub const CANCEL: u8 = 8;
-    pub const HAVE_ALL: u8 = 0x0E;
-    pub const HAVE_NONE: u8 = 0x0F;
-    pub const SUGGEST_PIECE: u8 = 0x0D;
-    pub const REJECT_REQUEST: u8 = 0x10;
-    pub const ALLOWED_FAST: u8 = 0x11;
+    const CHOKE: u8 = 0;
+    const UNCHOKE: u8 = 1;
+    const INTERESTED: u8 = 2;
+    const NOT_INTERESTED: u8 = 3;
+    const HAVE: u8 = 4;
+    const BITFIELD: u8 = 5;
+    const REQUEST: u8 = 6;
+    const PIECE: u8 = 7;
+    const CANCEL: u8 = 8;
+    const HAVE_ALL: u8 = 0x0E;
+    const HAVE_NONE: u8 = 0x0F;
+    const SUGGEST_PIECE: u8 = 0x0D;
+    const REJECT_REQUEST: u8 = 0x10;
+    const ALLOWED_FAST: u8 = 0x11;
+    const EXTENDED: u8 = 20;
 
     // TODO: make const and use of this more
     pub fn encoded_size(&self) -> usize {
@@ -199,6 +205,7 @@ impl PeerMessage {
             | PeerMessage::RejectRequest { .. }
             | PeerMessage::Cancel { .. } => 13,
             PeerMessage::Piece { data, .. } => 9 + data.len(),
+            PeerMessage::Extended { data, .. } => 2 + data.len(),
         };
         // Length prefix + message
         std::mem::size_of::<i32>() + message_size
@@ -276,6 +283,11 @@ impl PeerMessage {
                 buf.put_u8(Self::PIECE);
                 buf.put_i32(*index);
                 buf.put_i32(*begin);
+                buf.put_slice(data);
+            }
+            PeerMessage::Extended { id, data } => {
+                buf.put_u8(Self::EXTENDED);
+                buf.put_u8(*id);
                 buf.put_slice(data);
             }
         }
@@ -420,6 +432,15 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
                 index: data.get_i32(),
                 begin: data.get_i32(),
                 length: data.get_i32(),
+            })
+        }
+        PeerMessage::EXTENDED => {
+            if data.remaining() < 1 {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            Ok(PeerMessage::Extended {
+                id: data.get_u8(),
+                data,
             })
         }
         _ => Err(io::ErrorKind::InvalidData.into()),

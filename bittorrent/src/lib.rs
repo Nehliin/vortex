@@ -1,9 +1,10 @@
 use std::{
+    cell::OnceCell,
     collections::VecDeque,
     io::{self},
     net::TcpListener,
     os::fd::AsRawFd,
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
 };
 
@@ -84,34 +85,35 @@ impl Torrent {
             ring.submission().push(&accept_op).unwrap();
         }
         ring.submission().sync();
-        let file_store = FileStore::new(downloads_path, &self.torrent_info).unwrap();
-        let torrent_state = TorrentState::new(&self.torrent_info);
         let mut event_loop = EventLoop::new(self.our_id, events, command_rc);
-        event_loop.run(ring, torrent_state, &file_store, &self.torrent_info)
+        event_loop.run(
+            ring,
+            State::unstarted(
+                self.torrent_info.info_hash_bytes().try_into().unwrap(),
+                downloads_path.as_ref().to_owned(),
+            ),
+        )
     }
 }
 
-struct TorrentState<'f_store> {
-    info_hash: [u8; 20],
+pub struct InitializedState {
     piece_selector: PieceSelector,
     num_unchoked: u32,
     max_unchoked: u32,
     completed_piece_rc: Receiver<CompletedPiece>,
     completed_piece_tx: Sender<CompletedPiece>,
-    pieces: Vec<Option<Piece<'f_store>>>,
+    pieces: Vec<Option<Piece>>,
     is_complete: bool,
 }
 
-impl<'f_store> TorrentState<'f_store> {
+impl InitializedState {
     pub fn new(torrent: &lava_torrent::torrent::v1::Torrent) -> Self {
-        let info_hash = torrent.info_hash_bytes().try_into().unwrap();
         let mut pieces = Vec::with_capacity(torrent.pieces.len());
         for _ in 0..torrent.pieces.len() {
             pieces.push(None);
         }
         let (tx, rc) = std::sync::mpsc::channel();
         Self {
-            info_hash,
             piece_selector: PieceSelector::new(torrent),
             num_unchoked: 0,
             max_unchoked: 8,
@@ -197,7 +199,7 @@ impl<'f_store> TorrentState<'f_store> {
         &mut self,
         index: i32,
         conn_id: usize,
-        file_store: &'f_store FileStore,
+        file_store: &FileStore,
     ) -> VecDeque<Subpiece> {
         log::debug!("Allocating piece: conn_id: {conn_id}, index: {index}");
         self.piece_selector.mark_allocated(index, conn_id);
@@ -242,13 +244,109 @@ impl<'f_store> TorrentState<'f_store> {
     }
 }
 
+pub struct FileAndMetadata {
+    pub file_store: FileStore,
+    pub metadata: Box<lava_torrent::torrent::v1::Torrent>,
+}
+
+pub struct State {
+    info_hash: [u8; 20],
+    // TODO: Consider checking this is accessible at construction
+    root: PathBuf,
+    torrent_state: Option<InitializedState>,
+    file: OnceCell<FileAndMetadata>,
+}
+
+impl State {
+    pub fn unstarted(info_hash: [u8; 20], root: PathBuf) -> Self {
+        Self {
+            info_hash,
+            root,
+            torrent_state: None,
+            file: OnceCell::new(),
+        }
+    }
+
+    pub fn inprogress(
+        info_hash: [u8; 20],
+        root: PathBuf,
+        file_store: FileStore,
+        metadata: lava_torrent::torrent::v1::Torrent,
+        state: InitializedState,
+    ) -> Self {
+        Self {
+            info_hash,
+            root,
+            torrent_state: Some(state),
+            file: OnceCell::from(FileAndMetadata {
+                file_store,
+                metadata: Box::new(metadata),
+            }),
+        }
+    }
+
+    pub fn as_ref(&mut self) -> StateRef<'_> {
+        StateRef {
+            info_hash: self.info_hash,
+            root: &self.root,
+            torrent: &mut self.torrent_state,
+            full: &self.file,
+        }
+    }
+}
+
+pub struct StateRef<'state> {
+    info_hash: [u8; 20],
+    root: &'state Path,
+    torrent: &'state mut Option<InitializedState>,
+    full: &'state OnceCell<FileAndMetadata>,
+}
+
+impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
+    pub fn info_hash(&self) -> &[u8; 20] {
+        &self.info_hash
+    }
+
+    pub fn state(
+        &'e_iter mut self,
+    ) -> Option<(&'state FileAndMetadata, &'e_iter mut InitializedState)> {
+        if let Some(f) = self.full.get() {
+            // SAFETY: If full has been initialized the torrent must have been initialized
+            // as well
+            unsafe { Some((f, self.torrent.as_mut().unwrap_unchecked())) }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn is_initialzied(&self) -> bool {
+        self.full.get().is_some()
+    }
+
+    pub fn init(&'e_iter mut self, metadata: lava_torrent::torrent::v1::Torrent) -> io::Result<()> {
+        if self.is_initialzied() {
+            return Err(io::Error::other("State initialized twice"));
+        }
+        *self.torrent = Some(InitializedState::new(&metadata));
+        self.full
+            .set(FileAndMetadata {
+                file_store: FileStore::new(self.root, &metadata)?,
+                metadata: Box::new(metadata),
+            })
+            .map_err(|_e| io::Error::other("State initialized twice"))?;
+        Ok(())
+    }
+}
+
 /// Common test setup utils
 #[cfg(test)]
 mod test_utils {
     use std::{collections::HashMap, path::PathBuf};
 
     use crate::{
-        file_store::FileStore, generate_peer_id, peer_connection::PeerConnection,
+        InitializedState, State, file_store::FileStore, generate_peer_id,
+        peer_comm::peer_protocol::ParsedHandshake, peer_connection::PeerConnection,
         piece_selector::SUBPIECE_SIZE,
     };
     use lava_torrent::torrent::v1::{Torrent, TorrentBuilder};
@@ -256,7 +354,15 @@ mod test_utils {
 
     pub fn generate_peer(fast_ext: bool, conn_id: usize) -> PeerConnection {
         let socket_a = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-        PeerConnection::new(socket_a, generate_peer_id(), conn_id, fast_ext)
+        PeerConnection::new(
+            socket_a,
+            conn_id,
+            ParsedHandshake {
+                peer_id: generate_peer_id(),
+                fast_ext,
+                extension_protocol: fast_ext, // Set extension protocol to same as fast_ext for testing
+            },
+        )
     }
 
     struct TempDir {
@@ -288,28 +394,103 @@ mod test_utils {
         }
     }
 
-    pub fn setup_torrent(
+    fn setup_torrent(
         torrent_name: &str,
+        torrent_tmp_dir: TempDir,
+        download_tmp_dir: TempDir,
         piece_len: usize,
         file_data: HashMap<String, Vec<u8>>,
     ) -> (FileStore, Torrent) {
-        let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
-        let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
+        setup_torrent_with_metadata_size(
+            torrent_name,
+            torrent_tmp_dir,
+            download_tmp_dir,
+            piece_len,
+            file_data,
+            false,
+        )
+    }
+
+    fn setup_torrent_with_metadata_size(
+        torrent_name: &str,
+        torrent_tmp_dir: TempDir,
+        download_tmp_dir: TempDir,
+        piece_len: usize,
+        file_data: HashMap<String, Vec<u8>>,
+        large_metadata: bool,
+    ) -> (FileStore, Torrent) {
+        use lava_torrent::bencode::BencodeElem;
+
         file_data.iter().for_each(|(path, data)| {
             torrent_tmp_dir.add_file(path, data);
         });
 
-        let torrent_info = TorrentBuilder::new(&torrent_tmp_dir.path, piece_len as i64)
-            .set_name(torrent_name.to_string())
-            .build()
-            .unwrap();
+        let mut builder = TorrentBuilder::new(&torrent_tmp_dir.path, piece_len as i64)
+            .set_name(torrent_name.to_string());
 
+        if large_metadata {
+            // Add extra info fields to make the metadata larger
+            // This will make the torrent's info dictionary larger, requiring multiple pieces for metadata download
+
+            builder = builder.add_extra_info_field(
+                "comment".to_string(),
+                BencodeElem::String("This is a test torrent created for testing BEP 9 metadata extension with large metadata that requires multiple pieces to download. ".repeat(100))
+            );
+
+            builder = builder.add_extra_info_field(
+                "created by".to_string(),
+                BencodeElem::String("Vortex BitTorrent Client - Test Suite with Large Metadata Generation Capabilities".repeat(10))
+            );
+
+            builder = builder.add_extra_info_field(
+                "creation date".to_string(),
+                BencodeElem::Integer(1640995200), // Jan 1, 2022
+            );
+
+            builder = builder.add_extra_info_field(
+                "encoding".to_string(),
+                BencodeElem::String("UTF-8".to_string()),
+            );
+
+            let mut announce_list = Vec::new();
+            for i in 0..50 {
+                announce_list.push(format!("http://tracker{}.example.com:8080/announce", i));
+                announce_list.push(format!("udp://tracker{}.example.com:8080/announce", i));
+            }
+            builder = builder.add_extra_info_field(
+                "announce-list".to_string(),
+                BencodeElem::List(announce_list.into_iter().map(BencodeElem::String).collect()),
+            );
+
+            for i in 0..50 {
+                builder = builder.add_extra_info_field(
+                    format!("test_field_{}", i),
+                    BencodeElem::String(format!("This is test field number {} with some additional padding data to make the metadata larger. {}", i, "x".repeat(200)))
+                );
+            }
+
+            // Add multiple large binary fields
+            for i in 0..5 {
+                builder = builder.add_extra_info_field(
+                    format!("test_binary_data_{}", i),
+                    BencodeElem::Bytes(vec![i as u8; 2048]), // 2KB of binary data each
+                );
+            }
+
+            // Add a very large description field
+            builder = builder.add_extra_info_field(
+                "description".to_string(),
+                BencodeElem::String("A".repeat(3000)), // 3KB description
+            );
+        }
+
+        let torrent_info = builder.build().unwrap();
         let download_tmp_dir_path = download_tmp_dir.path.clone();
         let file_store = FileStore::new(&download_tmp_dir_path, &torrent_info).unwrap();
         (file_store, torrent_info)
     }
 
-    pub fn setup_test() -> (FileStore, Torrent) {
+    pub fn setup_test() -> State {
         let files: HashMap<String, Vec<u8>> = [
             ("f1.txt".to_owned(), vec![1_u8; 64]),
             ("f2.txt".to_owned(), vec![2_u8; 100]),
@@ -317,11 +498,59 @@ mod test_utils {
         ]
         .into_iter()
         .collect();
+        let torrent_name = format!("{}", rand::random::<u16>());
+        let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
+        let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
+        let root = download_tmp_dir.path.clone();
         let (file_store, torrent_info) = setup_torrent(
-            &format!("{}", rand::random::<u16>()),
+            &torrent_name,
+            torrent_tmp_dir,
+            download_tmp_dir,
             (SUBPIECE_SIZE * 2) as usize,
             files,
         );
-        (file_store, torrent_info)
+        let state = InitializedState::new(&torrent_info);
+        State::inprogress(
+            torrent_info.info_hash_bytes().try_into().unwrap(),
+            root,
+            file_store,
+            torrent_info,
+            state,
+        )
+    }
+
+    pub fn setup_uninitialized_test() -> (State, lava_torrent::torrent::v1::Torrent) {
+        setup_uninitialized_test_with_metadata_size(false)
+    }
+
+    pub fn setup_uninitialized_test_with_metadata_size(
+        large_metadata: bool,
+    ) -> (State, lava_torrent::torrent::v1::Torrent) {
+        let files: HashMap<String, Vec<u8>> = [
+            ("f1.txt".to_owned(), vec![1_u8; 64]),
+            ("f2.txt".to_owned(), vec![2_u8; 100]),
+            ("f3.txt".to_owned(), vec![3_u8; SUBPIECE_SIZE as usize * 16]),
+        ]
+        .into_iter()
+        .collect();
+        let torrent_name = format!("{}", rand::random::<u16>());
+        let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
+        let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
+        let root = download_tmp_dir.path.clone();
+
+        // Create the torrent to get the metadata, but don't initialize the state with it
+        let (_, torrent_info) = setup_torrent_with_metadata_size(
+            &torrent_name,
+            torrent_tmp_dir,
+            download_tmp_dir,
+            (SUBPIECE_SIZE * 2) as usize,
+            files,
+            large_metadata,
+        );
+
+        let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
+        let uninitialized_state = State::unstarted(info_hash, root);
+
+        (uninitialized_state, torrent_info)
     }
 }

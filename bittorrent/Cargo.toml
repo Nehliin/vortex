@@ -24,6 +24,8 @@ sha1 = { workspace = true }
 smallvec= { version = "2.0.0-alpha.10" , features = ["std"]}
 rayon = "1"
 metrics = "0.24"
+bt_bencode = "0.8.2"
+serde = { version = "1", features = ["derive"]}
 
 [features]
 fuzzing = ["dep:arbitrary"]
