@@ -283,7 +283,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         }
     }
 
-    pub fn run(&mut self, mut ring: IoUring, mut state: State) -> Result<(), Error> {
+    pub fn run(&mut self, mut ring: IoUring, state: &'state mut State) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
 
         let mut state_ref = state.as_ref();
@@ -955,7 +955,7 @@ mod tests {
             std::thread::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1));
         });
         let event_loop_thread = std::thread::spawn(move || {
-            let download_state = setup_test();
+            let mut download_state = setup_test();
             metrics::with_local_recorder(&debbuging, || {
                 let our_id = generate_peer_id();
                 let mut event_loop = EventLoop::new(our_id, Slab::new(), rx);
@@ -967,7 +967,7 @@ mod tests {
                     .setup_coop_taskrun()
                     .build(4096)
                     .unwrap();
-                let result = event_loop.run(ring, download_state);
+                let result = event_loop.run(ring, &mut download_state);
                 assert!(result.is_ok());
             })
         });

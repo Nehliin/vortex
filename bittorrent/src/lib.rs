@@ -46,22 +46,15 @@ pub enum Error {
 
 pub struct Torrent {
     our_id: PeerId,
-    torrent_info: lava_torrent::torrent::v1::Torrent,
+    state: State,
 }
 
 impl Torrent {
-    pub fn new(torrent_info: lava_torrent::torrent::v1::Torrent, our_id: PeerId) -> Self {
-        Self {
-            our_id,
-            torrent_info,
-        }
+    pub fn new(our_id: PeerId, state: State) -> Self {
+        Self { our_id, state }
     }
 
-    pub fn start(
-        &self,
-        command_rc: Receiver<Command>,
-        downloads_path: impl AsRef<Path>,
-    ) -> Result<(), Error> {
+    pub fn start(&mut self, command_rc: Receiver<Command>) -> Result<(), Error> {
         // check ulimit
         let mut ring: IoUring = IoUring::builder()
             .setup_single_issuer()
@@ -86,13 +79,7 @@ impl Torrent {
         }
         ring.submission().sync();
         let mut event_loop = EventLoop::new(self.our_id, events, command_rc);
-        event_loop.run(
-            ring,
-            State::unstarted(
-                self.torrent_info.info_hash_bytes().try_into().unwrap(),
-                downloads_path.as_ref().to_owned(),
-            ),
-        )
+        event_loop.run(ring, &mut self.state)
     }
 }
 
@@ -258,6 +245,11 @@ pub struct State {
 }
 
 impl State {
+
+    pub fn info_hash(&self) -> [u8; 20] {
+        self.info_hash
+    }
+
     pub fn unstarted(info_hash: [u8; 20], root: PathBuf) -> Self {
         Self {
             info_hash,
@@ -265,6 +257,25 @@ impl State {
             torrent_state: None,
             file: OnceCell::new(),
         }
+    }
+
+    pub fn unstarted_from_metadata(
+        metadata: lava_torrent::torrent::v1::Torrent,
+        root: PathBuf,
+    ) -> io::Result<Self> {
+        let file_store = FileStore::new(&root, &metadata)?;
+        Ok(Self {
+            info_hash: metadata
+                .info_hash_bytes()
+                .try_into()
+                .expect("Invalid info hash"),
+            root,
+            torrent_state: Some(InitializedState::new(&metadata)),
+            file: OnceCell::from(FileAndMetadata {
+                file_store,
+                metadata: Box::new(metadata),
+            }),
+        })
     }
 
     pub fn inprogress(
