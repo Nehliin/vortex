@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
-use vortex_bittorrent::{Command, Torrent, generate_peer_id};
+use vortex_bittorrent::{Command, State, Torrent, generate_peer_id};
 
 #[test]
 fn basic_seeded_download() {
@@ -10,11 +10,14 @@ fn basic_seeded_download() {
         .init();
     let builder = PrometheusBuilder::new();
     builder.install().unwrap();
-    let torrent =
+    let metadata =
         lava_torrent::torrent::v1::Torrent::read_from_file("../assets/test-file-1.torrent")
             .unwrap();
     let our_id = generate_peer_id();
-    let torrent = Torrent::new(torrent, our_id);
+    let mut torrent = Torrent::new(
+        our_id,
+        State::unstarted_from_metadata(metadata, "../downloaded".into()).unwrap(),
+    );
 
     let download_time = Instant::now();
     let (tx, rc) = std::sync::mpsc::channel();
@@ -32,7 +35,7 @@ fn basic_seeded_download() {
         let _ = tx_clone.send(Command::Stop);
     });
 
-    torrent.start(rc, "../downloaded").unwrap();
+    torrent.start(rc).unwrap();
     let elapsed = download_time.elapsed();
     log::info!("Download complete in: {}s", elapsed.as_secs());
     let expected = std::fs::read("../assets/test-file-1").unwrap();
