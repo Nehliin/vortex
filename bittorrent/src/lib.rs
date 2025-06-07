@@ -245,7 +245,6 @@ pub struct State {
 }
 
 impl State {
-
     pub fn info_hash(&self) -> [u8; 20] {
         self.info_hash
     }
