@@ -186,7 +186,7 @@ pub fn recv<Q: SubmissionQueue>(
     user_data: UserData,
     fd: RawFd,
     bgid: Bgid,
-    timeout_secs: u64,
+    timeout: &Timespec,
 ) {
     log::debug!("Starting recv");
     let read_op = opcode::Recv::new(types::Fd(fd), null_mut(), 0)
@@ -195,9 +195,8 @@ pub fn recv<Q: SubmissionQueue>(
         .user_data(user_data.as_u64())
         .flags(io_uring::squeue::Flags::BUFFER_SELECT | io_uring::squeue::Flags::IO_LINK);
 
-    let timeout = Timespec::new().sec(timeout_secs);
     let user_data = UserData::new(user_data.event_idx as _, None);
-    let timeout_op = opcode::LinkTimeout::new(&timeout)
+    let timeout_op = opcode::LinkTimeout::new(timeout)
         .build()
         .user_data(user_data.as_u64());
     // If the queue doesn't fit both events they need
