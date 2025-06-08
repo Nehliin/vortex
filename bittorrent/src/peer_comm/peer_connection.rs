@@ -7,13 +7,14 @@ use std::{
 use bitvec::vec::BitVec;
 use bt_bencode::{Deserializer, Value};
 use bytes::Bytes;
+use heapless::spsc::Producer;
 use rayon::Scope;
 use serde::Deserialize;
 use sha1::Digest;
 use socket2::Socket;
 
 use crate::{
-    Error, InitializedState, StateRef,
+    Error, InitializedState, StateRef, TorrentEvent,
     file_store::FileStore,
     peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
@@ -411,7 +412,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.moving_rtt.add_sample(&rtt);
     }
 
-    pub fn report_metrics(&self) {
+    pub fn report_metrics(&self, event_tx: &mut Producer<TorrentEvent, 512>) {
         let gauge = metrics::gauge!("peer.throughput.bytes", "peer_id" => self.peer_id.to_string());
         // Prev throughput is used since the mertics are reported at the end of TICK and
         // throughput have been reset and stored here at that point
@@ -434,6 +435,20 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
 
         let histogram = metrics::histogram!("rtt", "peer_id" => self.peer_id.to_string());
         histogram.record(self.moving_rtt.mean());
+
+        if event_tx
+            .enqueue(TorrentEvent::PeerMetrics {
+                conn_id: self.conn_id,
+                // Prev throughput is used since the mertics are reported at the end of TICK and
+                // throughput have been reset and stored here at that point
+                throuhgput: self.prev_throughput,
+                endgame: self.endgame,
+                snubbed: self.endgame,
+            })
+            .is_err()
+        {
+            log::error!("Peer metrics event missed");
+        }
     }
 
     pub fn on_request_timeout(
