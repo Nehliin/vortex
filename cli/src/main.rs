@@ -56,8 +56,6 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let (tx, rc) = std::sync::mpsc::channel();
-
     let state = match cli.torrent_info {
         TorrentInfo {
             info_hash: Some(info_hash),
@@ -76,38 +74,47 @@ fn main() {
 
     let info_hash_id = Id::from_bytes(state.info_hash()).unwrap();
 
-    std::thread::spawn(move || {
-        let mut builder = Dht::builder();
-        let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
-        if dht_boostrap_nodes.exists() {
-            let list = std::fs::read_to_string(&dht_boostrap_nodes).unwrap();
-            let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
-            builder.extra_bootstrap(&cached_nodes);
-        }
+    let mut command_q = heapless::spsc::Queue::new();
+    let mut event_q = heapless::spsc::Queue::new();
 
-        let dht_client = builder.build().unwrap();
-        log::info!("Bootstrapping!");
-        dht_client.bootstrapped();
-        log::info!("Bootstrapping done!");
-        dht_client.announce_peer(info_hash_id, None).unwrap();
+    let (mut command_tx, command_rc) = command_q.split();
+    let (event_tx, event_rc) = event_q.split();
 
-        loop {
-            // query
-            let all_peers = dht_client.get_peers(info_hash_id);
-            for peers in all_peers {
-                log::info!("Got {} peers", peers.len());
-                tx.send(Command::ConnectToPeers(peers)).unwrap();
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            let mut builder = Dht::builder();
+            let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
+            if dht_boostrap_nodes.exists() {
+                let list = std::fs::read_to_string(&dht_boostrap_nodes).unwrap();
+                let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
+                builder.extra_bootstrap(&cached_nodes);
             }
-            let bootstrap_nodes = dht_client.to_bootstrap();
-            let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
-            std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes()).unwrap();
-            std::thread::sleep(Duration::from_secs(20));
-        }
-    });
 
-    let id = generate_peer_id();
-    let mut torrrent = Torrent::new(id, state);
-    let start_time = Instant::now();
-    torrrent.start(rc).unwrap();
-    println!("DOWNLOADED in {}", start_time.elapsed().as_secs());
+            let dht_client = builder.build().unwrap();
+            log::info!("Bootstrapping!");
+            dht_client.bootstrapped();
+            log::info!("Bootstrapping done!");
+            // TODO: Remove announcement when complete?
+            dht_client.announce_peer(info_hash_id, None).unwrap();
+
+            loop {
+                // query
+                let all_peers = dht_client.get_peers(info_hash_id);
+                for peers in all_peers {
+                    log::info!("Got {} peers", peers.len());
+                    command_tx.enqueue(Command::ConnectToPeers(peers)).unwrap();
+                }
+                let bootstrap_nodes = dht_client.to_bootstrap();
+                let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
+                std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes())
+                    .unwrap();
+                std::thread::sleep(Duration::from_secs(20));
+            }
+        });
+        let id = generate_peer_id();
+        let mut torrrent = Torrent::new(id, state);
+        let start_time = Instant::now();
+        torrrent.start(event_tx, command_rc).unwrap();
+        println!("DOWNLOADED in {}", start_time.elapsed().as_secs());
+    });
 }
