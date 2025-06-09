@@ -54,19 +54,19 @@ fn basic_seeded_download() {
                         let _ = command_tx.enqueue(Command::Stop);
                         break 'outer;
                     }
-                    TorrentEvent::MetadataComplete(torrent) => {
+                    TorrentEvent::MetadataComplete(_torrent) => {
                         log::info!("METADATA COMPLETE");
                     }
                     TorrentEvent::PeerMetrics {
-                        conn_id,
-                        throuhgput,
-                        endgame,
-                        snubbed,
+                        conn_id: _,
+                        throuhgput: _,
+                        endgame: _,
+                        snubbed: _,
                     } => {}
                     TorrentEvent::TorrentMetrics {
-                        pieces_completed,
-                        pieces_allocated,
-                        num_connections,
+                        pieces_completed: _,
+                        pieces_allocated: _,
+                        num_connections: _,
                     } => {}
                 }
             }

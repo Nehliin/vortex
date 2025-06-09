@@ -933,12 +933,12 @@ mod tests {
     use crate::Command;
     use crate::peer_protocol::generate_peer_id;
     use crate::test_utils::setup_test;
+    use heapless::spsc::Queue;
     use io_uring::IoUring;
     use metrics::Key;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use metrics_util::{CompositeKey, MetricKind};
     use std::net::{SocketAddrV4, TcpListener};
-    use std::sync::mpsc;
     use std::time::Duration;
 
     #[test]
@@ -951,8 +951,6 @@ mod tests {
         let snapshotter = debbuging.snapshotter();
         // Setup test environment
 
-        let (tx, rx) = mpsc::channel();
-
         const HANDSHAKE_SHOULD_TIMEOUT: u64 = 8;
 
         // Create a listener that will accept connections but not respond
@@ -960,6 +958,10 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let addr = SocketAddrV4::new([127, 0, 0, 1].into(), addr.port());
 
+        let mut command_q = heapless::spsc::Queue::new();
+        let (mut command_tx, command_rc) = command_q.split();
+        let mut event_q = Queue::<TorrentEvent, 512>::new();
+        let (event_tx, _event_rx) = event_q.split();
         // Spawn a thread to accept the connection but not respond
         let simulated_peer_thread = std::thread::spawn(move || {
             // Send a connection attempt to our listener
@@ -967,41 +969,43 @@ mod tests {
             // Keep the socket open but don't send any data
             std::thread::sleep(Duration::from_secs(HANDSHAKE_SHOULD_TIMEOUT));
         });
-        let event_loop_thread = std::thread::spawn(move || {
-            let mut download_state = setup_test();
-            metrics::with_local_recorder(&debbuging, || {
-                let our_id = generate_peer_id();
-                let mut event_loop = EventLoop::new(our_id, Slab::new(), rx);
-                let ring = IoUring::builder()
-                    .setup_single_issuer()
-                    .setup_clamp()
-                    .setup_cqsize(4096)
-                    .setup_defer_taskrun()
-                    .setup_coop_taskrun()
-                    .build(4096)
-                    .unwrap();
-                let result = event_loop.run(ring, &mut download_state);
-                assert!(result.is_ok());
-            })
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                let mut download_state = setup_test();
+                metrics::with_local_recorder(&debbuging, || {
+                    let our_id = generate_peer_id();
+                    let mut event_loop = EventLoop::new(our_id, Slab::new());
+                    let ring = IoUring::builder()
+                        .setup_single_issuer()
+                        .setup_clamp()
+                        .setup_cqsize(4096)
+                        .setup_defer_taskrun()
+                        .setup_coop_taskrun()
+                        .build(4096)
+                        .unwrap();
+                    let result = event_loop.run(ring, &mut download_state, event_tx, command_rc);
+                    assert!(result.is_ok());
+                })
+            });
+            command_tx
+                .enqueue(Command::ConnectToPeers(vec![addr]))
+                .unwrap();
+            std::thread::sleep(Duration::from_secs(HANDSHAKE_SHOULD_TIMEOUT));
+            command_tx.enqueue(Command::Stop).unwrap();
+            simulated_peer_thread.join().unwrap();
+
+            let snapshot = snapshotter.snapshot();
+            #[allow(clippy::mutable_key_type)]
+            let metrics = snapshot.into_hashmap();
+            let val = metrics.get(&CompositeKey::new(
+                MetricKind::Counter,
+                Key::from_name("peer_handshake_timeout"),
+            ));
+            let DebugValue::Counter(num_timeouts) = val.unwrap().2 else {
+                unreachable!();
+            };
+            assert_eq!(num_timeouts, 1);
         });
-
-        tx.send(Command::ConnectToPeers(vec![addr])).unwrap();
-        std::thread::sleep(Duration::from_secs(HANDSHAKE_SHOULD_TIMEOUT));
-        tx.send(Command::Stop).unwrap();
-        event_loop_thread.join().unwrap();
-        simulated_peer_thread.join().unwrap();
-
-        let snapshot = snapshotter.snapshot();
-        #[allow(clippy::mutable_key_type)]
-        let metrics = snapshot.into_hashmap();
-        let val = metrics.get(&CompositeKey::new(
-            MetricKind::Counter,
-            Key::from_name("peer_handshake_timeout"),
-        ));
-        let DebugValue::Counter(num_timeouts) = val.unwrap().2 else {
-            unreachable!();
-        };
-        assert_eq!(num_timeouts, 1);
     }
 
     // // Timeouts when accepting an incoming connection is handled properly
