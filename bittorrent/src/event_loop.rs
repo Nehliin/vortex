@@ -875,7 +875,6 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             }
             connection.prev_throughput = connection.throughput;
             connection.throughput = 0;
-            // TODO: add to throughput total stats
         }
     }
     if let Some((file_and_info, torrent_state)) = torrent_state.state() {

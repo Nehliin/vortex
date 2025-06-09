@@ -13,7 +13,12 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use parking_lot::Mutex;
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event},
+    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    layout::{Constraint, Layout},
+    prelude::{Buffer, Rect},
+    style::{Stylize, palette::tailwind},
+    text::Line,
+    widgets::{Block, Borders, Gauge, Padding, Widget},
 };
 use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
 
@@ -54,7 +59,7 @@ fn dht_thread(
     let fetch_interval = tick(Duration::from_secs(20));
 
     let query = || {
-        println!("DHT query");
+        //println!("DHT query");
         // query
         let all_peers = dht_client.get_peers(info_hash_id);
         let mut cmd_tx = cmd_tx.lock();
@@ -115,13 +120,13 @@ struct Cli {
 
 fn main() -> io::Result<()> {
     let mut log_builder = env_logger::builder();
-    log_builder.filter_level(log::LevelFilter::Error).init();
+    log_builder.filter_level(log::LevelFilter::Off).init();
     let builder = PrometheusBuilder::new();
     builder.install().unwrap();
 
     let cli = Cli::parse();
 
-    let state = match cli.torrent_info {
+    let mut state = match cli.torrent_info {
         TorrentInfo {
             info_hash: Some(info_hash),
             torrent_file: None,
@@ -150,6 +155,7 @@ fn main() -> io::Result<()> {
     let command_tx = Arc::new(Mutex::new(command_tx));
 
     let id = generate_peer_id();
+    let metadata = state.as_ref().state().map(|state| state.0.metadata.clone());
     let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
 
@@ -161,7 +167,7 @@ fn main() -> io::Result<()> {
         let cmd_tx_clone = command_tx.clone();
         s.spawn(move || dht_thread(info_hash_id, cmd_tx_clone, shutdown_signal_rc));
 
-        let mut app = VortexApp::new(command_tx, event_rc, shutdown_signal_tx);
+        let mut app = VortexApp::new(command_tx, event_rc, shutdown_signal_tx, metadata);
         let terminal = ratatui::init();
         let result = app.run(terminal);
         ratatui::restore();
@@ -174,6 +180,10 @@ struct VortexApp<'queue> {
     event_rc: Consumer<'queue, TorrentEvent, 512>,
     should_exit: bool,
     start_time: Instant,
+    peer_throughput: ahash::HashMap<usize, u64>,
+    pieces_completed: usize,
+    num_connections: usize,
+    metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
     // Signal the other threads we they shutdown
     shutdown_signal_tx: Sender<()>,
 }
@@ -183,12 +193,17 @@ impl<'queue> VortexApp<'queue> {
         cmd_tx: Arc<Mutex<Producer<'queue, Command, 64>>>,
         event_rc: Consumer<'queue, TorrentEvent, 512>,
         shutdown_signal_tx: Sender<()>,
+        metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
     ) -> Self {
         Self {
             cmd_tx,
             event_rc,
             should_exit: false,
             start_time: Instant::now(),
+            pieces_completed: 0,
+            num_connections: 0,
+            peer_throughput: Default::default(),
+            metadata,
             shutdown_signal_tx,
         }
     }
@@ -196,6 +211,7 @@ impl<'queue> VortexApp<'queue> {
     fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
         while !self.should_exit {
             terminal.draw(|frame| self.draw(frame))?;
+            // separate from torrent events?
             self.handle_events()?;
         }
         Ok(())
@@ -208,7 +224,7 @@ impl<'queue> VortexApp<'queue> {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        frame.render_widget("Hello world", frame.area());
+        frame.render_widget(self, frame.area());
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
@@ -219,34 +235,82 @@ impl<'queue> VortexApp<'queue> {
                     println!("Download complete in: {}s", elapsed.as_secs());
                     self.shutdown();
                 }
-                TorrentEvent::MetadataComplete(_torrent) => {
-                    println!("Metadata complete");
+                TorrentEvent::MetadataComplete(metadata) => {
+                    self.metadata = Some(metadata);
                 }
                 TorrentEvent::PeerMetrics {
                     conn_id,
                     throuhgput,
-                    endgame,
-                    snubbed,
+                    endgame: _,
+                    snubbed: _,
                 } => {
-                    println!(
-                        "throuhgput: {conn_id} {throuhgput} endgame: {endgame}, snubbed: {snubbed}"
-                    );
+                    // println!(
+                    //     "throuhgput: {conn_id} {throuhgput} endgame: {endgame}, snubbed: {snubbed}"
+                    // );
+                    self.peer_throughput
+                        .entry(conn_id)
+                        .and_modify(|val| *val = throuhgput)
+                        .or_insert(throuhgput);
                 }
                 TorrentEvent::TorrentMetrics {
                     pieces_completed,
-                    pieces_allocated,
+                    pieces_allocated: _,
                     num_connections,
                 } => {
-                    println!(
-                        "pieces: {pieces_completed} {pieces_allocated}, conn {num_connections}"
-                    );
+                    self.pieces_completed = pieces_completed;
+                    self.num_connections = num_connections;
                 }
             }
+            if event::poll(Duration::from_millis(16))? {
+                match event::read()? {
+                    // it's important to check that the event is a key press event as
+                    // crossterm also emits key release and repeat events on Windows.
+                    Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                        self.handle_key_event(key_event)
+                    }
+                    _ => {}
+                };
+            }
         }
-        // if matches!(event::read()?, Event::Key(_)) {
-        //     return Ok(());
-        // }
+
         Ok(())
+    }
+
+    fn handle_key_event(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Char('q') => self.shutdown(),
+            _ => {}
+        }
+    }
+
+    fn render_throughput(&self, top: Rect, buf: &mut Buffer) {}
+
+    fn render_completion(&self, bottom: Rect, buf: &mut Buffer) {
+        if let Some(metadata) = &self.metadata {
+            let percent = (100.0 * (self.pieces_completed as f64 / metadata.pieces.len() as f64)) as u16;
+            let title = title_block(&metadata.name);
+            Gauge::default()
+                .block(title)
+                .gauge_style(tailwind::GREEN.c400)
+                .percent(percent)
+                .render(bottom, buf);
+        } else {
+            let title = title_block("Downloading metadata...");
+            Gauge::default()
+                .block(title)
+                .gauge_style(tailwind::GREEN.c400)
+                .percent(0)
+                .render(bottom, buf);
+        }
+        //todo!()
+    }
+}
+
+impl Widget for &VortexApp<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let [top, bottom] = Layout::vertical([Constraint::Fill(1); 2]).areas(area);
+        self.render_throughput(top, buf);
+        self.render_completion(bottom, buf);
     }
 }
 
@@ -254,4 +318,13 @@ impl Drop for VortexApp<'_> {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+fn title_block(title: &str) -> Block {
+    let title = Line::from(title).centered();
+    Block::new()
+        .borders(Borders::NONE)
+        .padding(Padding::vertical(1))
+        .title(title)
+        .fg(tailwind::SLATE.c200)
 }

@@ -103,6 +103,8 @@ pub enum TorrentEvent {
     TorrentComplete,
     MetadataComplete(Box<lava_torrent::torrent::v1::Torrent>),
     PeerMetrics {
+        /// Note that these are not stable and might
+        /// be reused
         conn_id: usize,
         throuhgput: u64,
         endgame: bool,
