@@ -1,14 +1,20 @@
 use std::{
+    io,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use clap::{Args, Parser};
-use crossbeam_channel::{bounded, select, tick};
+use crossbeam_channel::{Receiver, Sender, bounded, select, tick};
+use heapless::spsc::{Consumer, Producer};
 use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use parking_lot::Mutex;
+use ratatui::{
+    DefaultTerminal, Frame,
+    crossterm::event::{self, Event},
+};
 use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
 
 use tikv_jemallocator::Jemalloc;
@@ -24,6 +30,62 @@ pub fn decode_info_hash_hex(s: &str) -> [u8; 20] {
         .try_into()
         .unwrap()
 }
+
+fn dht_thread(
+    info_hash_id: Id,
+    cmd_tx: Arc<Mutex<Producer<Command, 64>>>,
+    shutdown_signal_rc: Receiver<()>,
+) {
+    let mut builder = Dht::builder();
+    let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
+    if dht_boostrap_nodes.exists() {
+        let list = std::fs::read_to_string(&dht_boostrap_nodes).unwrap();
+        let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
+        builder.extra_bootstrap(&cached_nodes);
+    }
+
+    let dht_client = builder.build().unwrap();
+    log::info!("Bootstrapping!");
+    dht_client.bootstrapped();
+    log::info!("Bootstrapping done!");
+    // TODO: Remove announcement when complete?
+    dht_client.announce_peer(info_hash_id, None).unwrap();
+
+    let fetch_interval = tick(Duration::from_secs(20));
+
+    let query = || {
+        println!("DHT query");
+        // query
+        let all_peers = dht_client.get_peers(info_hash_id);
+        let mut cmd_tx = cmd_tx.lock();
+        for peers in all_peers {
+            log::info!("Got {} peers", peers.len());
+            cmd_tx.enqueue(Command::ConnectToPeers(peers)).unwrap();
+        }
+    };
+
+    query();
+    loop {
+        select! {
+            recv(fetch_interval) -> _ => {
+                query();
+            }
+            recv(shutdown_signal_rc) -> _ => {
+                println!("DHT shutdown");
+                let bootstrap_nodes = dht_client.to_bootstrap();
+                let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
+                std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes())
+                    .unwrap();
+                break;
+            }
+
+        }
+    }
+}
+
+// Chart with throughput
+// gauge with percent done below
+// make inline?
 
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
@@ -51,7 +113,7 @@ struct Cli {
     download_folder: PathBuf,
 }
 
-fn main() {
+fn main() -> io::Result<()> {
     let mut log_builder = env_logger::builder();
     log_builder.filter_level(log::LevelFilter::Error).init();
     let builder = PrometheusBuilder::new();
@@ -81,7 +143,7 @@ fn main() {
     let mut event_q = heapless::spsc::Queue::new();
 
     let (command_tx, command_rc) = command_q.split();
-    let (event_tx, mut event_rc) = event_q.split();
+    let (event_tx, event_rc) = event_q.split();
     // Keeping the mutex out here makes the hotter path
     // inside bittorrent faster since the spsc queue reciever is
     // simpler (and better suited to an event loop) compared to a mpmc channel.
@@ -89,8 +151,7 @@ fn main() {
 
     let id = generate_peer_id();
     let mut torrent = Torrent::new(id, state);
-    let start_time = Instant::now();
-    let (shutdown_signal_tx, shudown_signal_rc) = bounded(1);
+    let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
 
     std::thread::scope(|s| {
         s.spawn(move || {
@@ -98,88 +159,66 @@ fn main() {
             println!("T thread shutdown");
         });
         let cmd_tx_clone = command_tx.clone();
-        s.spawn(move || {
-            let mut builder = Dht::builder();
-            let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
-            if dht_boostrap_nodes.exists() {
-                let list = std::fs::read_to_string(&dht_boostrap_nodes).unwrap();
-                let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
-                builder.extra_bootstrap(&cached_nodes);
-            }
+        s.spawn(move || dht_thread(info_hash_id, cmd_tx_clone, shutdown_signal_rc));
 
-            let dht_client = builder.build().unwrap();
-            log::info!("Bootstrapping!");
-            dht_client.bootstrapped();
-            log::info!("Bootstrapping done!");
-            // TODO: Remove announcement when complete?
-            dht_client.announce_peer(info_hash_id, None).unwrap();
+        let terminal = ratatui::init();
+        let result = run(terminal, command_tx, event_rc, shutdown_signal_tx);
+        ratatui::restore();
+        result
+    })
+}
 
-            let fetch_interval = tick(Duration::from_secs(20));
-
-            let query = || {
-                println!("DHT query");
-                // query
-                let all_peers = dht_client.get_peers(info_hash_id);
-                let mut cmd_tx = cmd_tx_clone.lock();
-                for peers in all_peers {
-                    log::info!("Got {} peers", peers.len());
-                    cmd_tx.enqueue(Command::ConnectToPeers(peers)).unwrap();
+fn run(
+    mut terminal: DefaultTerminal,
+    cmd_tx: Arc<Mutex<Producer<Command, 64>>>,
+    mut event_rc: Consumer<TorrentEvent, 512>,
+    shutdown_signal_tx: Sender<()>,
+) -> io::Result<()> {
+    let start_time = Instant::now();
+    'outer: loop {
+        while let Some(event) = event_rc.dequeue() {
+            match event {
+                TorrentEvent::TorrentComplete => {
+                    let elapsed = start_time.elapsed();
+                    println!("Download complete in: {}s", elapsed.as_secs());
+                    // wrap in struct?
+                    let _ = cmd_tx.lock().enqueue(Command::Stop);
+                    shutdown_signal_tx.send(()).unwrap();
+                    break 'outer;
                 }
-            };
-
-            query();
-            loop {
-                select! {
-                    recv(fetch_interval) -> _ => {
-                        query();
-                    }
-                    recv(shudown_signal_rc) -> _ => {
-                        println!("DHT shutdown");
-                        let bootstrap_nodes = dht_client.to_bootstrap();
-                        let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
-                        std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes())
-                            .unwrap();
-                        break;
-                    }
-
+                TorrentEvent::MetadataComplete(_torrent) => {
+                    println!("Metadata complete");
                 }
-            }
-        });
-
-        'outer: loop {
-            while let Some(event) = event_rc.dequeue() {
-                match event {
-                    TorrentEvent::TorrentComplete => {
-                        let elapsed = start_time.elapsed();
-                        println!("Download complete in: {}s", elapsed.as_secs());
-                        let _ = command_tx.lock().enqueue(Command::Stop);
-                        shutdown_signal_tx.send(()).unwrap();
-                        break 'outer;
-                    }
-                    TorrentEvent::MetadataComplete(_torrent) => {
-                        println!("Metadata complete");
-                    }
-                    TorrentEvent::PeerMetrics {
-                        conn_id,
-                        throuhgput,
-                        endgame,
-                        snubbed,
-                    } => {
-                        println!(
-                            "throuhgput: {conn_id} {throuhgput} endgame: {endgame}, snubbed: {snubbed}"
-                        );
-                    }
-                    TorrentEvent::TorrentMetrics {
-                        pieces_completed,
-                        pieces_allocated,
-                        num_connections,
-                    } => {
-                        println!(
-                            "pieces: {pieces_completed} {pieces_allocated}, conn {num_connections}"
-                        );
-                    }
+                TorrentEvent::PeerMetrics {
+                    conn_id,
+                    throuhgput,
+                    endgame,
+                    snubbed,
+                } => {
+                    println!(
+                        "throuhgput: {conn_id} {throuhgput} endgame: {endgame}, snubbed: {snubbed}"
+                    );
+                }
+                TorrentEvent::TorrentMetrics {
+                    pieces_completed,
+                    pieces_allocated,
+                    num_connections,
+                } => {
+                    println!(
+                        "pieces: {pieces_completed} {pieces_allocated}, conn {num_connections}"
+                    );
                 }
             }
         }
-    });
+
+        terminal.draw(ui)?;
+        if matches!(event::read()?, Event::Key(_)) {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn ui(frame: &mut Frame) {
+    frame.render_widget("Hello world", frame.area());
 }
