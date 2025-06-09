@@ -161,30 +161,63 @@ fn main() -> io::Result<()> {
         let cmd_tx_clone = command_tx.clone();
         s.spawn(move || dht_thread(info_hash_id, cmd_tx_clone, shutdown_signal_rc));
 
+        let mut app = VortexApp::new(command_tx, event_rc, shutdown_signal_tx);
         let terminal = ratatui::init();
-        let result = run(terminal, command_tx, event_rc, shutdown_signal_tx);
+        let result = app.run(terminal);
         ratatui::restore();
         result
     })
 }
 
-fn run(
-    mut terminal: DefaultTerminal,
-    cmd_tx: Arc<Mutex<Producer<Command, 64>>>,
-    mut event_rc: Consumer<TorrentEvent, 512>,
+struct VortexApp<'queue> {
+    cmd_tx: Arc<Mutex<Producer<'queue, Command, 64>>>,
+    event_rc: Consumer<'queue, TorrentEvent, 512>,
+    should_exit: bool,
+    start_time: Instant,
+    // Signal the other threads we they shutdown
     shutdown_signal_tx: Sender<()>,
-) -> io::Result<()> {
-    let start_time = Instant::now();
-    'outer: loop {
-        while let Some(event) = event_rc.dequeue() {
+}
+
+impl<'queue> VortexApp<'queue> {
+    fn new(
+        cmd_tx: Arc<Mutex<Producer<'queue, Command, 64>>>,
+        event_rc: Consumer<'queue, TorrentEvent, 512>,
+        shutdown_signal_tx: Sender<()>,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            event_rc,
+            should_exit: false,
+            start_time: Instant::now(),
+            shutdown_signal_tx,
+        }
+    }
+
+    fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
+        while !self.should_exit {
+            terminal.draw(|frame| self.draw(frame))?;
+            self.handle_events()?;
+        }
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.cmd_tx.lock().enqueue(Command::Stop);
+        let _ = self.shutdown_signal_tx.send(());
+        self.should_exit = true;
+    }
+
+    fn draw(&self, frame: &mut Frame) {
+        frame.render_widget("Hello world", frame.area());
+    }
+
+    fn handle_events(&mut self) -> io::Result<()> {
+        while let Some(event) = self.event_rc.dequeue() {
             match event {
                 TorrentEvent::TorrentComplete => {
-                    let elapsed = start_time.elapsed();
+                    let elapsed = self.start_time.elapsed();
                     println!("Download complete in: {}s", elapsed.as_secs());
-                    // wrap in struct?
-                    let _ = cmd_tx.lock().enqueue(Command::Stop);
-                    shutdown_signal_tx.send(()).unwrap();
-                    break 'outer;
+                    self.shutdown();
                 }
                 TorrentEvent::MetadataComplete(_torrent) => {
                     println!("Metadata complete");
@@ -210,15 +243,15 @@ fn run(
                 }
             }
         }
-
-        terminal.draw(ui)?;
-        if matches!(event::read()?, Event::Key(_)) {
-            return Ok(());
-        }
+        // if matches!(event::read()?, Event::Key(_)) {
+        //     return Ok(());
+        // }
+        Ok(())
     }
-    Ok(())
 }
 
-fn ui(frame: &mut Frame) {
-    frame.render_widget("Hello world", frame.area());
+impl Drop for VortexApp<'_> {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
