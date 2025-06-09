@@ -7,7 +7,7 @@ use std::{
 
 use clap::{Args, Parser};
 use crossbeam_channel::{Receiver, Sender, bounded, select, tick};
-use heapless::spsc::{Consumer, Producer};
+use heapless::{spsc::{Consumer, Producer}, HistoryBuffer};
 use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use parking_lot::Mutex;
@@ -181,7 +181,8 @@ struct VortexApp<'queue> {
     should_exit: bool,
     start_time: Instant,
     peer_throughput: ahash::HashMap<usize, u64>,
-    total_throughput: Vec<(f64, f64)>,
+    // doesn't work
+    total_throughput: Box<HistoryBuffer<(f64, f64), 16>>,
     pieces_completed: usize,
     num_connections: usize,
     metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
@@ -202,7 +203,7 @@ impl<'queue> VortexApp<'queue> {
             should_exit: false,
             start_time: Instant::now(),
             pieces_completed: 0,
-            total_throughput: Vec::new(),
+            total_throughput: Box::new(HistoryBuffer::new()),
             num_connections: 0,
             peer_throughput: Default::default(),
             metadata,
@@ -262,11 +263,8 @@ impl<'queue> VortexApp<'queue> {
                     self.num_connections = num_connections;
                     let tick_throuhput: u64 = self.peer_throughput.values().copied().sum();
                     let curr_time = self.start_time.elapsed().as_secs_f64();
-                    if self.total_throughput.len() > 16 {
-                        self.total_throughput.remove(0);
-                    }
                     self.total_throughput
-                        .push((curr_time, tick_throuhput as f64));
+                        .write((curr_time, tick_throuhput as f64));
                 }
             }
             // TODO: Higher than necessary, updates are slower than this
@@ -292,10 +290,24 @@ impl<'queue> VortexApp<'queue> {
     }
 
     fn render_throughput(&self, top: Rect, buf: &mut Buffer) {
-        let (oldest_time, oldest_throughput) =
-            self.total_throughput.first().copied().unwrap_or((0.0, 0.0));
-        let (newest_time, newest_throughput) =
-            self.total_throughput.last().copied().unwrap_or((0.0, 0.0));
+        let (oldest_time, _) = self.total_throughput.oldest_ordered().next().copied().unwrap_or((0.0, 0.0));
+        let (newest_time, _) = self.total_throughput.recent().copied().unwrap_or((0.0, 0.0));
+
+        let smallest = self
+            .total_throughput
+            .oldest_ordered()
+            .copied()
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(_, throughput)| throughput)
+            .unwrap_or(0.0);
+
+        let largest = self
+            .total_throughput
+            .oldest_ordered()
+            .copied()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(_, throughput)| throughput)
+            .unwrap_or(0.0);
 
         let x_labels = vec![
             Span::styled(
@@ -313,18 +325,15 @@ impl<'queue> VortexApp<'queue> {
         ];
         let y_labels = vec![
             Span::styled(
-                format!("{}/s", human_bytes::human_bytes(oldest_throughput)),
+                format!("{}/s", human_bytes::human_bytes(smallest)),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(
-                    "{}/s",
-                    human_bytes::human_bytes((newest_throughput + oldest_throughput) / 2.0)
-                ),
+                format!("{}/s", human_bytes::human_bytes((smallest + largest) / 2.0)),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{}/s", human_bytes::human_bytes(newest_throughput)),
+                format!("{}/s", human_bytes::human_bytes(largest)),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
         ];
@@ -348,7 +357,7 @@ impl<'queue> VortexApp<'queue> {
                 Axis::default()
                     .style(Style::default().fg(ratatui::style::Color::Gray))
                     .labels(y_labels)
-                    .bounds([oldest_throughput, newest_throughput]),
+                    .bounds([smallest, largest]),
             );
 
         chart.render(top, buf);
