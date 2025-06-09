@@ -790,14 +790,16 @@ fn report_tick_metrics(
     let mut pieces_completed = 0;
     let mut pieces_allocated = 0;
     if let Some((_, torrent_state)) = state.state() {
+        let total_completed = torrent_state.piece_selector.total_completed();
         let counter = metrics::counter!("pieces_completed");
-        counter.absolute(torrent_state.piece_selector.total_completed() as u64);
+        counter.absolute(total_completed as u64);
+        let total_allocated = torrent_state.piece_selector.total_allocated();
         let gauge = metrics::gauge!("pieces_allocated");
-        gauge.set(torrent_state.piece_selector.total_allocated() as u32);
+        gauge.set(total_allocated as u32);
         let gauge = metrics::gauge!("num_unchoked");
         gauge.set(torrent_state.num_unchoked);
-        pieces_completed = pieces_completed;
-        pieces_allocated = pieces_allocated;
+        pieces_completed = total_completed;
+        pieces_allocated = total_allocated;
     }
     let gauge = metrics::gauge!("num_connections");
     gauge.set(connections.len() as u32);

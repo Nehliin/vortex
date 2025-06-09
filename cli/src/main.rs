@@ -95,7 +95,7 @@ fn main() {
     std::thread::scope(|s| {
         s.spawn(move || {
             torrent.start(event_tx, command_rc).unwrap();
-            println!("T SHUTDONW");
+            println!("T thread shutdown");
         });
         let cmd_tx_clone = command_tx.clone();
         s.spawn(move || {
@@ -116,22 +116,27 @@ fn main() {
 
             let fetch_interval = tick(Duration::from_secs(20));
 
+            let query = || {
+                println!("DHT query");
+                // query
+                let all_peers = dht_client.get_peers(info_hash_id);
+                for peers in all_peers {
+                    log::info!("Got {} peers", peers.len());
+                    cmd_tx_clone
+                        .lock()
+                        .enqueue(Command::ConnectToPeers(peers))
+                        .unwrap();
+                }
+            };
+
+            query();
             loop {
                 select! {
                     recv(fetch_interval) -> _ => {
-                        println!("QUERY");
-                        // query
-                        let all_peers = dht_client.get_peers(info_hash_id);
-                        for peers in all_peers {
-                            log::info!("Got {} peers", peers.len());
-                            cmd_tx_clone
-                                .lock()
-                                .enqueue(Command::ConnectToPeers(peers))
-                                .unwrap();
-                        }
+                        query();
                     }
                     recv(shudown_signal_rc) -> _ => {
-                        println!("SHUTTING DOWN");
+                        println!("DHT shutdown");
                         let bootstrap_nodes = dht_client.to_bootstrap();
                         let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
                         std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes())
@@ -153,20 +158,28 @@ fn main() {
                         shutdown_signal_tx.send(()).unwrap();
                         break 'outer;
                     }
-                    TorrentEvent::MetadataComplete(torrent) => {
-                        println!("METADATA COMPLETE");
+                    TorrentEvent::MetadataComplete(_torrent) => {
+                        println!("Metadata complete");
                     }
                     TorrentEvent::PeerMetrics {
                         conn_id,
                         throuhgput,
                         endgame,
                         snubbed,
-                    } => {}
+                    } => {
+                        println!(
+                            "throuhgput: {conn_id} {throuhgput} endgame: {endgame}, snubbed: {snubbed}"
+                        );
+                    }
                     TorrentEvent::TorrentMetrics {
                         pieces_completed,
                         pieces_allocated,
                         num_connections,
-                    } => {}
+                    } => {
+                        println!(
+                            "pieces: {pieces_completed} {pieces_allocated}, conn {num_connections}"
+                        );
+                    }
                 }
             }
         }
