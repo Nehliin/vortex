@@ -26,4 +26,5 @@ crossbeam-channel = "0.5.15"
 # ratatui uses all default feature
 #crossterm = "0.29.0"
 ratatui = "0.29.0"
+human_bytes = "0.4.3"
 

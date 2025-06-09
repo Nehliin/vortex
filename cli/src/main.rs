@@ -16,9 +16,9 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     layout::{Constraint, Layout},
     prelude::{Buffer, Rect},
-    style::{Stylize, palette::tailwind},
-    text::Line,
-    widgets::{Block, Borders, Gauge, Padding, Widget},
+    style::{Modifier, Style, Stylize, palette::tailwind},
+    text::{Line, Span},
+    widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, Padding, Widget},
 };
 use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
 
@@ -181,6 +181,7 @@ struct VortexApp<'queue> {
     should_exit: bool,
     start_time: Instant,
     peer_throughput: ahash::HashMap<usize, u64>,
+    total_throughput: Vec<(f64, f64)>,
     pieces_completed: usize,
     num_connections: usize,
     metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
@@ -201,6 +202,7 @@ impl<'queue> VortexApp<'queue> {
             should_exit: false,
             start_time: Instant::now(),
             pieces_completed: 0,
+            total_throughput: Vec::new(),
             num_connections: 0,
             peer_throughput: Default::default(),
             metadata,
@@ -231,8 +233,7 @@ impl<'queue> VortexApp<'queue> {
         while let Some(event) = self.event_rc.dequeue() {
             match event {
                 TorrentEvent::TorrentComplete => {
-                    let elapsed = self.start_time.elapsed();
-                    println!("Download complete in: {}s", elapsed.as_secs());
+                    //let elapsed = self.start_time.elapsed();
                     self.shutdown();
                 }
                 TorrentEvent::MetadataComplete(metadata) => {
@@ -259,8 +260,16 @@ impl<'queue> VortexApp<'queue> {
                 } => {
                     self.pieces_completed = pieces_completed;
                     self.num_connections = num_connections;
+                    let tick_throuhput: u64 = self.peer_throughput.values().copied().sum();
+                    let curr_time = self.start_time.elapsed().as_secs_f64();
+                    if self.total_throughput.len() > 16 {
+                        self.total_throughput.remove(0);
+                    }
+                    self.total_throughput
+                        .push((curr_time, tick_throuhput as f64));
                 }
             }
+            // TODO: Higher than necessary, updates are slower than this
             if event::poll(Duration::from_millis(16))? {
                 match event::read()? {
                     // it's important to check that the event is a key press event as
@@ -277,17 +286,78 @@ impl<'queue> VortexApp<'queue> {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Char('q') => self.shutdown(),
-            _ => {}
+        if let KeyCode::Char('q') = key_event.code {
+            self.shutdown()
         }
     }
 
-    fn render_throughput(&self, top: Rect, buf: &mut Buffer) {}
+    fn render_throughput(&self, top: Rect, buf: &mut Buffer) {
+        let (oldest_time, oldest_throughput) =
+            self.total_throughput.first().copied().unwrap_or((0.0, 0.0));
+        let (newest_time, newest_throughput) =
+            self.total_throughput.last().copied().unwrap_or((0.0, 0.0));
+
+        let x_labels = vec![
+            Span::styled(
+                format!("{oldest_time}s"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}s", (newest_time + oldest_time) / 2.0),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{newest_time}s"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ];
+        let y_labels = vec![
+            Span::styled(
+                format!("{}/s", human_bytes::human_bytes(oldest_throughput)),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{}/s",
+                    human_bytes::human_bytes((newest_throughput + oldest_throughput) / 2.0)
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}/s", human_bytes::human_bytes(newest_throughput)),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ];
+        let data = vec![
+            Dataset::default()
+                .graph_type(ratatui::widgets::GraphType::Line)
+                .marker(ratatui::symbols::Marker::Braille)
+                .style(Style::default().fg(ratatui::style::Color::Green))
+                .data(&self.total_throughput),
+        ];
+
+        let chart = Chart::new(data)
+            .block(Block::bordered().border_type(ratatui::widgets::BorderType::Rounded))
+            .x_axis(
+                Axis::default()
+                    .style(Style::default().fg(ratatui::style::Color::Gray))
+                    .labels(x_labels)
+                    .bounds([oldest_time, newest_time]),
+            )
+            .y_axis(
+                Axis::default()
+                    .style(Style::default().fg(ratatui::style::Color::Gray))
+                    .labels(y_labels)
+                    .bounds([oldest_throughput, newest_throughput]),
+            );
+
+        chart.render(top, buf);
+    }
 
     fn render_completion(&self, bottom: Rect, buf: &mut Buffer) {
         if let Some(metadata) = &self.metadata {
-            let percent = (100.0 * (self.pieces_completed as f64 / metadata.pieces.len() as f64)) as u16;
+            let percent =
+                (100.0 * (self.pieces_completed as f64 / metadata.pieces.len() as f64)) as u16;
             let title = title_block(&metadata.name);
             Gauge::default()
                 .block(title)
@@ -302,13 +372,13 @@ impl<'queue> VortexApp<'queue> {
                 .percent(0)
                 .render(bottom, buf);
         }
-        //todo!()
     }
 }
 
 impl Widget for &VortexApp<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let [top, bottom] = Layout::vertical([Constraint::Fill(1); 2]).areas(area);
+        let [top, bottom] =
+            Layout::vertical([Constraint::Percentage(80), Constraint::Fill(1)]).areas(area);
         self.render_throughput(top, buf);
         self.render_completion(bottom, buf);
     }
@@ -323,7 +393,8 @@ impl Drop for VortexApp<'_> {
 fn title_block(title: &str) -> Block {
     let title = Line::from(title).centered();
     Block::new()
-        .borders(Borders::NONE)
+        .borders(Borders::all())
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .padding(Padding::vertical(1))
         .title(title)
         .fg(tailwind::SLATE.c200)
