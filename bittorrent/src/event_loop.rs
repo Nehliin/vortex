@@ -1,12 +1,11 @@
 use std::{
     collections::HashSet,
     io,
-    net::SocketAddrV4,
     os::fd::{AsRawFd, FromRawFd},
-    sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
 };
 
+use heapless::spsc::{Consumer, Producer};
 use io_uring::{
     IoUring,
     cqueue::Entry,
@@ -18,7 +17,7 @@ use slab::Slab;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    Error, State, StateRef,
+    Command, Error, State, StateRef, TorrentEvent,
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue, UserData},
@@ -46,16 +45,6 @@ pub enum EventType {
     Close,
     // Dummy used to allow stable keys in the slab
     Dummy,
-}
-
-/// Commands that can be sent to the event loop through the command channel
-#[derive(Debug)]
-pub enum Command {
-    /// Connect to peers at the given address
-    /// already connected peers will be filtered out
-    ConnectToPeers(Vec<SocketAddrV4>),
-    /// Stop the event loop gracefully
-    Stop,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -266,24 +255,28 @@ pub struct EventLoop {
     // pending peers as soon as max connections is reached
     connections: Slab<PeerConnection>,
     pending_connections: HashSet<SockAddr>,
-    command_rc: Receiver<Command>,
     our_id: PeerId,
 }
 
 impl<'scope, 'state: 'scope> EventLoop {
-    pub fn new(our_id: PeerId, events: Slab<EventType>, command_rc: Receiver<Command>) -> Self {
+    pub fn new(our_id: PeerId, events: Slab<EventType>) -> Self {
         Self {
             events,
             write_pool: BufferPool::new(256, (SUBPIECE_SIZE * 2) as _),
             read_ring: BufferRing::new(1, 256, (SUBPIECE_SIZE * 2) as _).unwrap(),
             connections: Slab::with_capacity(MAX_CONNECTIONS),
             pending_connections: HashSet::with_capacity(MAX_CONNECTIONS),
-            command_rc,
             our_id,
         }
     }
 
-    pub fn run(&mut self, mut ring: IoUring, state: &'state mut State) -> Result<(), Error> {
+    pub fn run(
+        &mut self,
+        mut ring: IoUring,
+        state: &'state mut State,
+        mut event_tx: Producer<TorrentEvent, 512>,
+        mut command_rc: Consumer<Command, 64>,
+    ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
 
         let mut state_ref = state.as_ref();
@@ -327,17 +320,25 @@ impl<'scope, 'state: 'scope> EventLoop {
                         &mut self.connections,
                         &self.pending_connections,
                         &mut state_ref,
+                        &mut event_tx,
                     );
 
-                    if !prev_state_initialized && state_ref.is_initialzied() {
-                        prev_state_initialized = true;
-                        for (_, connection) in self.connections.iter_mut() {
-                            let msgs = std::mem::take(&mut connection.pre_meta_have_msgs);
-                            // Get all piece msgs
-                            for msg in msgs {
-                                connection.handle_message(msg, &mut state_ref, scope);
+                    if let Some((file_and_meta, _)) = state_ref.state() {
+                        if !prev_state_initialized {
+                            prev_state_initialized = true;
+                            event_tx
+                                .enqueue(TorrentEvent::MetadataComplete(
+                                    file_and_meta.metadata.clone(),
+                                ))
+                                .expect("event queue should never be full here");
+                            for (_, connection) in self.connections.iter_mut() {
+                                let msgs = std::mem::take(&mut connection.pre_meta_have_msgs);
+                                // Get all piece msgs
+                                for msg in msgs {
+                                    connection.handle_message(msg, &mut state_ref, scope);
+                                }
+                                // TODO: Trigger unchoked peers
                             }
-                            // TODO: Trigger unchoked peers
                         }
                     }
 
@@ -400,7 +401,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 }
                 sq.sync();
 
-                self.handle_commands(&mut sq, &mut shutting_down)?;
+                self.handle_commands(&mut sq, &mut shutting_down, &mut command_rc);
                 if shutting_down && self.connections.is_empty() {
                     log::info!("All connections closed, shutdown complete");
                     return Ok(());
@@ -409,7 +410,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                 if let Some((_, torrent_state)) = state_ref.state() {
                     if torrent_state.is_complete {
                         log::info!("Torrent complete!");
-                        return Ok(());
+                        if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
+                            log::error!("Torrent completion event missed");
+                        }
                     }
                 }
             }
@@ -423,59 +426,53 @@ impl<'scope, 'state: 'scope> EventLoop {
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
         shutting_down: &mut bool,
-    ) -> Result<(), Error> {
+        command_rc: &mut Consumer<Command, 64>,
+    ) {
         let existing_connections: HashSet<SockAddr> = self
             .connections
             .iter()
             .filter_map(|(_, peer)| peer.socket.peer_addr().ok())
             .collect();
-        loop {
-            match self.command_rc.try_recv() {
-                Ok(command) => match command {
-                    Command::ConnectToPeers(addrs) => {
-                        // Don't connect to new peers if we are shutting down
-                        if *shutting_down {
+        while let Some(command) = command_rc.dequeue() {
+            match command {
+                Command::ConnectToPeers(addrs) => {
+                    // Don't connect to new peers if we are shutting down
+                    if *shutting_down {
+                        continue;
+                    }
+                    for addr in addrs.into_iter().map(|addr| addr.into()) {
+                        if self.pending_connections.contains(&addr)
+                            || existing_connections.contains(&addr)
+                        {
                             continue;
                         }
-                        for addr in addrs.into_iter().map(|addr| addr.into()) {
-                            if self.pending_connections.contains(&addr)
-                                || existing_connections.contains(&addr)
-                            {
-                                continue;
-                            }
-                            if self.pending_connections.len() + self.connections.len()
-                                < MAX_CONNECTIONS
-                            {
-                                self.pending_connections.insert(addr.clone());
-                                self.connect_to_peer(addr, sq);
-                            }
+                        if self.pending_connections.len() + self.connections.len() < MAX_CONNECTIONS
+                        {
+                            self.pending_connections.insert(addr.clone());
+                            self.connect_to_peer(addr, sq);
                         }
                     }
-                    Command::Stop => {
-                        if !*shutting_down {
-                            log::info!("Shutdown requested, closing all connections");
-                            *shutting_down = true;
-                            // Initiate graceful shutdown for all connections
-                            for (conn_id, connection) in self.connections.iter_mut() {
-                                log::info!("Closing connection to peer: {}", connection.peer_id);
-                                connection.pending_disconnect =
-                                    Some(DisconnectReason::ShuttingDown);
-                                io_utils::stop_connection(
-                                    sq,
-                                    conn_id,
-                                    connection.socket.as_raw_fd(),
-                                    &mut self.events,
-                                );
-                            }
+                }
+                Command::Stop => {
+                    if !*shutting_down {
+                        log::info!("Shutdown requested, closing all connections");
+                        *shutting_down = true;
+                        // Initiate graceful shutdown for all connections
+                        for (conn_id, connection) in self.connections.iter_mut() {
+                            log::info!("Closing connection to peer: {}", connection.peer_id);
+                            connection.pending_disconnect = Some(DisconnectReason::ShuttingDown);
+                            io_utils::stop_connection(
+                                sq,
+                                conn_id,
+                                connection.socket.as_raw_fd(),
+                                &mut self.events,
+                            );
                         }
                     }
-                },
-                Err(TryRecvError::Disconnected) => return Err(Error::PeerProviderDisconnect),
-                Err(TryRecvError::Empty) => break,
+                }
             }
         }
         sq.sync();
-        Ok(())
     }
 
     fn connect_to_peer<Q: SubmissionQueue>(
@@ -788,19 +785,37 @@ fn report_tick_metrics(
     state: &mut StateRef<'_>,
     connections: &Slab<PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
+    event_tx: &mut Producer<TorrentEvent, 512>,
 ) {
+    let mut pieces_completed = 0;
+    let mut pieces_allocated = 0;
     if let Some((_, torrent_state)) = state.state() {
+        let total_completed = torrent_state.piece_selector.total_completed();
         let counter = metrics::counter!("pieces_completed");
-        counter.absolute(torrent_state.piece_selector.total_completed() as u64);
+        counter.absolute(total_completed as u64);
+        let total_allocated = torrent_state.piece_selector.total_allocated();
         let gauge = metrics::gauge!("pieces_allocated");
-        gauge.set(torrent_state.piece_selector.total_allocated() as u32);
+        gauge.set(total_allocated as u32);
         let gauge = metrics::gauge!("num_unchoked");
         gauge.set(torrent_state.num_unchoked);
+        pieces_completed = total_completed;
+        pieces_allocated = total_allocated;
     }
     let gauge = metrics::gauge!("num_connections");
     gauge.set(connections.len() as u32);
     let gauge = metrics::gauge!("num_pending_connections");
     gauge.set(pending_connections.len() as u32);
+
+    if event_tx
+        .enqueue(TorrentEvent::TorrentMetrics {
+            pieces_completed,
+            pieces_allocated,
+            num_connections: connections.len(),
+        })
+        .is_err()
+    {
+        log::error!("Torrent metrics event missed")
+    }
 }
 
 pub(crate) fn tick<'scope, 'state: 'scope>(
@@ -808,6 +823,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
     connections: &mut Slab<PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
     torrent_state: &mut StateRef<'state>,
+    event_tx: &mut Producer<TorrentEvent, 512>,
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
     // 1. Calculate bandwidth (deal with initial start up)
@@ -904,24 +920,25 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
                 }
             }
             peer.fill_request_queue();
-            peer.report_metrics();
+            peer.report_metrics(event_tx);
         }
     }
 
-    report_tick_metrics(torrent_state, connections, pending_connections);
+    report_tick_metrics(torrent_state, connections, pending_connections, event_tx);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Command;
     use crate::peer_protocol::generate_peer_id;
     use crate::test_utils::setup_test;
+    use heapless::spsc::Queue;
     use io_uring::IoUring;
     use metrics::Key;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use metrics_util::{CompositeKey, MetricKind};
     use std::net::{SocketAddrV4, TcpListener};
-    use std::sync::mpsc;
     use std::time::Duration;
 
     #[test]
@@ -934,8 +951,6 @@ mod tests {
         let snapshotter = debbuging.snapshotter();
         // Setup test environment
 
-        let (tx, rx) = mpsc::channel();
-
         const HANDSHAKE_SHOULD_TIMEOUT: u64 = 8;
 
         // Create a listener that will accept connections but not respond
@@ -943,6 +958,10 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let addr = SocketAddrV4::new([127, 0, 0, 1].into(), addr.port());
 
+        let mut command_q = heapless::spsc::Queue::new();
+        let (mut command_tx, command_rc) = command_q.split();
+        let mut event_q = Queue::<TorrentEvent, 512>::new();
+        let (event_tx, _event_rx) = event_q.split();
         // Spawn a thread to accept the connection but not respond
         let simulated_peer_thread = std::thread::spawn(move || {
             // Send a connection attempt to our listener
@@ -950,41 +969,43 @@ mod tests {
             // Keep the socket open but don't send any data
             std::thread::sleep(Duration::from_secs(HANDSHAKE_SHOULD_TIMEOUT));
         });
-        let event_loop_thread = std::thread::spawn(move || {
-            let mut download_state = setup_test();
-            metrics::with_local_recorder(&debbuging, || {
-                let our_id = generate_peer_id();
-                let mut event_loop = EventLoop::new(our_id, Slab::new(), rx);
-                let ring = IoUring::builder()
-                    .setup_single_issuer()
-                    .setup_clamp()
-                    .setup_cqsize(4096)
-                    .setup_defer_taskrun()
-                    .setup_coop_taskrun()
-                    .build(4096)
-                    .unwrap();
-                let result = event_loop.run(ring, &mut download_state);
-                assert!(result.is_ok());
-            })
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                let mut download_state = setup_test();
+                metrics::with_local_recorder(&debbuging, || {
+                    let our_id = generate_peer_id();
+                    let mut event_loop = EventLoop::new(our_id, Slab::new());
+                    let ring = IoUring::builder()
+                        .setup_single_issuer()
+                        .setup_clamp()
+                        .setup_cqsize(4096)
+                        .setup_defer_taskrun()
+                        .setup_coop_taskrun()
+                        .build(4096)
+                        .unwrap();
+                    let result = event_loop.run(ring, &mut download_state, event_tx, command_rc);
+                    assert!(result.is_ok());
+                })
+            });
+            command_tx
+                .enqueue(Command::ConnectToPeers(vec![addr]))
+                .unwrap();
+            std::thread::sleep(Duration::from_secs(HANDSHAKE_SHOULD_TIMEOUT));
+            command_tx.enqueue(Command::Stop).unwrap();
+            simulated_peer_thread.join().unwrap();
+
+            let snapshot = snapshotter.snapshot();
+            #[allow(clippy::mutable_key_type)]
+            let metrics = snapshot.into_hashmap();
+            let val = metrics.get(&CompositeKey::new(
+                MetricKind::Counter,
+                Key::from_name("peer_handshake_timeout"),
+            ));
+            let DebugValue::Counter(num_timeouts) = val.unwrap().2 else {
+                unreachable!();
+            };
+            assert_eq!(num_timeouts, 1);
         });
-
-        tx.send(Command::ConnectToPeers(vec![addr])).unwrap();
-        std::thread::sleep(Duration::from_secs(HANDSHAKE_SHOULD_TIMEOUT));
-        tx.send(Command::Stop).unwrap();
-        event_loop_thread.join().unwrap();
-        simulated_peer_thread.join().unwrap();
-
-        let snapshot = snapshotter.snapshot();
-        #[allow(clippy::mutable_key_type)]
-        let metrics = snapshot.into_hashmap();
-        let val = metrics.get(&CompositeKey::new(
-            MetricKind::Counter,
-            Key::from_name("peer_handshake_timeout"),
-        ));
-        let DebugValue::Counter(num_timeouts) = val.unwrap().2 else {
-            unreachable!();
-        };
-        assert_eq!(num_timeouts, 1);
     }
 
     // // Timeouts when accepting an incoming connection is handled properly

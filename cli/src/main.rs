@@ -1,12 +1,15 @@
 use std::{
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use clap::{Args, Parser};
+use crossbeam_channel::{bounded, select, tick};
 use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;
-use vortex_bittorrent::{Command, State, Torrent, generate_peer_id};
+use parking_lot::Mutex;
+use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
 
 use tikv_jemallocator::Jemalloc;
 
@@ -56,8 +59,6 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let (tx, rc) = std::sync::mpsc::channel();
-
     let state = match cli.torrent_info {
         TorrentInfo {
             info_hash: Some(info_hash),
@@ -76,38 +77,109 @@ fn main() {
 
     let info_hash_id = Id::from_bytes(state.info_hash()).unwrap();
 
-    std::thread::spawn(move || {
-        let mut builder = Dht::builder();
-        let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
-        if dht_boostrap_nodes.exists() {
-            let list = std::fs::read_to_string(&dht_boostrap_nodes).unwrap();
-            let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
-            builder.extra_bootstrap(&cached_nodes);
-        }
+    let mut command_q = heapless::spsc::Queue::new();
+    let mut event_q = heapless::spsc::Queue::new();
 
-        let dht_client = builder.build().unwrap();
-        log::info!("Bootstrapping!");
-        dht_client.bootstrapped();
-        log::info!("Bootstrapping done!");
-        dht_client.announce_peer(info_hash_id, None).unwrap();
-
-        loop {
-            // query
-            let all_peers = dht_client.get_peers(info_hash_id);
-            for peers in all_peers {
-                log::info!("Got {} peers", peers.len());
-                tx.send(Command::ConnectToPeers(peers)).unwrap();
-            }
-            let bootstrap_nodes = dht_client.to_bootstrap();
-            let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
-            std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes()).unwrap();
-            std::thread::sleep(Duration::from_secs(20));
-        }
-    });
+    let (command_tx, command_rc) = command_q.split();
+    let (event_tx, mut event_rc) = event_q.split();
+    // Keeping the mutex out here makes the hotter path
+    // inside bittorrent faster since the spsc queue reciever is
+    // simpler (and better suited to an event loop) compared to a mpmc channel.
+    let command_tx = Arc::new(Mutex::new(command_tx));
 
     let id = generate_peer_id();
-    let mut torrrent = Torrent::new(id, state);
+    let mut torrent = Torrent::new(id, state);
     let start_time = Instant::now();
-    torrrent.start(rc).unwrap();
-    println!("DOWNLOADED in {}", start_time.elapsed().as_secs());
+    let (shutdown_signal_tx, shudown_signal_rc) = bounded(1);
+
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            torrent.start(event_tx, command_rc).unwrap();
+            println!("T thread shutdown");
+        });
+        let cmd_tx_clone = command_tx.clone();
+        s.spawn(move || {
+            let mut builder = Dht::builder();
+            let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
+            if dht_boostrap_nodes.exists() {
+                let list = std::fs::read_to_string(&dht_boostrap_nodes).unwrap();
+                let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
+                builder.extra_bootstrap(&cached_nodes);
+            }
+
+            let dht_client = builder.build().unwrap();
+            log::info!("Bootstrapping!");
+            dht_client.bootstrapped();
+            log::info!("Bootstrapping done!");
+            // TODO: Remove announcement when complete?
+            dht_client.announce_peer(info_hash_id, None).unwrap();
+
+            let fetch_interval = tick(Duration::from_secs(20));
+
+            let query = || {
+                println!("DHT query");
+                // query
+                let all_peers = dht_client.get_peers(info_hash_id);
+                let mut cmd_tx = cmd_tx_clone.lock();
+                for peers in all_peers {
+                    log::info!("Got {} peers", peers.len());
+                    cmd_tx.enqueue(Command::ConnectToPeers(peers)).unwrap();
+                }
+            };
+
+            query();
+            loop {
+                select! {
+                    recv(fetch_interval) -> _ => {
+                        query();
+                    }
+                    recv(shudown_signal_rc) -> _ => {
+                        println!("DHT shutdown");
+                        let bootstrap_nodes = dht_client.to_bootstrap();
+                        let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
+                        std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes())
+                            .unwrap();
+                        break;
+                    }
+
+                }
+            }
+        });
+
+        'outer: loop {
+            while let Some(event) = event_rc.dequeue() {
+                match event {
+                    TorrentEvent::TorrentComplete => {
+                        let elapsed = start_time.elapsed();
+                        println!("Download complete in: {}s", elapsed.as_secs());
+                        let _ = command_tx.lock().enqueue(Command::Stop);
+                        shutdown_signal_tx.send(()).unwrap();
+                        break 'outer;
+                    }
+                    TorrentEvent::MetadataComplete(_torrent) => {
+                        println!("Metadata complete");
+                    }
+                    TorrentEvent::PeerMetrics {
+                        conn_id,
+                        throuhgput,
+                        endgame,
+                        snubbed,
+                    } => {
+                        println!(
+                            "throuhgput: {conn_id} {throuhgput} endgame: {endgame}, snubbed: {snubbed}"
+                        );
+                    }
+                    TorrentEvent::TorrentMetrics {
+                        pieces_completed,
+                        pieces_allocated,
+                        num_connections,
+                    } => {
+                        println!(
+                            "pieces: {pieces_completed} {pieces_allocated}, conn {num_connections}"
+                        );
+                    }
+                }
+            }
+        }
+    });
 }

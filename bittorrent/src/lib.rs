@@ -2,7 +2,7 @@ use std::{
     cell::OnceCell,
     collections::VecDeque,
     io::{self},
-    net::TcpListener,
+    net::{SocketAddrV4, TcpListener},
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
@@ -10,6 +10,7 @@ use std::{
 
 use event_loop::{EventLoop, EventType};
 use file_store::FileStore;
+use heapless::spsc::{Consumer, Producer};
 use io_uring::{
     IoUring, opcode,
     types::{self},
@@ -32,7 +33,6 @@ use peer_comm::{peer_connection::PeerConnection, *};
 #[cfg(feature = "fuzzing")]
 pub use peer_protocol::*;
 
-pub use event_loop::Command;
 pub use peer_protocol::PeerId;
 pub use peer_protocol::generate_peer_id;
 
@@ -54,7 +54,11 @@ impl Torrent {
         Self { our_id, state }
     }
 
-    pub fn start(&mut self, command_rc: Receiver<Command>) -> Result<(), Error> {
+    pub fn start(
+        &mut self,
+        event_tx: Producer<TorrentEvent, 512>,
+        command_rc: Consumer<Command, 64>,
+    ) -> Result<(), Error> {
         // check ulimit
         let mut ring: IoUring = IoUring::builder()
             .setup_single_issuer()
@@ -78,9 +82,37 @@ impl Torrent {
             ring.submission().push(&accept_op).unwrap();
         }
         ring.submission().sync();
-        let mut event_loop = EventLoop::new(self.our_id, events, command_rc);
-        event_loop.run(ring, &mut self.state)
+        let mut event_loop = EventLoop::new(self.our_id, events);
+        event_loop.run(ring, &mut self.state, event_tx, command_rc)
     }
+}
+
+/// Commands that can be sent to the event loop through the command channel
+#[derive(Debug)]
+pub enum Command {
+    /// Connect to peers at the given address
+    /// already connected peers will be filtered out
+    ConnectToPeers(Vec<SocketAddrV4>),
+    /// Stop the event loop gracefully
+    Stop,
+}
+
+/// Events from the inprogress torrent
+#[derive(Debug)]
+pub enum TorrentEvent {
+    TorrentComplete,
+    MetadataComplete(Box<lava_torrent::torrent::v1::Torrent>),
+    PeerMetrics {
+        conn_id: usize,
+        throuhgput: u64,
+        endgame: bool,
+        snubbed: bool,
+    },
+    TorrentMetrics {
+        pieces_completed: usize,
+        pieces_allocated: usize,
+        num_connections: usize,
+    },
 }
 
 pub struct InitializedState {

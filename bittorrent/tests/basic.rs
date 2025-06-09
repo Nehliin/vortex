@@ -1,7 +1,7 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use metrics_exporter_prometheus::PrometheusBuilder;
-use vortex_bittorrent::{Command, State, Torrent, generate_peer_id};
+use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
 
 #[test]
 fn basic_seeded_download() {
@@ -20,25 +20,56 @@ fn basic_seeded_download() {
     );
 
     let download_time = Instant::now();
-    let (tx, rc) = std::sync::mpsc::channel();
+    let mut command_q = heapless::spsc::Queue::new();
+    let mut event_q = heapless::spsc::Queue::new();
 
-    tx.send(Command::ConnectToPeers(vec![
-        "127.0.0.1:51413".parse().unwrap(),
-    ]))
-    .unwrap();
+    let (mut command_tx, command_rc) = command_q.split();
+    let (event_tx, mut event_rc) = event_q.split();
 
-    // Spawn a thread to send Stop command after a timeout
-    let tx_clone = tx.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-        // Send stop command if download takes too long
-        let _ = tx_clone.send(Command::Stop);
+    command_tx
+        .enqueue(Command::ConnectToPeers(vec![
+            "127.0.0.1:51413".parse().unwrap(),
+        ]))
+        .unwrap();
+
+    std::thread::scope(move |s| {
+        // Spawn a thread to send Stop command after a timeout
+        s.spawn(move || {
+            torrent.start(event_tx, command_rc).unwrap();
+        });
+        'outer: loop {
+            if download_time.elapsed() >= Duration::from_secs(60) {
+                // Should never take this long
+                panic!("Download is too slow");
+            }
+            while let Some(event) = event_rc.dequeue() {
+                match event {
+                    TorrentEvent::TorrentComplete => {
+                        let elapsed = download_time.elapsed();
+                        log::info!("Download complete in: {}s", elapsed.as_secs());
+                        let expected = std::fs::read("../assets/test-file-1").unwrap();
+                        let actual =
+                            std::fs::read("../downloaded/test-file-1/test-file-1").unwrap();
+                        assert_eq!(actual, expected);
+                        let _ = command_tx.enqueue(Command::Stop);
+                        break 'outer;
+                    }
+                    TorrentEvent::MetadataComplete(_torrent) => {
+                        log::info!("METADATA COMPLETE");
+                    }
+                    TorrentEvent::PeerMetrics {
+                        conn_id: _,
+                        throuhgput: _,
+                        endgame: _,
+                        snubbed: _,
+                    } => {}
+                    TorrentEvent::TorrentMetrics {
+                        pieces_completed: _,
+                        pieces_allocated: _,
+                        num_connections: _,
+                    } => {}
+                }
+            }
+        }
     });
-
-    torrent.start(rc).unwrap();
-    let elapsed = download_time.elapsed();
-    log::info!("Download complete in: {}s", elapsed.as_secs());
-    let expected = std::fs::read("../assets/test-file-1").unwrap();
-    let actual = std::fs::read("../downloaded/test-file-1/test-file-1").unwrap();
-    assert_eq!(actual, expected);
 }

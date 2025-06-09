@@ -1,10 +1,12 @@
 use std::time::{Duration, Instant};
 
 use bt_bencode::Deserializer;
+use heapless::spsc::Queue;
 use serde::Deserialize;
 use slab::Slab;
 
 use crate::{
+    TorrentEvent,
     event_loop::{MAX_OUTSTANDING_REQUESTS, tick},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
     peer_connection::OutgoingMsg,
@@ -276,6 +278,8 @@ fn have_without_interest() {
 #[test]
 fn slow_start() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -288,6 +292,7 @@ fn slow_start() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].prev_throughput, 0);
@@ -339,6 +344,7 @@ fn slow_start() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
 
         assert_eq!(connections[key].prev_throughput, 21845);
@@ -380,6 +386,7 @@ fn slow_start() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
 
         assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
@@ -421,6 +428,7 @@ fn slow_start() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
 
         assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
@@ -433,6 +441,8 @@ fn slow_start() {
 #[test]
 fn desired_queue_size() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -476,6 +486,7 @@ fn desired_queue_size() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
 
         // 2 subpieces * 3
@@ -486,6 +497,7 @@ fn desired_queue_size() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
 
         // Never go below 1
@@ -499,6 +511,8 @@ fn desired_queue_size() {
 #[test]
 fn peer_choke_recv_supports_fast() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -575,6 +589,7 @@ fn peer_choke_recv_supports_fast() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
 
         // Want an odd number here to test releasing in flight pieces
@@ -606,6 +621,8 @@ fn peer_choke_recv_supports_fast() {
 #[test]
 fn peer_choke_recv_does_not_support_fast() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -682,6 +699,7 @@ fn peer_choke_recv_does_not_support_fast() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
 
         // Want an odd number here to test releasing in flight pieces
@@ -1290,6 +1308,8 @@ fn invalid_piece() {
 #[test]
 fn snubbed_peer() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -1334,6 +1354,7 @@ fn snubbed_peer() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
         assert!(!connections[key].slow_start);
         assert!(connections[key].snubbed);
@@ -1358,6 +1379,7 @@ fn snubbed_peer() {
             &mut connections,
             &Default::default(),
             &mut state_ref,
+            &mut event_tx,
         );
         assert!(!connections[key].snubbed);
         assert!(connections[key].target_inflight > 1);

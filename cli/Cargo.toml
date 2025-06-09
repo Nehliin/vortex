@@ -16,9 +16,11 @@ lava_torrent = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 vortex-bittorrent = { path = "../bittorrent" }
+heapless = { workspace = true }
 tikv-jemallocator = "0.5"
 # NOTE: The 5.4.0 version doesn't seem to have been posted to GIT so do not update unless the code is public
 mainline = { version = "=5.3.1", default-features = false, features = ["node"]}
 metrics-exporter-prometheus = "0.16"
 clap = { version = "4.5.39", features = ["derive"] }
+crossbeam-channel = "0.5.15"
 
