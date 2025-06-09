@@ -6,7 +6,6 @@ use std::{
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
-    time::Duration,
 };
 
 use event_loop::{EventLoop, EventType};

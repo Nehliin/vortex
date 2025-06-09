@@ -22,4 +22,5 @@ tikv-jemallocator = "0.5"
 mainline = { version = "=5.3.1", default-features = false, features = ["node"]}
 metrics-exporter-prometheus = "0.16"
 clap = { version = "4.5.39", features = ["derive"] }
+crossbeam-channel = "0.5.15"
 
