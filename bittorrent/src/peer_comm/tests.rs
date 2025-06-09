@@ -6,14 +6,15 @@ use serde::Deserialize;
 use slab::Slab;
 
 use crate::{
-    event_loop::{tick, MAX_OUTSTANDING_REQUESTS},
+    TorrentEvent,
+    event_loop::{MAX_OUTSTANDING_REQUESTS, tick},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
     peer_connection::OutgoingMsg,
-    piece_selector::{Subpiece, SUBPIECE_SIZE},
+    piece_selector::{SUBPIECE_SIZE, Subpiece},
     test_utils::{
         generate_peer, setup_test, setup_uninitialized_test,
         setup_uninitialized_test_with_metadata_size,
-    }, TorrentEvent,
+    },
 };
 
 use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};

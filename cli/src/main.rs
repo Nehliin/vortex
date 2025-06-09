@@ -120,12 +120,10 @@ fn main() {
                 println!("DHT query");
                 // query
                 let all_peers = dht_client.get_peers(info_hash_id);
+                let mut cmd_tx = cmd_tx_clone.lock();
                 for peers in all_peers {
                     log::info!("Got {} peers", peers.len());
-                    cmd_tx_clone
-                        .lock()
-                        .enqueue(Command::ConnectToPeers(peers))
-                        .unwrap();
+                    cmd_tx.enqueue(Command::ConnectToPeers(peers)).unwrap();
                 }
             };
 
