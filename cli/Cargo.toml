@@ -18,9 +18,14 @@ env_logger = { workspace = true }
 vortex-bittorrent = { path = "../bittorrent" }
 heapless = { workspace = true }
 tikv-jemallocator = "0.5"
-# NOTE: The 5.4.0 version doesn't seem to have been posted to GIT so do not update unless the code is public
-mainline = { version = "=5.3.1", default-features = false, features = ["node"]}
-metrics-exporter-prometheus = "0.16"
+mainline = { git = "https://github.com/Nehliin/mainline.git", branch = "feature-gate", default-features = false, features = ["node"]}
+metrics-exporter-prometheus = { workspace = true }
 clap = { version = "4.5.39", features = ["derive"] }
 crossbeam-channel = "0.5.15"
+# ratatui uses all default feature
+#crossterm = "0.29.0"
+ratatui = "0.29.0"
+human_bytes = "0.4.3"
+humantime = "2.2"
+throbber-widgets-tui = "0.8.0"
 

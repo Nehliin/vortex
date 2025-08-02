@@ -687,7 +687,7 @@ impl UtpStream {
             }
             (p_type, conn_state) => {
                 let mut state = self.state_mut();
-                log::error!("Unhandled packet type!: {:?}", p_type);
+                log::error!("Unhandled packet type!: {p_type:?}");
                 // Reset connection state if it wasn't modified
                 state.connection_state = conn_state;
             }

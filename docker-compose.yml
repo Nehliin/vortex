@@ -5,7 +5,7 @@ services:
     image: docker.io/prom/prometheus
     container_name: prometheus
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:Z
     networks:
       - internal
     ports:

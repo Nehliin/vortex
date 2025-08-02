@@ -108,8 +108,7 @@ impl BufferRing {
                 Some(libc::EINVAL) => {
                     // using buf_ring requires kernel 5.19 or greater.
                     return Err(io::Error::other(format!(
-                        "buf_ring.register returned {}, most likely indicating this kernel is not 5.19+",
-                        e
+                        "buf_ring.register returned {e}, most likely indicating this kernel is not 5.19+"
                     )));
                 }
                 Some(libc::EEXIST) => {

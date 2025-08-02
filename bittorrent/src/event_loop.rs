@@ -82,7 +82,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             let event = events.remove(user_data.event_idx as _);
             let socket = match event {
                 EventType::Connect { socket, addr } => {
-                    log::debug!("Connect timed out!: {:?}", addr);
+                    log::debug!("Connect timed out!: {addr:?}");
                     assert!(pending_connections.remove(&addr));
                     let connect_fail_counter = metrics::counter!("peer_connect_timeout");
                     connect_fail_counter.increment(1);
@@ -483,7 +483,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
             Ok(socket) => socket,
             Err(e) => {
-                log::error!("Failed to create socket: {}", e);
+                log::error!("Failed to create socket: {e}");
                 return;
             }
         };
@@ -496,7 +496,7 @@ impl<'scope, 'state: 'scope> EventLoop {
             unreachable!();
         };
 
-        log::debug!("Connecting to peer: {:?}", addr);
+        log::debug!("Connecting to peer: {addr:?}");
         let connect_counter = metrics::counter!("peer_connect_attempts");
         connect_counter.increment(1);
 
@@ -875,7 +875,6 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             }
             connection.prev_throughput = connection.throughput;
             connection.throughput = 0;
-            // TODO: add to throughput total stats
         }
     }
     if let Some((file_and_info, torrent_state)) = torrent_state.state() {

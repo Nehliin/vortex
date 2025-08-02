@@ -108,9 +108,9 @@ then
         --env PUID=$UID \
         --env PGID=$UID \
         --replace \
-        --mount type=bind,src="${tr_config_dir}",dst=/config \
-        --mount type=bind,src="${tr_downloads_dir}",dst=/downloads \
-        --mount type=bind,src="${tr_watch_dir}",dst=/watch \
+        -v "${tr_config_dir}:/config:Z" \
+        -v "${tr_downloads_dir}:/downloads:Z" \
+        -v "${tr_watch_dir}:/watch:Z" \
         -p 51413:51413 \
         --detach \
         linuxserver/transmission
