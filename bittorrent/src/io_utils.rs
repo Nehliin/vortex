@@ -11,7 +11,6 @@ use io_uring::{
     squeue::PushError,
     types::{self, CancelBuilder, Timespec},
 };
-use libc::SHUT_WR;
 use slab::Slab;
 use socket2::Socket;
 
@@ -143,39 +142,34 @@ pub fn write_to_connection<Q: SubmissionQueue>(
     sq.push(write_op);
 }
 
-// Cancels all operations on the socket and initiates graceful shutdown
-pub fn stop_connection<Q: SubmissionQueue>(
-    sq: &mut BackloggedSubmissionQueue<Q>,
-    conn_id: usize,
-    fd: RawFd,
-    events: &mut Slab<EventType>,
-) {
-    let event = events.insert(EventType::Cancel {
-        connection_idx: conn_id,
-    });
-    let user_data = UserData::new(event, None);
-    let cancel_op = opcode::AsyncCancel2::new(CancelBuilder::fd(types::Fd(fd)).all())
-        .build()
-        .user_data(user_data.as_u64());
-    sq.push(cancel_op);
-    let event = events.insert(EventType::Shutdown {
-        connection_idx: conn_id,
-    });
-    let user_data = UserData::new(event, None);
-    let shutdown_op = opcode::Shutdown::new(types::Fd(fd), SHUT_WR)
-        .build()
-        .user_data(user_data.as_u64());
-    sq.push(shutdown_op);
-}
-
+// NOTE: Socket contains an OwnedFd which automatically closes
+// the file descriptor in a blocking fashion upon dropping it.
+// That's great for a fallback since closing sockets should rarely block
+// and be fast enough. But to keep the io operations consistent I want to close
+// the socket the io_uring way which means transferring the ownership via `into_raw_fd`
+//
+// It is important that this function takes ownership of the socket, that should prevent
+// issues with closing the socket multiple times. For connected sockets, ownership can only
+// be provided after they have been removed from the `connections` slab. Freestanding
+// Connect/Write/Read all pass along the socket which means there should never exist
+// two separate events with the same socket meaning the socket can ONLY be closed once.
 pub fn close_socket<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     socket: Socket,
     events: &mut Slab<EventType>,
 ) {
+    let fd = socket.into_raw_fd();
+    let event = events.insert(EventType::Cancel);
+    let user_data = UserData::new(event, None);
+    // If more events are received in the same cqe loop there might still linger events
+    // that have been removed due to a earlier event in the loop causing the socket to close
+    let cancel_op = opcode::AsyncCancel2::new(CancelBuilder::fd(types::Fd(fd)).all())
+        .build()
+        .user_data(user_data.as_u64());
+    sq.push(cancel_op);
     let event = events.insert(EventType::Close);
     let user_data = UserData::new(event, None);
-    let close_op = opcode::Close::new(types::Fd(socket.into_raw_fd()))
+    let close_op = opcode::Close::new(types::Fd(fd))
         .build()
         .user_data(user_data.as_u64());
     sq.push(close_op);

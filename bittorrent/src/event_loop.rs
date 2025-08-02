@@ -40,8 +40,7 @@ pub enum EventType {
     Recv { socket: Socket, addr: SockAddr },
     ConnectedWrite { connection_idx: usize },
     ConnectedRecv { connection_idx: usize },
-    Cancel { connection_idx: usize },
-    Shutdown { connection_idx: usize },
+    Cancel,
     Close,
     // Dummy used to allow stable keys in the slab
     Dummy,
@@ -354,18 +353,24 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                     last_tick = Instant::now();
                     // Dealt with here to make tick easier to test
-                    for (conn_id, connection) in self.connections.iter_mut() {
-                        if let Some(reason) = &connection.pending_disconnect {
-                            log::warn!("Disconnect: {} reason {reason}", connection.peer_id);
-                            // Event handler for this deals with releasing pieces and decrements
-                            // num unchoked
-                            io_utils::stop_connection(
-                                &mut sq,
-                                conn_id,
-                                connection.socket.as_raw_fd(),
-                                &mut self.events,
-                            );
-                        }
+                    let to_remove: Vec<usize> = self
+                        .connections
+                        .iter()
+                        .filter_map(|(id, conn)| conn.pending_disconnect.as_ref().map(|_| id))
+                        .collect();
+
+                    for idx in to_remove {
+                        let connection = self.connections.remove(idx);
+                        log::warn!(
+                            "Disconnect: {} reason {}",
+                            connection.peer_id,
+                            connection.pending_disconnect.unwrap()
+                        );
+                        let counter = metrics::counter!("disconnects");
+                        counter.increment(1);
+                        // Event handler for this deals with releasing pieces and decrements
+                        // num unchoked
+                        io_utils::close_socket(&mut sq, connection.socket, &mut self.events);
                     }
                     sq.sync();
                 }
@@ -468,15 +473,13 @@ impl<'scope, 'state: 'scope> EventLoop {
                         log::info!("Shutdown requested, closing all connections");
                         *shutting_down = true;
                         // Initiate graceful shutdown for all connections
-                        for (conn_id, connection) in self.connections.iter_mut() {
-                            log::info!("Closing connection to peer: {}", connection.peer_id);
-                            connection.pending_disconnect = Some(DisconnectReason::ShuttingDown);
-                            io_utils::stop_connection(
-                                sq,
-                                conn_id,
-                                connection.socket.as_raw_fd(),
-                                &mut self.events,
+                        for connection in self.connections.drain() {
+                            log::info!(
+                                "[{}] Closing connection to peer: {}",
+                                connection.socket.peer_addr().unwrap().as_socket().unwrap()
+                                connection.peer_id,
                             );
+                            io_utils::close_socket(sq, connection.socket, &mut self.events);
                         }
                     }
                 }
@@ -632,10 +635,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // a full connection which does have graceful shutdown mechanisms
                 io_utils::recv(sq, user_data, fd, self.read_ring.bgid(), &HANDSHAKE_TIMEOUT);
             }
-            EventType::ConnectedWrite { connection_idx: _ }
-            | EventType::Cancel { connection_idx: _ }
-            | EventType::Shutdown { connection_idx: _ } => {
-                // neither replaced nor modified
+            EventType::Cancel => {
+                log::trace!("Cancel event completed");
+                self.events.remove(io_event.user_data.event_idx as _);
+            }
+            EventType::ConnectedWrite { connection_idx: _ } => {
                 // TODO: add to metrics for writes?
                 self.events.remove(io_event.user_data.event_idx as _);
             }
