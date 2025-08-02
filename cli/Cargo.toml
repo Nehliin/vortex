@@ -23,4 +23,10 @@ mainline = { version = "=5.3.1", default-features = false, features = ["node"]}
 metrics-exporter-prometheus = "0.16"
 clap = { version = "4.5.39", features = ["derive"] }
 crossbeam-channel = "0.5.15"
+# ratatui uses all default feature
+#crossterm = "0.29.0"
+ratatui = "0.29.0"
+human_bytes = "0.4.3"
+humantime = "2.2"
+throbber-widgets-tui = "0.8.0"
 
