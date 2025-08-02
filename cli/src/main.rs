@@ -21,11 +21,8 @@ use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout},
     prelude::{Buffer, Rect},
     style::{Color, Modifier, Style, Stylize, palette::tailwind},
-    text::{Line, Span, Text},
-    widgets::{
-        Axis, Block, Borders, Chart, Clear, Dataset, Gauge, Padding, Paragraph, Row, Table, Widget,
-        Wrap,
-    },
+    text::{Span, Text},
+    widgets::{Axis, Block, Borders, Chart, Clear, Dataset, Gauge, Row, Table, Widget},
 };
 use throbber_widgets_tui::ThrobberState;
 use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};

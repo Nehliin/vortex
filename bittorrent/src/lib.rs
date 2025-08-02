@@ -498,8 +498,8 @@ mod test_utils {
 
             let mut announce_list = Vec::new();
             for i in 0..50 {
-                announce_list.push(format!("http://tracker{}.example.com:8080/announce", i));
-                announce_list.push(format!("udp://tracker{}.example.com:8080/announce", i));
+                announce_list.push(format!("http://tracker{i}.example.com:8080/announce"));
+                announce_list.push(format!("udp://tracker{i}.example.com:8080/announce"));
             }
             builder = builder.add_extra_info_field(
                 "announce-list".to_string(),
@@ -508,7 +508,7 @@ mod test_utils {
 
             for i in 0..50 {
                 builder = builder.add_extra_info_field(
-                    format!("test_field_{}", i),
+                    format!("test_field_{i}"),
                     BencodeElem::String(format!("This is test field number {} with some additional padding data to make the metadata larger. {}", i, "x".repeat(200)))
                 );
             }
@@ -516,7 +516,7 @@ mod test_utils {
             // Add multiple large binary fields
             for i in 0..5 {
                 builder = builder.add_extra_info_field(
-                    format!("test_binary_data_{}", i),
+                    format!("test_binary_data_{i}"),
                     BencodeElem::Bytes(vec![i as u8; 2048]), // 2KB of binary data each
                 );
             }

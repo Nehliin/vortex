@@ -103,12 +103,12 @@ impl Display for PeerId {
         if let Ok(prefix) = core::str::from_utf8(&self.0[..8]) {
             write!(f, "{prefix}")?;
             for b in &self.0[8..] {
-                write!(f, "{:#x}", b)?;
+                write!(f, "{b:#x}")?;
             }
             Ok(())
         } else {
             for b in &self.0[..] {
-                write!(f, "{:#x}", b)?;
+                write!(f, "{b:#x}")?;
             }
             Ok(())
         }

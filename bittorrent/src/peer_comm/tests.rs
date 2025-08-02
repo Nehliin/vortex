@@ -2151,7 +2151,7 @@ fn metadata_download_single_piece() {
 
         // Check if there was a hash mismatch or other error
         if let Some(reason) = &a.pending_disconnect {
-            panic!("Peer got disconnected: {:?}", reason);
+            panic!("Peer got disconnected: {reason:?}");
         }
 
         // State should now be initialized with the downloaded metadata
@@ -2202,8 +2202,7 @@ fn metadata_download_multiple_pieces() {
         // Verify we have large enough metadata to test multi-piece download
         assert!(
             metadata_bytes.len() > SUBPIECE_SIZE as usize,
-            "Metadata should be larger than {} bytes to test multi-piece download",
-            SUBPIECE_SIZE
+            "Metadata should be larger than {SUBPIECE_SIZE} bytes to test multi-piece download"
         );
 
         // Set up extension handshake
@@ -2285,7 +2284,7 @@ fn metadata_download_multiple_pieces() {
 
         // Now the state should be initialized with the complete metadata
         if let Some(reason) = &a.pending_disconnect {
-            panic!("Peer got disconnected: {:?}", reason);
+            panic!("Peer got disconnected: {reason:?}");
         }
 
         assert!(
