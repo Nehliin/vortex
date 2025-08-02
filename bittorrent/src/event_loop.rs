@@ -112,15 +112,20 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                 }
                 EventType::ConnectedRecv { connection_idx }
                 | EventType::ConnectedWrite { connection_idx } => {
-                    let mut connection = connections.remove(connection_idx);
-                    log::error!("Peer [{}] Connection reset", connection.peer_id);
-                    if let Some((_, torrent_state)) = state_ref.state() {
-                        connection.release_all_pieces(torrent_state);
-                        if !connection.is_choking {
-                            torrent_state.num_unchoked -= 1;
+                    if let Some(mut connection) = connections.try_remove(connection_idx) {
+                        log::error!("Peer [{}] Connection reset", connection.peer_id);
+                        if let Some((_, torrent_state)) = state_ref.state() {
+                            connection.release_all_pieces(torrent_state);
+                            if !connection.is_choking {
+                                torrent_state.num_unchoked -= 1;
+                            }
                         }
+                        io_utils::close_socket(sq, connection.socket, events);
+                    } else {
+                        // If we are intrerrupted both connnected write and receive will fail
+                        // with ECONNRESET, only need to deal with it once
+                        log::warn!("ECONNRESET received for a closed socket");
                     }
-                    io_utils::close_socket(sq, connection.socket, events);
                 }
                 _ => unreachable!(),
             }
