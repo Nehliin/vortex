@@ -122,7 +122,7 @@ fn main() -> io::Result<()> {
         OpenOptions::new()
             .create(true)
             .append(true)
-            .open("vortext.log")?,
+            .open("vortex.log")?,
     );
     env_logger::builder()
         .target(env_logger::Target::Pipe(target))
