@@ -481,7 +481,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                         for connection in self.connections.drain() {
                             log::info!(
                                 "[{}] Closing connection to peer: {}",
-                                connection.socket.peer_addr().unwrap().as_socket().unwrap()
+                                connection.socket.peer_addr().unwrap().as_socket().unwrap(),
                                 connection.peer_id,
                             );
                             io_utils::close_socket(sq, connection.socket, &mut self.events);
@@ -744,8 +744,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                 if len == 0 {
                     let mut connection = self.connections.remove(connection_idx);
                     log::debug!(
-                        "[PeerId: {}] No more data, graceful shutdown complete",
-                        connection.peer_id
+                        "[PeerId: {}] No more data, graceful shutdown complete {}",
+                        connection.peer_id,
+                        connection.socket.peer_addr().unwrap().as_socket().unwrap()
                     );
                     self.events.remove(io_event.user_data.event_idx as _);
                     // Consider moving to func
