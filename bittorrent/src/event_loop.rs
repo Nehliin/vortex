@@ -82,14 +82,14 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             let event = events.remove(user_data.event_idx as _);
             let socket = match event {
                 EventType::Connect { socket, addr } => {
-                    log::debug!("Connect timed out!: {addr:?}");
+                    log::debug!("[{}] Connect timed out!", addr.as_socket().unwrap());
                     assert!(pending_connections.remove(&addr));
                     let connect_fail_counter = metrics::counter!("peer_connect_timeout");
                     connect_fail_counter.increment(1);
                     socket
                 }
                 EventType::Recv { socket, addr } => {
-                    log::debug!("Handshake timed out!: {addr:?}",);
+                    log::debug!("[{}] Handshake timed out!", addr.as_socket().unwrap());
                     assert!(pending_connections.remove(&addr));
                     let handshake_timeout_counter = metrics::counter!("peer_handshake_timeout");
                     handshake_timeout_counter.increment(1);
@@ -104,7 +104,10 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             let event = events.remove(user_data.event_idx as _);
             match event {
                 EventType::Write { socket, addr } | EventType::Recv { socket, addr } => {
-                    log::error!("Connection to {addr:?} reset before handshake completed ");
+                    log::error!(
+                        "[{}] Connection reset before handshake completed",
+                        addr.as_socket().unwrap()
+                    );
                     assert!(pending_connections.remove(&addr));
                     io_utils::close_socket(sq, socket, events);
                 }
@@ -128,7 +131,10 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             let event = events.remove(user_data.event_idx as _);
             match event {
                 EventType::Write { socket, addr } => {
-                    log::warn!("Attempted to write to closed connection {addr:?}");
+                    log::warn!(
+                        "[{}] Attempted to write to closed connection",
+                        addr.as_socket().unwrap()
+                    );
                     assert!(pending_connections.remove(&addr));
                     io_utils::close_socket(sq, socket, events);
                 }
@@ -163,7 +169,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             let event = events.remove(user_data.event_idx as _);
             match event {
                 EventType::Connect { socket, addr } => {
-                    log::debug!("Connection to {addr:?} failed");
+                    log::debug!("[{}] Connection to failed", addr.as_socket().unwrap());
                     assert!(pending_connections.remove(&addr));
                     io_utils::close_socket(sq, socket, events);
                 }
@@ -183,16 +189,17 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             let err = std::io::Error::from_raw_os_error(error_code as i32);
             if !events.contains(user_data.event_idx as _) {
                 log::error!(
-                    "Failing event didn't exist in events, id: {}",
+                    "Unhandled error: {err}, event didn't exist in events, id: {}",
                     user_data.event_idx
                 );
             } else {
                 let event = events.remove(user_data.event_idx as _);
-                log::error!("Unhandled error of typ: {event:?}");
+                let err_str = format!("Unhandled error: {err}, event type: {event:?}");
                 match event {
-                    EventType::Connect { socket, addr: _ }
-                    | EventType::Write { socket, addr: _ }
-                    | EventType::Recv { socket, addr: _ } => {
+                    EventType::Connect { socket, addr }
+                    | EventType::Write { socket, addr }
+                    | EventType::Recv { socket, addr } => {
+                        log::error!("[{}] {err_str}", addr.as_socket().unwrap());
                         io_utils::close_socket(sq, socket, events);
                     }
                     EventType::ConnectedWrite { connection_idx }
@@ -210,7 +217,10 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         }
                         io_utils::close_socket(sq, connection.socket, events);
                     }
-                    EventType::Close | EventType::Accept | EventType::Dummy => return Err(err),
+                    EventType::Close | EventType::Cancel | EventType::Accept | EventType::Dummy => {
+                        log::error!("{err_str}");
+                        return Err(err);
+                    }
                 }
             }
             Err(err)
@@ -496,7 +506,7 @@ impl<'scope, 'state: 'scope> EventLoop {
             unreachable!();
         };
 
-        log::debug!("Connecting to peer: {addr:?}");
+        log::debug!("[{}] Connecting to peer", addr.as_socket().unwrap());
         let connect_counter = metrics::counter!("peer_connect_attempts");
         connect_counter.increment(1);
 
@@ -575,7 +585,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 sq.push(read_op);
             }
             EventType::Connect { socket, addr } => {
-                log::info!("Connected to: {addr:?}");
+                log::info!("Connected to: {}", addr.as_socket().unwrap());
                 let connect_success_counter = metrics::counter!("peer_connect_success");
                 connect_success_counter.increment(1);
 
@@ -602,7 +612,10 @@ impl<'scope, 'state: 'scope> EventLoop {
             }
             EventType::Write { socket, addr } => {
                 let fd = socket.as_raw_fd();
-                log::debug!("Wrote to unestablsihed connection");
+                log::debug!(
+                    "Wrote to unestablsihed connection: {}",
+                    addr.as_socket().unwrap()
+                );
                 // The event is replaced (this removes the dummy)
                 let old = std::mem::replace(
                     &mut self.events[io_event.user_data.event_idx as usize],
@@ -626,11 +639,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // TODO: add to metrics for writes?
                 self.events.remove(io_event.user_data.event_idx as _);
             }
-            EventType::Recv { socket, addr: _ } => {
+            EventType::Recv { socket, addr } => {
                 let fd = socket.as_raw_fd();
+                let addr = addr.as_socket().unwrap();
                 let len = ret as usize;
                 if len == 0 {
-                    log::debug!("No more data when expecting handshake");
+                    log::debug!("[{addr}] No more data when expecting handshake from connection",);
                     self.events.remove(io_event.user_data.event_idx as _);
                     return Ok(());
                 }
@@ -638,7 +652,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // so it should be dealt with better, but since the handshake is so
                 // small (well below MTU) I suspect that to be rare
                 if len < HANDSHAKE_SIZE {
-                    log::error!("Didn't receive enough data to parse handshake");
+                    log::error!("[{addr}] Didn't receive enough data to parse handshake",);
                     self.events.remove(io_event.user_data.event_idx as _);
                     return Err(io::ErrorKind::InvalidData.into());
                 }
@@ -660,7 +674,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 let peer_connection = PeerConnection::new(socket, conn_id, parsed_handshake);
                 let id = peer_connection.peer_id;
                 entry.insert(peer_connection);
-                log::info!("Finished handshake! [{conn_id}]: {id}");
+                log::info!("[{addr}] Finished handshake! [{conn_id}]: {id}");
                 let handshake_success_counter = metrics::counter!("peer_handshake_success");
                 handshake_success_counter.increment(1);
                 // We are now connected!
@@ -843,8 +857,8 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             // TODO: If we are not using fast extension this might be triggered by a snub
             if let Some(time) = connection.last_received_subpiece {
                 if time.elapsed() > connection.request_timeout() {
-                    // error just to make more visible
-                    log::error!("TIMEOUT: {}", connection.peer_id);
+                    // warn just to make more visible
+                    log::warn!("TIMEOUT: {}", connection.peer_id);
                     connection.on_request_timeout(torrent_state, &file_and_info.file_store);
                 } else if connection.snubbed {
                     // Did not timeout
