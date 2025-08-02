@@ -19,7 +19,7 @@ vortex-bittorrent = { path = "../bittorrent" }
 heapless = { workspace = true }
 tikv-jemallocator = "0.5"
 mainline = { git = "https://github.com/Nehliin/mainline.git", branch = "feature-gate", default-features = false, features = ["node"]}
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = { workspace = true }
 clap = { version = "4.5.39", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 # ratatui uses all default feature
