@@ -207,11 +207,13 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         io_utils::close_socket(sq, socket, events);
                     }
                     EventType::ConnectedWrite { connection_idx }
-                    | EventType::ConnectedRecv { connection_idx }
-                    | EventType::Cancel { connection_idx }
-                    | EventType::Shutdown { connection_idx } => {
+                    | EventType::ConnectedRecv { connection_idx } => {
                         let mut connection = connections.remove(connection_idx);
-                        log::error!("Peer [{}] unhandled error: {err}", connection.peer_id);
+                        log::error!(
+                            "Peer [{}] unhandled error: {err}, addr: {}",
+                            connection.peer_id,
+                            connection.socket.peer_addr().unwrap().as_socket().unwrap()
+                        );
                         if let Some((_, torrent_state)) = state_ref.state() {
                             connection.release_all_pieces(torrent_state);
                             // Don't count disconnected peers
