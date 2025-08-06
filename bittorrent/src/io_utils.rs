@@ -147,7 +147,6 @@ pub fn write_to_connection<Q: SubmissionQueue>(
     sq.push(write_op);
 }
 
-
 // NOTE: Socket contains an OwnedFd which automatically closes
 // the file descriptor in a blocking fashion upon dropping it.
 // That's great for a fallback since closing sockets should rarely block
@@ -235,4 +234,3 @@ pub fn recv_multishot<Q: SubmissionQueue>(
         .flags(io_uring::squeue::Flags::BUFFER_SELECT);
     sq.push(read_op);
 }
-

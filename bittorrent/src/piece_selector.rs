@@ -140,7 +140,11 @@ impl PieceSelector {
     }
 
     // Updates the interesting peer pieces and returns if the peer has any interesting pieces
-    pub fn peer_bitfield(&mut self, connection_id: ConnectionId, peer_pieces: BitBox<u8, Msb0>) -> bool {
+    pub fn peer_bitfield(
+        &mut self,
+        connection_id: ConnectionId,
+        peer_pieces: BitBox<u8, Msb0>,
+    ) -> bool {
         let not_completed = !self.completed_pieces.clone();
         let interesting_pieces = peer_pieces & not_completed;
         let is_interesting = interesting_pieces.any();
@@ -150,7 +154,11 @@ impl PieceSelector {
     }
 
     // Updates the interesting peer pieces tracking and returns if the piece index was interesting
-    pub fn update_peer_piece_intrest(&mut self, connection_id: ConnectionId, piece_index: usize) -> bool {
+    pub fn update_peer_piece_intrest(
+        &mut self,
+        connection_id: ConnectionId,
+        piece_index: usize,
+    ) -> bool {
         let is_interesting = !self.completed_pieces[piece_index];
         let entry = self.interesting_peer_pieces.entry(connection_id);
         entry
@@ -165,7 +173,10 @@ impl PieceSelector {
     }
 
     // All interesting peer pieces if a bitfield has been received
-    pub fn interesting_peer_pieces(&self, connection_id: ConnectionId) -> Option<&BitBox<u8, Msb0>> {
+    pub fn interesting_peer_pieces(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Option<&BitBox<u8, Msb0>> {
         self.interesting_peer_pieces.get(&connection_id)
     }
 
