@@ -18,6 +18,7 @@ use crate::{
     Error, InitializedState, StateRef, TorrentEvent,
     event_loop::{ConnectionId, EventData, EventId},
     file_store::FileStore,
+    io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
@@ -134,8 +135,13 @@ pub enum DisconnectReason {
     InvalidMessage,
 }
 
+pub enum ConnectionState {
+    Connected(Socket),
+    Disconnecting,
+}
+
 pub struct PeerConnection {
-    pub socket: Socket,
+    pub connection_state: ConnectionState,
     pub peer_addr: SocketAddr,
     pub conn_id: ConnectionId,
     pub peer_id: PeerId,
@@ -197,7 +203,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         parsed_handshake: ParsedHandshake,
     ) -> Self {
         PeerConnection {
-            socket,
+            connection_state: ConnectionState::Connected(socket),
             peer_addr,
             conn_id,
             peer_id: parsed_handshake.peer_id,
@@ -227,6 +233,29 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             allowed_fast_pieces: Default::default(),
             accept_fast_pieces: Default::default(),
             pre_meta_have_msgs: Default::default(),
+        }
+    }
+
+    pub fn disconnect<Q: SubmissionQueue>(
+        &mut self,
+        sq: &mut BackloggedSubmissionQueue<Q>,
+        events: &mut SlotMap<EventId, EventData>,
+        state_ref: &mut StateRef<'f_store>,
+    ) {
+        let socket = std::mem::replace(&mut self.connection_state, ConnectionState::Disconnecting);
+        match socket {
+            ConnectionState::Connected(socket) => {
+                io_utils::close_socket(sq, socket, Some(self.conn_id), events);
+            }
+            // Should never disconnect twice
+            ConnectionState::Disconnecting => unreachable!(),
+        }
+        if let Some((_, torrent_state)) = state_ref.state() {
+            self.release_all_pieces(torrent_state);
+            // Don't count disconnected peers
+            if !self.is_choking {
+                torrent_state.num_unchoked -= 1;
+            }
         }
     }
 

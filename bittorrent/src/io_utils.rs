@@ -11,10 +11,13 @@ use io_uring::{
     squeue::PushError,
     types::{self, CancelBuilder, Timespec},
 };
-use slab::Slab;
+use slotmap::{Key, SlotMap};
 use socket2::Socket;
 
-use crate::{buf_ring::Bgid, event_loop::EventType};
+use crate::{
+    buf_ring::Bgid,
+    event_loop::{ConnectionId, EventData, EventId, EventType},
+};
 
 pub trait SubmissionQueue {
     fn sync(&mut self);
@@ -118,18 +121,20 @@ impl<Q: SubmissionQueue> BackloggedSubmissionQueue<Q> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn write_to_connection<Q: SubmissionQueue>(
-    conn_id: usize,
+    conn_id: ConnectionId,
     fd: RawFd,
-    events: &mut Slab<EventType>,
+    events: &mut SlotMap<EventId, EventData>,
     sq: &mut BackloggedSubmissionQueue<Q>,
     buffer_index: usize,
     buffer: &[u8],
     ordered: bool,
 ) {
-    let event = events.insert(EventType::ConnectedWrite {
-        connection_idx: conn_id,
+    let event_id = events.insert(EventData {
+        typ: EventType::ConnectedWrite {
+            connection_idx: conn_id,
+        },
+        buffer_idx: Some(buffer_index),
     });
-    let user_data = UserData::new(event, Some(buffer_index));
     let flags = if ordered {
         io_uring::squeue::Flags::IO_LINK
     } else {
@@ -137,10 +142,11 @@ pub fn write_to_connection<Q: SubmissionQueue>(
     };
     let write_op = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
         .build()
-        .user_data(user_data.as_u64())
+        .user_data(event_id.data().as_ffi())
         .flags(flags);
     sq.push(write_op);
 }
+
 
 // NOTE: Socket contains an OwnedFd which automatically closes
 // the file descriptor in a blocking fashion upon dropping it.
@@ -156,28 +162,36 @@ pub fn write_to_connection<Q: SubmissionQueue>(
 pub fn close_socket<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     socket: Socket,
-    events: &mut Slab<EventType>,
+    maybe_connection_idx: Option<ConnectionId>,
+    events: &mut SlotMap<EventId, EventData>,
 ) {
     let fd = socket.into_raw_fd();
-    let event = events.insert(EventType::Cancel);
-    let user_data = UserData::new(event, None);
+    let event_id = events.insert(EventData {
+        typ: EventType::Cancel,
+        buffer_idx: None,
+    });
+
     // If more events are received in the same cqe loop there might still linger events
     // that have been removed due to a earlier event in the loop causing the socket to close
     let cancel_op = opcode::AsyncCancel2::new(CancelBuilder::fd(types::Fd(fd)).all())
         .build()
-        .user_data(user_data.as_u64());
+        .user_data(event_id.data().as_ffi());
     sq.push(cancel_op);
-    let event = events.insert(EventType::Close);
-    let user_data = UserData::new(event, None);
+    let event_id = events.insert(EventData {
+        typ: EventType::Close {
+            maybe_connection_idx,
+        },
+        buffer_idx: None,
+    });
     let close_op = opcode::Close::new(types::Fd(fd))
         .build()
-        .user_data(user_data.as_u64());
+        .user_data(event_id.data().as_ffi());
     sq.push(close_op);
 }
 
 pub fn recv<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
-    user_data: UserData,
+    event_data_idx: EventId,
     fd: RawFd,
     bgid: Bgid,
     timeout: &Timespec,
@@ -186,13 +200,13 @@ pub fn recv<Q: SubmissionQueue>(
     let read_op = opcode::Recv::new(types::Fd(fd), null_mut(), 0)
         .buf_group(bgid)
         .build()
-        .user_data(user_data.as_u64())
+        .user_data(event_data_idx.data().as_ffi())
         .flags(io_uring::squeue::Flags::BUFFER_SELECT | io_uring::squeue::Flags::IO_LINK);
 
-    let user_data = UserData::new(user_data.event_idx as _, None);
+    //let user_data = UserData::new(user_data.event_idx as _, None);
     let timeout_op = opcode::LinkTimeout::new(timeout)
         .build()
-        .user_data(user_data.as_u64());
+        .user_data(event_data_idx.data().as_ffi());
     // If the queue doesn't fit both events they need
     // to be sent to the backlog so they can be submitted
     // together and not with a arbitrary delay inbetween.
@@ -210,61 +224,15 @@ pub fn recv<Q: SubmissionQueue>(
 
 pub fn recv_multishot<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
-    user_data: UserData,
+    event_data_idx: EventId,
     fd: RawFd,
     bgid: Bgid,
 ) {
-    log::debug!("Starting recv multishot");
+    log::debug!("Starting recv multishot: {event_data_idx:?}");
     let read_op = opcode::RecvMulti::new(types::Fd(fd), bgid)
         .build()
-        .user_data(user_data.as_u64())
+        .user_data(event_data_idx.data().as_ffi())
         .flags(io_uring::squeue::Flags::BUFFER_SELECT);
     sq.push(read_op);
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct UserData {
-    pub buffer_idx: Option<u32>,
-    pub event_idx: u32,
-}
-
-impl UserData {
-    pub fn new(event_idx: usize, buffer_idx: Option<usize>) -> Self {
-        Self {
-            buffer_idx: buffer_idx.map(|idx| idx.try_into().unwrap()),
-            event_idx: event_idx.try_into().unwrap(),
-        }
-    }
-
-    pub fn as_u64(&self) -> u64 {
-        ((self.event_idx as u64) << 32) | self.buffer_idx.unwrap_or(u32::MAX) as u64
-    }
-
-    pub fn from_u64(val: u64) -> Self {
-        Self {
-            event_idx: (val >> 32) as u32,
-            buffer_idx: ((val as u32) != u32::MAX).then_some(val as u32),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    #[test]
-    fn test_user_data_roundtrip() {
-        let data = UserData::new((u32::MAX as usize) - 1, None);
-        let serialized = data.as_u64();
-        assert_eq!(data, UserData::from_u64(serialized));
-
-        let data = UserData::new((u32::MAX as usize) - 1, Some(0));
-        let serialized = data.as_u64();
-        assert_eq!(data, UserData::from_u64(serialized));
-
-        let data = UserData::new(0, Some((u32::MAX as usize) - 1));
-        let serialized = data.as_u64();
-        assert_eq!(data, UserData::from_u64(serialized));
-    }
-}
