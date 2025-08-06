@@ -121,7 +121,8 @@ fn main() -> io::Result<()> {
     let target = Box::new(
         OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .open("vortex.log")?,
     );
     env_logger::builder()
