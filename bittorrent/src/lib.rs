@@ -8,16 +8,15 @@ use std::{
     sync::mpsc::{Receiver, Sender},
 };
 
-use event_loop::{EventLoop, EventType};
+use event_loop::{ConnectionId, EventData, EventId, EventLoop, EventType};
 use file_store::FileStore;
 use heapless::spsc::{Consumer, Producer};
 use io_uring::{
     IoUring, opcode,
     types::{self},
 };
-use io_utils::UserData;
 use piece_selector::{CompletedPiece, Piece, PieceSelector, Subpiece};
-use slab::Slab;
+use slotmap::{Key, SlotMap};
 use thiserror::Error;
 
 mod buf_pool;
@@ -69,14 +68,16 @@ impl Torrent {
             .build(4096)
             .unwrap();
 
-        let mut events = Slab::with_capacity(4096);
-        let event_idx = events.insert(EventType::Accept);
-        let user_data = UserData::new(event_idx, None);
+        let mut events = SlotMap::with_capacity_and_key(4096);
+        let event_idx: EventId = events.insert(EventData {
+            typ: EventType::Accept,
+            buffer_idx: None,
+        });
 
         let listener = TcpListener::bind(("0.0.0.0", 6881)).unwrap();
         let accept_op = opcode::AcceptMulti::new(types::Fd(listener.as_raw_fd()))
             .build()
-            .user_data(user_data.as_u64());
+            .user_data(event_idx.data().as_ffi());
 
         unsafe {
             ring.submission().push(&accept_op).unwrap();
@@ -159,7 +160,10 @@ impl InitializedState {
     }
 
     // TODO: Put this in the event loop directly instead when that is easier to test
-    pub(crate) fn update_torrent_status(&mut self, connections: &mut Slab<PeerConnection>) {
+    pub(crate) fn update_torrent_status(
+        &mut self,
+        connections: &mut SlotMap<ConnectionId, PeerConnection>,
+    ) {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             match completed_piece.hash_matched {
                 Ok(hash_matched) => {
@@ -219,10 +223,10 @@ impl InitializedState {
     fn allocate_piece(
         &mut self,
         index: i32,
-        conn_id: usize,
+        conn_id: ConnectionId,
         file_store: &FileStore,
     ) -> VecDeque<Subpiece> {
-        log::debug!("Allocating piece: conn_id: {conn_id}, index: {index}");
+        log::debug!("Allocating piece: conn_id: {conn_id:?}, index: {index}");
         self.piece_selector.mark_allocated(index, conn_id);
         match &mut self.pieces[index as usize] {
             Some(allocated_piece) => allocated_piece.allocate_remaining_subpieces(),
@@ -241,8 +245,8 @@ impl InitializedState {
     }
 
     // Deallocate a piece
-    fn deallocate_piece(&mut self, index: i32, conn_id: usize) {
-        log::debug!("Deallocating piece: conn_id: {conn_id}, index: {index}");
+    fn deallocate_piece(&mut self, index: i32, conn_id: ConnectionId) {
+        log::debug!("Deallocating piece: conn_id: {conn_id:?}, index: {index}");
         // Mark the piece as interesting again so it can be picked again
         // if necessary
         self.piece_selector
@@ -253,7 +257,7 @@ impl InitializedState {
         if let Some(piece) = self.pieces[index as usize].as_mut() {
             // Will we reach 0 in the ref count?
             if piece.ref_count == 1 {
-                log::debug!("marked as not allocated: conn_id: {conn_id}, index: {index}");
+                log::debug!("marked as not allocated: conn_id: {conn_id:?}, index: {index}");
                 self.piece_selector.mark_not_allocated(index, conn_id);
             }
             piece.ref_count = piece.ref_count.saturating_sub(1)

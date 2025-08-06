@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, Instant},
 };
 
@@ -11,11 +11,14 @@ use heapless::spsc::Producer;
 use rayon::Scope;
 use serde::Deserialize;
 use sha1::Digest;
+use slotmap::{Key, SlotMap};
 use socket2::Socket;
 
 use crate::{
     Error, InitializedState, StateRef, TorrentEvent,
+    event_loop::{ConnectionId, EventData, EventId},
     file_store::FileStore,
+    io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
@@ -132,9 +135,15 @@ pub enum DisconnectReason {
     InvalidMessage,
 }
 
+pub enum ConnectionState {
+    Connected(Socket),
+    Disconnecting,
+}
+
 pub struct PeerConnection {
-    pub socket: Socket,
-    pub conn_id: usize,
+    pub connection_state: ConnectionState,
+    pub peer_addr: SocketAddr,
+    pub conn_id: ConnectionId,
     pub peer_id: PeerId,
     /// This side is choking the peer
     pub is_choking: bool,
@@ -171,7 +180,6 @@ pub struct PeerConnection {
     pub throughput: u64,
     pub prev_throughput: u64,
     // If this connection is about to be disconnected
-    // because of low througput. (Choke instead?)
     pub pending_disconnect: Option<DisconnectReason>,
     pub stateful_decoder: PeerMessageDecoder,
     /// Maps our ID:s to respective extension. The ID is the
@@ -188,9 +196,15 @@ pub struct PeerConnection {
 }
 
 impl<'scope, 'f_store: 'scope> PeerConnection {
-    pub fn new(socket: Socket, conn_id: usize, parsed_handshake: ParsedHandshake) -> Self {
+    pub fn new(
+        socket: Socket,
+        peer_addr: SocketAddr,
+        conn_id: ConnectionId,
+        parsed_handshake: ParsedHandshake,
+    ) -> Self {
         PeerConnection {
-            socket,
+            connection_state: ConnectionState::Connected(socket),
+            peer_addr,
             conn_id,
             peer_id: parsed_handshake.peer_id,
             is_choking: true,
@@ -219,6 +233,29 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             allowed_fast_pieces: Default::default(),
             accept_fast_pieces: Default::default(),
             pre_meta_have_msgs: Default::default(),
+        }
+    }
+
+    pub fn disconnect<Q: SubmissionQueue>(
+        &mut self,
+        sq: &mut BackloggedSubmissionQueue<Q>,
+        events: &mut SlotMap<EventId, EventData>,
+        state_ref: &mut StateRef<'f_store>,
+    ) {
+        let socket = std::mem::replace(&mut self.connection_state, ConnectionState::Disconnecting);
+        match socket {
+            ConnectionState::Connected(socket) => {
+                io_utils::close_socket(sq, socket, Some(self.conn_id), events);
+            }
+            // Should never disconnect twice
+            ConnectionState::Disconnecting => unreachable!(),
+        }
+        if let Some((_, torrent_state)) = state_ref.state() {
+            self.release_all_pieces(torrent_state);
+            // Don't count disconnected peers
+            if !self.is_choking {
+                torrent_state.num_unchoked -= 1;
+            }
         }
     }
 
@@ -436,7 +473,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
 
         if event_tx
             .enqueue(TorrentEvent::PeerMetrics {
-                conn_id: self.conn_id,
+                conn_id: self.conn_id.data().as_ffi() as usize,
                 // Prev throughput is used since the mertics are reported at the end of TICK and
                 // throughput have been reset and stored here at that point
                 throuhgput: self.prev_throughput,
@@ -575,17 +612,14 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                 });
                             }
                         } else {
+                            let IpAddr::V4(ipv4) = self.peer_addr.ip() else {
+                                unreachable!();
+                            };
                             generate_fast_set(
                                 ALLOWED_FAST_SET_SIZE as u32,
                                 torrent_state.num_pieces() as u32,
                                 &info_hash,
-                                *self
-                                    .socket
-                                    .peer_addr()
-                                    .expect("Socket should be connected")
-                                    .as_socket_ipv4()
-                                    .expect("Only ipv4 addresses are supported")
-                                    .ip(),
+                                ipv4,
                                 &mut self.accept_fast_pieces,
                             );
                             for index in self.accept_fast_pieces.iter().copied() {
