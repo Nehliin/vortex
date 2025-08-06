@@ -46,27 +46,41 @@ pub enum EventType {
     Dummy,
 }
 
+new_key_type! {
+    pub struct EventId;
+}
+
+new_key_type! {
+    pub struct ConnectionId;
+}
+
+#[derive(Debug)]
+pub struct EventData {
+    pub typ: EventType,
+    pub buffer_idx: Option<usize>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn event_error_handler<'state, Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     error_code: u32,
-    user_data: UserData,
-    events: &mut Slab<EventType>,
+    event_data_idx: EventId,
+    events: &mut SlotMap<EventId, EventData>,
     state_ref: &mut StateRef<'state>,
-    connections: &mut Slab<PeerConnection>,
+    connections: &mut SlotMap<ConnectionId, PeerConnection>,
     pending_connections: &mut HashSet<SockAddr>,
     bgid: Bgid,
 ) -> io::Result<()> {
     match error_code as i32 {
         libc::ENOBUFS => {
             // TODO: statistics
-            let event = &events[user_data.event_idx as _];
+            let event = &events[event_data_idx];
             log::warn!("Ran out of buffers!, resubmitting recv op");
             // Ran out of buffers!
-            match event {
+            match &event.typ {
                 EventType::Recv { socket, addr: _ } => {
                     let fd = socket.as_raw_fd();
-                    io_utils::recv(sq, user_data, fd, bgid, &HANDSHAKE_TIMEOUT);
+                    io_utils::recv(sq, event_data_idx, fd, bgid, &HANDSHAKE_TIMEOUT);
                     Ok(())
                 }
                 EventType::ConnectedRecv { connection_idx } => {
@@ -78,8 +92,8 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             }
         }
         libc::ETIME => {
-            let event = events.remove(user_data.event_idx as _);
-            let socket = match event {
+            let event = events.remove(event_data_idx).unwrap();
+            let socket = match event.typ {
                 EventType::Connect { socket, addr } => {
                     log::debug!("[{}] Connect timed out!", addr.as_socket().unwrap());
                     assert!(pending_connections.remove(&addr));
@@ -100,8 +114,8 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             Ok(())
         }
         libc::ECONNRESET => {
-            let event = events.remove(user_data.event_idx as _);
-            match event {
+            let event = events.remove(event_data_idx).unwrap();
+            match event.typ {
                 EventType::Write { socket, addr } | EventType::Recv { socket, addr } => {
                     log::error!(
                         "[{}] Connection reset before handshake completed",
@@ -132,8 +146,8 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             Ok(())
         }
         libc::EPIPE => {
-            let event = events.remove(user_data.event_idx as _);
-            match event {
+            let event = events.remove(event_data_idx).unwrap();
+            match event.typ {
                 EventType::Write { socket, addr } => {
                     log::warn!(
                         "[{}] Attempted to write to closed connection",
@@ -170,10 +184,13 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
         libc::ECONNREFUSED | libc::EHOSTUNREACH => {
             // Failling to connect due to this is not really an error due to
             // the likelyhood of being stale info in the DHT
-            let event = events.remove(user_data.event_idx as _);
-            match event {
+            let event = events.remove(event_data_idx).unwrap();
+            match event.typ {
                 EventType::Connect { socket, addr } => {
-                    log::debug!("[{}] Connection to failed", addr.as_socket().unwrap());
+                    log::debug!(
+                        "[{}] Connection failed {event_data_idx:?}",
+                        addr.as_socket().unwrap()
+                    );
                     assert!(pending_connections.remove(&addr));
                     io_utils::close_socket(sq, socket, events);
                 }
@@ -182,24 +199,22 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             Ok(())
         }
         libc::ECANCELED => {
-            // This is the timeout or the connect operation being cancelled, the event should be deleted by the successful
-            // the ETIME handler or the successful connection event
-            // NOTE: the event idx might have been overwritten and reused by the time this is handled
-            // so don't trust the event connected to the index
+            // This is the timeout or the connect operation being cancelled
+            // the event should have be deleted by the ETIME handler or the
+            // successful connection event
             log::trace!("Event cancelled");
             Ok(())
         }
         _ => {
             let err = std::io::Error::from_raw_os_error(error_code as i32);
-            if !events.contains(user_data.event_idx as _) {
+            if !events.contains_key(event_data_idx) {
                 log::error!(
-                    "Unhandled error: {err}, event didn't exist in events, id: {}",
-                    user_data.event_idx
+                    "Unhandled error: {err}, event didn't exist in events, id: {event_data_idx:?}",
                 );
             } else {
-                let event = events.remove(user_data.event_idx as _);
+                let event = events.remove(event_data_idx).unwrap();
                 let err_str = format!("Unhandled error: {err}, event type: {event:?}");
-                match event {
+                match event.typ {
                     EventType::Connect { socket, addr }
                     | EventType::Write { socket, addr }
                     | EventType::Recv { socket, addr } => {
@@ -235,16 +250,16 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct IoEvent {
-    user_data: UserData,
+struct RawIoEvent {
+    event_data_idx: EventId,
     result: Result<i32, u32>,
     read_bid: Option<u16>,
     is_more: bool,
 }
 
-impl From<Entry> for IoEvent {
+impl From<Entry> for RawIoEvent {
     fn from(cqe: Entry) -> Self {
-        let user_data = UserData::from_u64(cqe.user_data());
+        let event_data_idx = EventId::from(KeyData::from_ffi(cqe.user_data()));
         let result = if cqe.result() < 0 {
             Err((-cqe.result()) as u32)
         } else {
@@ -253,7 +268,7 @@ impl From<Entry> for IoEvent {
         let read_bid = io_uring::cqueue::buffer_select(cqe.flags());
         let is_more = io_uring::cqueue::more(cqe.flags());
         Self {
-            user_data,
+            event_data_idx,
             result,
             read_bid,
             is_more,
@@ -264,23 +279,23 @@ impl From<Entry> for IoEvent {
 const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(250_000_000);
 
 pub struct EventLoop {
-    events: Slab<EventType>,
+    events: SlotMap<EventId, EventData>,
     write_pool: BufferPool,
     read_ring: BufferRing,
     // TODO: Merge these or consider disconnecting
     // pending peers as soon as max connections is reached
-    connections: Slab<PeerConnection>,
+    connections: SlotMap<ConnectionId, PeerConnection>,
     pending_connections: HashSet<SockAddr>,
     our_id: PeerId,
 }
 
 impl<'scope, 'state: 'scope> EventLoop {
-    pub fn new(our_id: PeerId, events: Slab<EventType>) -> Self {
+    pub fn new(our_id: PeerId, events: SlotMap<EventId, EventData>) -> Self {
         Self {
             events,
             write_pool: BufferPool::new(256, (SUBPIECE_SIZE * 2) as _),
             read_ring: BufferRing::new(1, 256, (SUBPIECE_SIZE * 2) as _).unwrap(),
-            connections: Slab::with_capacity(MAX_CONNECTIONS),
+            connections: SlotMap::with_capacity_and_key(MAX_CONNECTIONS),
             pending_connections: HashSet::with_capacity(MAX_CONNECTIONS),
             our_id,
         }
@@ -507,27 +522,34 @@ impl<'scope, 'state: 'scope> EventLoop {
                 return;
             }
         };
-        //socket.set_recv_buffer_size(1 << 19).unwrap();
-        let fd = socket.as_raw_fd();
-        let event_idx = self.events.insert(EventType::Connect { socket, addr });
-        let user_data = UserData::new(event_idx, None);
+        
+        let event_idx = self.events.insert(EventData {
+            typ: EventType::Connect { socket, addr },
+            buffer_idx: None,
+        });
 
-        let EventType::Connect { socket: _, addr } = &self.events[event_idx] else {
+        let EventType::Connect { socket, addr } = &self.events[event_idx].typ else {
             unreachable!();
         };
 
-        log::debug!("[{}] Connecting to peer", addr.as_socket().unwrap());
+        log::debug!(
+            "[{}] Connecting to peer",
+            addr.as_socket().expect("must be AF_INET")
+        );
         let connect_counter = metrics::counter!("peer_connect_attempts");
         connect_counter.increment(1);
 
-        let connect_op = opcode::Connect::new(types::Fd(fd), addr.as_ptr() as *const _, addr.len())
-            .build()
-            .flags(io_uring::squeue::Flags::IO_LINK)
-            .user_data(user_data.as_u64());
-        let user_data = UserData::new(event_idx, None);
+        let connect_op = opcode::Connect::new(
+            types::Fd(socket.as_raw_fd()),
+            addr.as_ptr() as *const _,
+            addr.len(),
+        )
+        .build()
+        .flags(io_uring::squeue::Flags::IO_LINK)
+        .user_data(event_idx.data().as_ffi());
         let timeout_op = opcode::LinkTimeout::new(&CONNECT_TIMEOUT)
             .build()
-            .user_data(user_data.as_u64());
+            .user_data(event_idx.data().as_ffi());
         // If the queue doesn't fit both events they need
         // to be sent to the backlog so they can be submitted
         // together and not with a arbitrary delay inbetween.
@@ -544,7 +566,7 @@ impl<'scope, 'state: 'scope> EventLoop {
     fn event_handler<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
-        io_event: IoEvent,
+        io_event: RawIoEvent,
         state: &mut StateRef<'state>,
         scope: &Scope<'scope>,
     ) -> io::Result<()> {
@@ -554,7 +576,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 return event_error_handler(
                     sq,
                     error_code,
-                    io_event.user_data,
+                    io_event.event_data_idx,
                     &mut self.events,
                     state,
                     &mut self.connections,
@@ -564,17 +586,11 @@ impl<'scope, 'state: 'scope> EventLoop {
             }
         };
         let mut event = EventType::Dummy;
-        std::mem::swap(
-            &mut event,
-            &mut self.events[io_event.user_data.event_idx as usize],
-        );
+        std::mem::swap(&mut event, &mut self.events[io_event.event_data_idx].typ);
         match event {
             EventType::Accept => {
                 // The event is reused and not replaced
-                std::mem::swap(
-                    &mut event,
-                    &mut self.events[io_event.user_data.event_idx as usize],
-                );
+                std::mem::swap(&mut event, &mut self.events[io_event.event_data_idx].typ);
                 let fd = ret;
                 let socket = unsafe { Socket::from_raw_fd(fd) };
                 let addr = socket.peer_addr()?;
@@ -583,33 +599,39 @@ impl<'scope, 'state: 'scope> EventLoop {
                     return Ok(());
                 };
 
-                log::info!("Accepted connection: {addr:?}");
+                log::info!(
+                    "Accepted connection: {:?}",
+                    addr.as_socket().expect("must be AF_INET")
+                );
                 // Construct new recv token on accept, after that it lives forever and or is reused
                 // since this is a recvmulti operation
-                let read_token = self.events.insert(EventType::Recv { socket, addr });
-                let user_data = UserData::new(read_token, None);
+                let read_event_id = self.events.insert(EventData {
+                    typ: EventType::Recv { socket, addr },
+                    buffer_idx: None,
+                });
                 let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
                     .build()
-                    .user_data(user_data.as_u64())
+                    .user_data(read_event_id.data().as_ffi())
                     .flags(io_uring::squeue::Flags::BUFFER_SELECT);
                 sq.push(read_op);
             }
             EventType::Connect { socket, addr } => {
-                log::info!("Connected to: {}", addr.as_socket().unwrap());
+                log::info!(
+                    "Connected to: {}",
+                    addr.as_socket().expect("must be AF_INET")
+                );
                 let connect_success_counter = metrics::counter!("peer_connect_success");
                 connect_success_counter.increment(1);
 
                 let buffer = self.write_pool.get_buffer();
                 write_handshake(self.our_id, state.info_hash, buffer.inner);
                 let fd = socket.as_raw_fd();
-                // The event is replaced (this removes the dummy)
-                let old = std::mem::replace(
-                    &mut self.events[io_event.user_data.event_idx as usize],
-                    EventType::Write { socket, addr },
-                );
-                debug_assert!(matches!(old, EventType::Dummy));
-                let write_token = io_event.user_data.event_idx as usize;
-                let user_data = UserData::new(write_token, Some(buffer.index));
+                let old = self.events.remove(io_event.event_data_idx).unwrap();
+                debug_assert!(matches!(old.typ, EventType::Dummy));
+                let write_event_id = self.events.insert(EventData {
+                    typ: EventType::Write { socket, addr },
+                    buffer_idx: Some(buffer.index),
+                });
                 let write_op = opcode::Write::new(
                     types::Fd(fd),
                     buffer.inner.as_ptr(),
@@ -617,26 +639,24 @@ impl<'scope, 'state: 'scope> EventLoop {
                     HANDSHAKE_SIZE as u32,
                 )
                 .build()
-                .user_data(user_data.as_u64());
+                .user_data(write_event_id.data().as_ffi());
                 sq.push(write_op);
             }
             EventType::Write { socket, addr } => {
                 let fd = socket.as_raw_fd();
                 log::debug!(
                     "Wrote to unestablsihed connection: {}",
-                    addr.as_socket().unwrap()
+                    addr.as_socket().expect("must be AF_INET")
                 );
-                // The event is replaced (this removes the dummy)
-                let old = std::mem::replace(
-                    &mut self.events[io_event.user_data.event_idx as usize],
-                    EventType::Recv { socket, addr },
-                );
+                let old = self.events.remove(io_event.event_data_idx).unwrap();
+                debug_assert!(matches!(old.typ, EventType::Dummy));
+                let read_event_id = self.events.insert(EventData {
+                    typ: EventType::Recv { socket, addr },
+                    buffer_idx: None,
+                });
                 // Write is only used for unestablished connections aka when doing handshake
                 let handshake_counter = metrics::counter!("peer_handshake_attempt");
                 handshake_counter.increment(1);
-                debug_assert!(matches!(old, EventType::Dummy));
-                let read_token = io_event.user_data.event_idx as usize;
-                let user_data = UserData::new(read_token, None);
                 // Multishot isn't used here to simplify error handling
                 // when the read is invalid or otherwise doesn't lead to
                 // a full connection which does have graceful shutdown mechanisms
@@ -644,19 +664,19 @@ impl<'scope, 'state: 'scope> EventLoop {
             }
             EventType::Cancel => {
                 log::trace!("Cancel event completed");
-                self.events.remove(io_event.user_data.event_idx as _);
+                self.events.remove(io_event.event_data_idx);
             }
             EventType::ConnectedWrite { connection_idx: _ } => {
                 // TODO: add to metrics for writes?
-                self.events.remove(io_event.user_data.event_idx as _);
+                self.events.remove(io_event.event_data_idx);
             }
             EventType::Recv { socket, addr } => {
                 let fd = socket.as_raw_fd();
-                let addr = addr.as_socket().unwrap();
                 let len = ret as usize;
+                let addr = addr.as_socket().expect("must be AF_INET");
                 if len == 0 {
                     log::debug!("[{addr}] No more data when expecting handshake from connection",);
-                    self.events.remove(io_event.user_data.event_idx as _);
+                    self.events.remove(io_event.event_data_idx);
                     return Ok(());
                 }
                 // TODO: This could happen due to networks splitting the handshake up
@@ -664,7 +684,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // small (well below MTU) I suspect that to be rare
                 if len < HANDSHAKE_SIZE {
                     log::error!("[{addr}] Didn't receive enough data to parse handshake",);
-                    self.events.remove(io_event.user_data.event_idx as _);
+                    self.events.remove(io_event.event_data_idx);
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 // We always have a buffer associated
@@ -690,13 +710,14 @@ impl<'scope, 'state: 'scope> EventLoop {
                 handshake_success_counter.increment(1);
                 // We are now connected!
                 // The event is replaced (this removes the dummy)
-                let old = std::mem::replace(
-                    &mut self.events[io_event.user_data.event_idx as usize],
-                    EventType::ConnectedRecv {
+                let old = self.events.remove(io_event.event_data_idx).unwrap();
+                debug_assert!(matches!(old.typ, EventType::Dummy));
+                let recv_multi_id = self.events.insert(EventData {
+                    typ: EventType::ConnectedRecv {
                         connection_idx: conn_id,
                     },
-                );
-                debug_assert!(matches!(old, EventType::Dummy));
+                    buffer_idx: None,
+                });
 
                 // The initial Recv might have contained more data
                 // than just the handshake so need to handle that here
@@ -712,7 +733,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                     });
                 }
                 // Recv has been complete, move over to multishot, same user data
-                io_utils::recv_multishot(sq, io_event.user_data, fd, self.read_ring.bgid());
+                io_utils::recv_multishot(sq, recv_multi_id, fd, self.read_ring.bgid());
 
                 let bitfield_msg = if let Some((_, torrent_state)) = state.state() {
                     let completed = torrent_state.piece_selector.completed_clone();
@@ -738,10 +759,7 @@ impl<'scope, 'state: 'scope> EventLoop {
             }
             EventType::ConnectedRecv { connection_idx } => {
                 // The event is reused and not replaced
-                std::mem::swap(
-                    &mut event,
-                    &mut self.events[io_event.user_data.event_idx as usize],
-                );
+                std::mem::swap(&mut event, &mut self.events[io_event.event_data_idx].typ);
                 let len = ret as usize;
                 if len == 0 {
                     let mut connection = self.connections.remove(connection_idx);
@@ -798,7 +816,7 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
                 connection.handle_message(peer_message, state, scope);
             }
             Err(err) => {
-                log::error!("Failed {} decoding message: {err}", connection.conn_id);
+                log::error!("Failed {:?} decoding message: {err}", connection.conn_id);
                 connection.pending_disconnect = Some(DisconnectReason::InvalidMessage);
                 break;
             }
@@ -809,7 +827,7 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
 
 fn report_tick_metrics(
     state: &mut StateRef<'_>,
-    connections: &Slab<PeerConnection>,
+    connections: &SlotMap<ConnectionId, PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
     event_tx: &mut Producer<TorrentEvent, 512>,
 ) {
@@ -846,7 +864,7 @@ fn report_tick_metrics(
 
 pub(crate) fn tick<'scope, 'state: 'scope>(
     tick_delta: &Duration,
-    connections: &mut Slab<PeerConnection>,
+    connections: &mut SlotMap<ConnectionId, PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
     torrent_state: &mut StateRef<'state>,
     event_tx: &mut Producer<TorrentEvent, 512>,
@@ -855,10 +873,10 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
     // 1. Calculate bandwidth (deal with initial start up)
     // 2. Go through them in order
     // 3. select pieces
-    for (_, connection) in connections
-        .iter_mut()
+    for connection in connections
+        .values_mut()
         // Filter out connections that are pending diconnect
-        .filter(|(_, conn)| conn.pending_disconnect.is_none())
+        .filter(|conn| conn.pending_disconnect.is_none())
     {
         if connection.last_seen.elapsed() > Duration::from_secs(120) {
             log::warn!("Timeout due to inactivity: {}", connection.peer_id);

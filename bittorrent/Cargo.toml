@@ -11,6 +11,7 @@ license = "BSD-3-Clause"
 [dependencies]
 io-uring = "0.7"
 libc = "0.2"
+slotmap = "1"
 slab = "0.4"
 bytes = { workspace = true }
 bitvec = { version = "1.0", default-features = false, features = ["alloc"]}
