@@ -1,4 +1,5 @@
 use std::{
+    fs::OpenOptions,
     io,
     path::PathBuf,
     sync::Arc,
@@ -117,8 +118,16 @@ struct Cli {
 }
 
 fn main() -> io::Result<()> {
-    let mut log_builder = env_logger::builder();
-    log_builder.filter_level(log::LevelFilter::Off).init();
+    let target = Box::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("vortex.log")?,
+    );
+    env_logger::builder()
+        .target(env_logger::Target::Pipe(target))
+        .filter_level(log::LevelFilter::Debug)
+        .init();
     let builder = PrometheusBuilder::new();
     builder.install().unwrap();
 
