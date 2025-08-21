@@ -398,10 +398,15 @@ mod test_utils {
     use lava_torrent::torrent::v1::{Torrent, TorrentBuilder};
     use socket2::{Domain, Protocol, Socket, Type};
 
-    pub fn generate_peer(fast_ext: bool, conn_id: usize) -> PeerConnection {
+    pub fn generate_peer(
+        fast_ext: bool,
+        conn_id: crate::event_loop::ConnectionId,
+    ) -> PeerConnection {
         let socket_a = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        let peer_addr = "127.0.0.1:0".parse().unwrap();
         PeerConnection::new(
             socket_a,
+            peer_addr,
             conn_id,
             ParsedHandshake {
                 peer_id: generate_peer_id(),
