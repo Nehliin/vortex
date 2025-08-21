@@ -247,8 +247,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             ConnectionState::Connected(socket) => {
                 io_utils::close_socket(sq, socket, Some(self.conn_id), events);
             }
-            // Should never disconnect twice
-            ConnectionState::Disconnecting => unreachable!(),
+            ConnectionState::Disconnecting => {
+                // Should not disconnect twice but I could see it happening if an earlier
+                // cqe disconnects the peer for some reason and then there being multiple cqe's
+                // left for the same peer that also contain corrupted data for example
+                return;
+            }
         }
         if let Some((_, torrent_state)) = state_ref.state() {
             self.release_all_pieces(torrent_state);

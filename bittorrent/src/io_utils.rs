@@ -202,7 +202,6 @@ pub fn recv<Q: SubmissionQueue>(
         .user_data(event_data_idx.data().as_ffi())
         .flags(io_uring::squeue::Flags::BUFFER_SELECT | io_uring::squeue::Flags::IO_LINK);
 
-    //let user_data = UserData::new(user_data.event_idx as _, None);
     let timeout_op = opcode::LinkTimeout::new(timeout)
         .build()
         .user_data(event_data_idx.data().as_ffi());

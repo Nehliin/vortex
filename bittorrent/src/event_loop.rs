@@ -404,6 +404,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                         // Only cancellation errors are expected here
                         // since linked timeouts share event id with
                         // the event being on a timer
+                        //
+                        // TODO: We might also end up here if we remove event id for a
+                        // reoccuring event like recv_multi even though we've cancelled
+                        // all events + close the socket if we've received multiple cqe for
+                        // the event in one submission
                         assert_eq!(err as i32, ECANCELED);
                     }
                     // Ensure bids are always returned
