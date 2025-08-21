@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use bitvec::{
     prelude::{BitBox, Msb0},
@@ -6,6 +6,7 @@ use bitvec::{
 };
 use lava_torrent::torrent::v1::Torrent;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
+use slotmap::SecondaryMap;
 
 use crate::{
     event_loop::ConnectionId,
@@ -48,7 +49,7 @@ pub struct PieceSelector {
     // pieces are "turned off" and Have messages only set a bit if we do not already
     // have it. If a peer requests a piece it is also turned off here to prevent it being
     // picked again. TODO: feels fragile
-    interesting_peer_pieces: HashMap<ConnectionId, BitBox<u8, Msb0>>,
+    interesting_peer_pieces: SecondaryMap<ConnectionId, BitBox<u8, Msb0>>,
     last_piece_length: u32,
     piece_length: u32,
     rng_gen: SmallRng,
@@ -83,7 +84,7 @@ impl PieceSelector {
         connection_id: ConnectionId,
         endgame_mode: &mut bool,
     ) -> Option<i32> {
-        let interesting_pieces = self.interesting_peer_pieces.get(&connection_id)?;
+        let interesting_pieces = self.interesting_peer_pieces.get(connection_id)?;
         let pickable = !self.hashing_pieces.clone() & interesting_pieces;
         // due to lifetime issues
         let first_pickable = pickable.first_one();
@@ -136,7 +137,7 @@ impl PieceSelector {
 
     #[inline]
     pub fn bitfield_received(&self, connection_id: ConnectionId) -> bool {
-        self.interesting_peer_pieces.contains_key(&connection_id)
+        self.interesting_peer_pieces.contains_key(connection_id)
     }
 
     // Updates the interesting peer pieces and returns if the peer has any interesting pieces
@@ -160,7 +161,10 @@ impl PieceSelector {
         piece_index: usize,
     ) -> bool {
         let is_interesting = !self.completed_pieces[piece_index];
-        let entry = self.interesting_peer_pieces.entry(connection_id);
+        let entry = self
+            .interesting_peer_pieces
+            .entry(connection_id)
+            .expect("peer must remain in primary map");
         entry
             .and_modify(|pieces| pieces.set(piece_index, is_interesting))
             .or_insert_with(|| {
@@ -177,7 +181,7 @@ impl PieceSelector {
         &self,
         connection_id: ConnectionId,
     ) -> Option<&BitBox<u8, Msb0>> {
-        self.interesting_peer_pieces.get(&connection_id)
+        self.interesting_peer_pieces.get(connection_id)
     }
 
     #[inline]
@@ -211,10 +215,7 @@ impl PieceSelector {
         self.allocated_pieces.set(index, true);
         // Mark this as no longer interesting to prevent it from being repicked.
         // If this is rejected we can mark it as interesting again when deallocating
-        let interesting_pieces = &mut self
-            .interesting_peer_pieces
-            .get_mut(&connection_id)
-            .unwrap();
+        let interesting_pieces = &mut self.interesting_peer_pieces.get_mut(connection_id).unwrap();
         let old = interesting_pieces.replace(index, false);
         // Must have been interesting to this peer before allocating it
         assert!(old);
