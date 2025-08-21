@@ -26,5 +26,8 @@ overflow-checks = true
 # debug = true 
 lto = true
 
+[profile.dev]
+debug = 2
+
 [profile.release.package."*"]
 opt-level = 3

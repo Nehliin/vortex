@@ -217,12 +217,12 @@ impl FileStore {
                 let num_pieces = (torrent_file.length as u64 + start_offset as u64) / piece_length;
                 let offset = (torrent_file.length as u64 + start_offset as u64) % piece_length;
                 let file_path = torrent_directory.as_path().join(torrent_file.path);
-                if let Some(parent_dir) = file_path.parent() {
-                    if let Err(err) = std::fs::create_dir_all(parent_dir) {
-                        // Do not error if they folders already exists
-                        if err.kind() != io::ErrorKind::AlreadyExists {
-                            return Err(err);
-                        }
+                if let Some(parent_dir) = file_path.parent()
+                    && let Err(err) = std::fs::create_dir_all(parent_dir)
+                {
+                    // Do not error if they folders already exists
+                    if err.kind() != io::ErrorKind::AlreadyExists {
+                        return Err(err);
                     }
                 }
                 let file_handle = MmapFile::create(&file_path, torrent_file.length as usize)?;

@@ -19,7 +19,7 @@ impl BufferPool {
             allocated_buffers: Slab::with_capacity(entries),
         }
     }
-    pub fn get_buffer(&mut self) -> Buffer {
+    pub fn get_buffer(&mut self) -> Buffer<'_> {
         match self.free.pop() {
             Some(free_idx) => Buffer {
                 index: free_idx,

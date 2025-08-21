@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use bitvec::{
     prelude::{BitBox, Msb0},
@@ -6,8 +6,12 @@ use bitvec::{
 };
 use lava_torrent::torrent::v1::Torrent;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
+use slotmap::SecondaryMap;
 
-use crate::file_store::{FileStore, ReadablePieceFileView, WritablePieceFileView};
+use crate::{
+    event_loop::ConnectionId,
+    file_store::{FileStore, ReadablePieceFileView, WritablePieceFileView},
+};
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -45,7 +49,7 @@ pub struct PieceSelector {
     // pieces are "turned off" and Have messages only set a bit if we do not already
     // have it. If a peer requests a piece it is also turned off here to prevent it being
     // picked again. TODO: feels fragile
-    interesting_peer_pieces: HashMap<usize, BitBox<u8, Msb0>>,
+    interesting_peer_pieces: SecondaryMap<ConnectionId, BitBox<u8, Msb0>>,
     last_piece_length: u32,
     piece_length: u32,
     rng_gen: SmallRng,
@@ -75,8 +79,12 @@ impl PieceSelector {
     }
 
     // Returns index and if the peer is in endgame mode
-    pub fn next_piece(&mut self, connection_id: usize, endgame_mode: &mut bool) -> Option<i32> {
-        let interesting_pieces = self.interesting_peer_pieces.get(&connection_id)?;
+    pub fn next_piece(
+        &mut self,
+        connection_id: ConnectionId,
+        endgame_mode: &mut bool,
+    ) -> Option<i32> {
+        let interesting_pieces = self.interesting_peer_pieces.get(connection_id)?;
         let pickable = !self.hashing_pieces.clone() & interesting_pieces;
         // due to lifetime issues
         let first_pickable = pickable.first_one();
@@ -86,7 +94,7 @@ impl PieceSelector {
             let pickable = first_pickable?;
             // if we still have interesting pieces not completed we should enter endgame mode
             // and pick one of those
-            log::debug!("Peer {connection_id} is entering endgame mode");
+            log::debug!("Peer {connection_id:?} is entering endgame mode");
             *endgame_mode = true;
             return Some(pickable as i32);
         }
@@ -128,12 +136,16 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn bitfield_received(&self, connection_id: usize) -> bool {
-        self.interesting_peer_pieces.contains_key(&connection_id)
+    pub fn bitfield_received(&self, connection_id: ConnectionId) -> bool {
+        self.interesting_peer_pieces.contains_key(connection_id)
     }
 
     // Updates the interesting peer pieces and returns if the peer has any interesting pieces
-    pub fn peer_bitfield(&mut self, connection_id: usize, peer_pieces: BitBox<u8, Msb0>) -> bool {
+    pub fn peer_bitfield(
+        &mut self,
+        connection_id: ConnectionId,
+        peer_pieces: BitBox<u8, Msb0>,
+    ) -> bool {
         let not_completed = !self.completed_pieces.clone();
         let interesting_pieces = peer_pieces & not_completed;
         let is_interesting = interesting_pieces.any();
@@ -143,9 +155,16 @@ impl PieceSelector {
     }
 
     // Updates the interesting peer pieces tracking and returns if the piece index was interesting
-    pub fn update_peer_piece_intrest(&mut self, connection_id: usize, piece_index: usize) -> bool {
+    pub fn update_peer_piece_intrest(
+        &mut self,
+        connection_id: ConnectionId,
+        piece_index: usize,
+    ) -> bool {
         let is_interesting = !self.completed_pieces[piece_index];
-        let entry = self.interesting_peer_pieces.entry(connection_id);
+        let entry = self
+            .interesting_peer_pieces
+            .entry(connection_id)
+            .expect("peer must remain in primary map");
         entry
             .and_modify(|pieces| pieces.set(piece_index, is_interesting))
             .or_insert_with(|| {
@@ -158,8 +177,11 @@ impl PieceSelector {
     }
 
     // All interesting peer pieces if a bitfield has been received
-    pub fn interesting_peer_pieces(&self, connection_id: usize) -> Option<&BitBox<u8, Msb0>> {
-        self.interesting_peer_pieces.get(&connection_id)
+    pub fn interesting_peer_pieces(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Option<&BitBox<u8, Msb0>> {
+        self.interesting_peer_pieces.get(connection_id)
     }
 
     #[inline]
@@ -188,22 +210,19 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn mark_allocated(&mut self, index: i32, connection_id: usize) {
+    pub fn mark_allocated(&mut self, index: i32, connection_id: ConnectionId) {
         let index = index as usize;
         self.allocated_pieces.set(index, true);
         // Mark this as no longer interesting to prevent it from being repicked.
         // If this is rejected we can mark it as interesting again when deallocating
-        let interesting_pieces = &mut self
-            .interesting_peer_pieces
-            .get_mut(&connection_id)
-            .unwrap();
+        let interesting_pieces = &mut self.interesting_peer_pieces.get_mut(connection_id).unwrap();
         let old = interesting_pieces.replace(index, false);
         // Must have been interesting to this peer before allocating it
         assert!(old);
     }
 
     #[inline]
-    pub fn mark_not_allocated(&mut self, index: i32, connection_id: usize) {
+    pub fn mark_not_allocated(&mut self, index: i32, connection_id: ConnectionId) {
         let index = index as usize;
         assert!(self.allocated_pieces[index]);
         self.allocated_pieces.set(index, false);
@@ -265,7 +284,7 @@ impl PieceSelector {
 #[derive(Debug)]
 pub struct CompletedPiece {
     pub index: usize,
-    pub conn_id: usize,
+    pub conn_id: ConnectionId,
     pub hash_matched: std::io::Result<bool>,
 }
 
