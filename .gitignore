@@ -1,4 +1,5 @@
 /target
 /assets
 /downloaded
+.cargo/config.toml
 routing_table.json
