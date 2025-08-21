@@ -121,7 +121,7 @@ impl KrpcClient {
         }
     }
 
-    pub fn ping(&self, body: Ping) -> QueryBuilder<'_,Ping> {
+    pub fn ping(&self, body: Ping) -> QueryBuilder<'_, Ping> {
         let transaction_id = self.gen_transaction_id();
         QueryBuilder {
             id: transaction_id,
@@ -141,7 +141,7 @@ impl KrpcClient {
         }
     }
 
-    pub fn get_peers(&self, body: GetPeers) -> QueryBuilder<'_,GetPeers> {
+    pub fn get_peers(&self, body: GetPeers) -> QueryBuilder<'_, GetPeers> {
         let transaction_id = self.gen_transaction_id();
         QueryBuilder {
             id: transaction_id,
@@ -151,7 +151,7 @@ impl KrpcClient {
         }
     }
 
-    pub fn announce_peer(&self, body: AnnouncePeer) -> QueryBuilder<'_,AnnouncePeer> {
+    pub fn announce_peer(&self, body: AnnouncePeer) -> QueryBuilder<'_, AnnouncePeer> {
         let transaction_id = self.gen_transaction_id();
         QueryBuilder {
             id: transaction_id,
