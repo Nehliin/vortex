@@ -349,22 +349,22 @@ impl<'scope, 'state: 'scope> EventLoop {
                         &mut event_tx,
                     );
 
-                    if let Some((file_and_meta, _)) = state_ref.state() {
-                        if !prev_state_initialized {
-                            prev_state_initialized = true;
-                            event_tx
-                                .enqueue(TorrentEvent::MetadataComplete(
-                                    file_and_meta.metadata.clone(),
-                                ))
-                                .expect("event queue should never be full here");
-                            for (_, connection) in self.connections.iter_mut() {
-                                let msgs = std::mem::take(&mut connection.pre_meta_have_msgs);
-                                // Get all piece msgs
-                                for msg in msgs {
-                                    connection.handle_message(msg, &mut state_ref, scope);
-                                }
-                                // TODO: Trigger unchoked peers
+                    if let Some((file_and_meta, _)) = state_ref.state()
+                        && !prev_state_initialized
+                    {
+                        prev_state_initialized = true;
+                        event_tx
+                            .enqueue(TorrentEvent::MetadataComplete(
+                                file_and_meta.metadata.clone(),
+                            ))
+                            .expect("event queue should never be full here");
+                        for (_, connection) in self.connections.iter_mut() {
+                            let msgs = std::mem::take(&mut connection.pre_meta_have_msgs);
+                            // Get all piece msgs
+                            for msg in msgs {
+                                connection.handle_message(msg, &mut state_ref, scope);
                             }
+                            // TODO: Trigger unchoked peers
                         }
                     }
 
@@ -406,7 +406,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                         // the event being on a timer
                         assert_eq!(err as i32, ECANCELED);
                     }
-
                     // Ensure bids are always returned
                     if let Some(bid) = io_event.read_bid {
                         self.read_ring.return_bid(bid);
@@ -445,12 +444,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                     return Ok(());
                 }
 
-                if let Some((_, torrent_state)) = state_ref.state() {
-                    if torrent_state.is_complete {
-                        log::info!("Torrent complete!");
-                        if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
-                            log::error!("Torrent completion event missed");
-                        }
+                if let Some((_, torrent_state)) = state_ref.state()
+                    && torrent_state.is_complete
+                {
+                    log::info!("Torrent complete!");
+                    if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
+                        log::error!("Torrent completion event missed");
                     }
                 }
             }
@@ -524,7 +523,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 return;
             }
         };
-        
+
         let event_idx = self.events.insert(EventData {
             typ: EventType::Connect { socket, addr },
             buffer_idx: None,
@@ -785,17 +784,17 @@ impl<'scope, 'state: 'scope> EventLoop {
                     return Ok(());
                 }
                 let connection = &mut self.connections[connection_idx];
-                if !io_event.is_more {
-                    if let ConnectionState::Connected(socket) = &connection.connection_state {
-                        let fd = socket.as_raw_fd();
-                        // restart the operation
-                        io_utils::recv_multishot(
-                            sq,
-                            io_event.event_data_idx,
-                            fd,
-                            self.read_ring.bgid(),
-                        );
-                    }
+                if !io_event.is_more
+                    && let ConnectionState::Connected(socket) = &connection.connection_state
+                {
+                    let fd = socket.as_raw_fd();
+                    // restart the operation
+                    io_utils::recv_multishot(
+                        sq,
+                        io_event.event_data_idx,
+                        fd,
+                        self.read_ring.bgid(),
+                    );
                 }
 
                 // We always have a buffer associated
@@ -1033,7 +1032,8 @@ mod tests {
                 let mut download_state = setup_test();
                 metrics::with_local_recorder(&debbuging, || {
                     let our_id = generate_peer_id();
-                    let mut event_loop = EventLoop::new(our_id, Slab::new());
+                    let mut event_loop =
+                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key());
                     let ring = IoUring::builder()
                         .setup_single_issuer()
                         .setup_clamp()

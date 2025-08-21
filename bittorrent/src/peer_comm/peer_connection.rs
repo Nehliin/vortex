@@ -690,28 +690,25 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     log::warn!("[PeerId: {}] Invalid allowed fast message", self.peer_id);
                 } else if !self.allowed_fast_pieces.contains(&index) {
                     self.allowed_fast_pieces.push(index);
-                    if let Some((file_info, torrent_state)) = state_ref.state() {
-                        if let Some(interesting_pieces) = torrent_state
+                    if let Some((file_info, torrent_state)) = state_ref.state()
+                        && let Some(interesting_pieces) = torrent_state
                             .piece_selector
                             .interesting_peer_pieces(self.conn_id)
-                        {
-                            if interesting_pieces[index as usize]
-                                && !torrent_state.piece_selector.is_allocated(index as usize)
-                            {
-                                log::info!(
-                                    "[PeerId: {}] Requesting new piece {index} via Allowed fast set!",
-                                    self.peer_id
-                                );
-                                // Mark ourselves as interested
-                                self.interested(true);
-                                let mut subpieces = torrent_state.allocate_piece(
-                                    index,
-                                    self.conn_id,
-                                    &file_info.file_store,
-                                );
-                                self.append_and_fill(&mut subpieces);
-                            }
-                        }
+                        && interesting_pieces[index as usize]
+                        && !torrent_state.piece_selector.is_allocated(index as usize)
+                    {
+                        log::info!(
+                            "[PeerId: {}] Requesting new piece {index} via Allowed fast set!",
+                            self.peer_id
+                        );
+                        // Mark ourselves as interested
+                        self.interested(true);
+                        let mut subpieces = torrent_state.allocate_piece(
+                            index,
+                            self.conn_id,
+                            &file_info.file_store,
+                        );
+                        self.append_and_fill(&mut subpieces);
                     }
                 }
             }
@@ -942,22 +939,22 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     if let Some(i) = self.allowed_fast_pieces.iter().position(|i| index == *i) {
                         self.allowed_fast_pieces.swap_remove(i);
                     }
-                } else if self.inflight.len() < 2 && self.queued.is_empty() {
-                    if let Some(new_index) = torrent_state
+                } else if self.inflight.len() < 2
+                    && self.queued.is_empty()
+                    && let Some(new_index) = torrent_state
                         .piece_selector
                         .next_piece(self.conn_id, &mut self.endgame)
-                    {
-                        if defer_deallocation {
-                            defer_deallocation = false;
-                            torrent_state.deallocate_piece(index, self.conn_id);
-                        }
-                        let mut subpieces = torrent_state.allocate_piece(
-                            new_index,
-                            self.conn_id,
-                            &file_info.file_store,
-                        );
-                        self.append_and_fill(&mut subpieces);
+                {
+                    if defer_deallocation {
+                        defer_deallocation = false;
+                        torrent_state.deallocate_piece(index, self.conn_id);
                     }
+                    let mut subpieces = torrent_state.allocate_piece(
+                        new_index,
+                        self.conn_id,
+                        &file_info.file_store,
+                    );
+                    self.append_and_fill(&mut subpieces);
                 }
                 if defer_deallocation {
                     torrent_state.deallocate_piece(index, self.conn_id);

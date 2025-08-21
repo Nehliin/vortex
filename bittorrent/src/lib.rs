@@ -172,15 +172,13 @@ impl InitializedState {
                         for (conn_id, peer) in connections.iter_mut() {
                             if let Some(bitfield) =
                                 self.piece_selector.interesting_peer_pieces(conn_id)
+                                && !bitfield.any()
+                                && peer.is_interesting
+                                && peer.queued.is_empty()
+                                && peer.inflight.is_empty()
                             {
-                                if !bitfield.any()
-                                    && peer.is_interesting
-                                    && peer.queued.is_empty()
-                                    && peer.inflight.is_empty()
-                                {
-                                    // We are no longer interestead in this peer
-                                    peer.not_interested(false);
-                                }
+                                // We are no longer interestead in this peer
+                                peer.not_interested(false);
                             }
                             peer.have(completed_piece.index as i32, false);
                         }
