@@ -145,9 +145,11 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                 }
                 EventType::ConnectedRecv { connection_idx }
                 | EventType::ConnectedWrite { connection_idx } => {
-                    let connection = &mut connections[connection_idx];
-                    log::error!("Peer [{}] Connection reset", connection.peer_id);
-                    connection.disconnect(sq, events, state_ref);
+                    // Don't worry about this if we've already removed the connection
+                    if let Some(connection) = connections.get_mut(connection_idx) {
+                        log::error!("Peer [{}] Connection reset", connection.peer_id);
+                        connection.disconnect(sq, events, state_ref);
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -207,12 +209,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
         }
         _ => {
             let err = std::io::Error::from_raw_os_error(error_code as i32);
-            if !events.contains_key(event_data_idx) {
-                log::error!(
-                    "Unhandled error: {err}, event didn't exist in events, id: {event_data_idx:?}",
-                );
-            } else {
-                let event = events.remove(event_data_idx).unwrap();
+            if let Some(event) = events.remove(event_data_idx) {
                 let err_str = format!("Unhandled error: {err}, event type: {event:?}");
                 match event.typ {
                     EventType::Connect { socket, addr }
@@ -223,9 +220,10 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                     }
                     EventType::ConnectedWrite { connection_idx }
                     | EventType::ConnectedRecv { connection_idx } => {
-                        let connection = &mut connections[connection_idx];
-                        log::error!("Peer [{}] unhandled error: {err}", connection.peer_id);
-                        connection.disconnect(sq, events, state_ref);
+                        if let Some(connection) = connections.get_mut(connection_idx) {
+                            log::error!("Peer [{}] unhandled error: {err}", connection.peer_id);
+                            connection.disconnect(sq, events, state_ref);
+                        }
                     }
                     EventType::Close {
                         maybe_connection_idx,
@@ -238,6 +236,10 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         return Err(err);
                     }
                 }
+            } else {
+                log::error!(
+                    "Unhandled error: {err}, event didn't exist in events, id: {event_data_idx:?}",
+                )
             }
             Err(err)
         }
