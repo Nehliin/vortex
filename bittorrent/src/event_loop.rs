@@ -1,7 +1,8 @@
 use std::{
     collections::HashSet,
     io,
-    os::fd::{AsRawFd, FromRawFd},
+    net::TcpListener,
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd},
     time::{Duration, Instant},
 };
 
@@ -307,6 +308,9 @@ impl<'scope, 'state: 'scope> EventLoop {
     ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
 
+        let port = self.setup_listener(&mut ring);
+        state.listener_port = Some(port);
+
         let mut state_ref = state.as_ref();
 
         let mut prev_state_initialized = state_ref.is_initialzied();
@@ -464,6 +468,24 @@ impl<'scope, 'state: 'scope> EventLoop {
 
         self.read_ring.unregister(&ring.submitter())?;
         result
+    }
+
+    fn setup_listener(&mut self, ring: &mut IoUring) -> u16 {
+        let event_idx: EventId = self.events.insert(EventData {
+            typ: EventType::Accept,
+            buffer_idx: None,
+        });
+
+        let listener = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept_op = opcode::AcceptMulti::new(types::Fd(listener.into_raw_fd()))
+            .build()
+            .user_data(event_idx.data().as_ffi());
+        unsafe {
+            ring.submission().push(&accept_op).unwrap();
+        }
+        ring.submission().sync();
+        port
     }
 
     fn handle_commands<Q: SubmissionQueue>(
