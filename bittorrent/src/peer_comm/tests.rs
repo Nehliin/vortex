@@ -2101,6 +2101,7 @@ fn metadata_extension_piece_bounds_validation() {
 fn extension_handshake_generates_correct_message() {
     use crate::peer_comm::extended_protocol::extension_handshake_msg;
     let mut download_state = setup_test();
+    download_state.listener_port = Some(1234);
 
     let mut state_ref = download_state.as_ref();
     let handshake = extension_handshake_msg(&mut state_ref);
@@ -2126,7 +2127,7 @@ fn extension_handshake_generates_correct_message() {
         assert!(m.contains_key("ut_metadata".as_bytes()));
 
         assert!(dict.contains_key("v".as_bytes()));
-
+        assert_eq!(dict.get("p".as_bytes()).unwrap().as_u64().unwrap(), 1234);
         assert_eq!(
             dict.get("reqq".as_bytes()).unwrap().as_u64().unwrap(),
             MAX_OUTSTANDING_REQUESTS
