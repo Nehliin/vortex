@@ -1118,6 +1118,117 @@ mod tests {
     //     todo!()
     // }
 
+    // Tests that a peer can successfully connect to our listener
+    #[test]
+    fn peer_can_connect_to_listener() {
+        env_logger::builder()
+            .filter_level(log::LevelFilter::Trace)
+            .init();
+
+        let debbuging = DebuggingRecorder::new();
+        let snapshotter = debbuging.snapshotter();
+
+        let mut command_q = heapless::spsc::Queue::new();
+        let (mut command_tx, command_rc) = command_q.split();
+        let mut event_q = Queue::<TorrentEvent, 512>::new();
+        let (event_tx, mut event_rx) = event_q.split();
+
+        let (info_hash_tx, info_hash_rx) = std::sync::mpsc::channel();
+        let our_id = generate_peer_id();
+
+        std::thread::scope(|s| {
+            let event_loop_thread = s.spawn(move || {
+                let mut download_state = setup_test();
+                let info_hash = download_state.info_hash;
+                info_hash_tx.send(info_hash).unwrap();
+
+                metrics::with_local_recorder(&debbuging, || {
+                    let mut event_loop =
+                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key());
+                    let ring = IoUring::builder()
+                        .setup_single_issuer()
+                        .setup_clamp()
+                        .setup_cqsize(4096)
+                        .setup_defer_taskrun()
+                        .setup_coop_taskrun()
+                        .build(4096)
+                        .unwrap();
+
+                    let result = event_loop.run(ring, &mut download_state, event_tx, command_rc);
+                    assert!(result.is_ok());
+                })
+            });
+
+            // Get the info hash first
+            let info_hash = info_hash_rx.recv().unwrap();
+
+            // Wait for the ListenerStarted event to get the port
+            let listener_port = loop {
+                if let Some(event) = event_rx.dequeue() {
+                    match event {
+                        TorrentEvent::ListenerStarted { port } => {
+                            break port;
+                        }
+                        _ => continue,
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+
+            // Spawn a thread to connect as a peer and perform handshake
+            let simulated_peer_thread = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                use std::net::TcpStream;
+
+                // Connect to the listener
+                let mut stream =
+                    TcpStream::connect(format!("127.0.0.1:{}", listener_port)).unwrap();
+
+                // Send a valid handshake
+                let mut handshake = vec![0u8; HANDSHAKE_SIZE];
+                let peer_id = generate_peer_id();
+                write_handshake(peer_id, info_hash, &mut handshake);
+                stream.write_all(&handshake).unwrap();
+
+                // Read the handshake response
+                let mut response = vec![0u8; HANDSHAKE_SIZE];
+                stream.read_exact(&mut response).unwrap();
+
+                // Verify we got a valid handshake back
+                assert_eq!(response.len(), HANDSHAKE_SIZE);
+                let handshake = parse_handshake(info_hash, &response).unwrap();
+                assert!(handshake.fast_ext);
+                assert!(handshake.extension_protocol);
+                assert_eq!(handshake.peer_id, our_id);
+
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
+                // Keep connection alive for a moment to allow processing
+                std::thread::sleep(Duration::from_secs(1));
+            });
+
+            // Give some time for the handshake to complete
+            std::thread::sleep(Duration::from_secs(1));
+            command_tx.enqueue(Command::Stop).unwrap();
+            simulated_peer_thread.join().unwrap();
+            event_loop_thread.join().unwrap();
+
+            let snapshot = snapshotter.snapshot();
+            #[allow(clippy::mutable_key_type)]
+            let metrics = snapshot.into_hashmap();
+
+            // Verify successful handshake metrics
+            let val = metrics.get(&CompositeKey::new(
+                MetricKind::Counter,
+                Key::from_name("peer_handshake_success"),
+            ));
+            if let Some((_, _, DebugValue::Counter(num_success))) = val {
+                assert_eq!(*num_success, 1);
+            } else {
+                panic!("Expected peer_handshake_success metric to be recorded");
+            }
+        });
+    }
+
     // // Tests that the handshake is valid and that we send a proper bitfield afterwards
     // #[test]
     // fn valid_handshake() {
