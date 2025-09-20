@@ -2,21 +2,17 @@ use std::{
     cell::OnceCell,
     collections::VecDeque,
     io::{self},
-    net::{SocketAddrV4, TcpListener},
-    os::fd::{AsRawFd, IntoRawFd},
+    net::SocketAddrV4,
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
 };
 
-use event_loop::{ConnectionId, EventData, EventId, EventLoop, EventType};
+use event_loop::{ConnectionId, EventLoop};
 use file_store::FileStore;
 use heapless::spsc::{Consumer, Producer};
-use io_uring::{
-    IoUring, opcode,
-    types::{self},
-};
+use io_uring::IoUring;
 use piece_selector::{CompletedPiece, Piece, PieceSelector, Subpiece};
-use slotmap::{Key, SlotMap};
+use slotmap::SlotMap;
 use thiserror::Error;
 
 mod buf_pool;
