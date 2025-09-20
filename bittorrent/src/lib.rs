@@ -88,6 +88,9 @@ pub enum Command {
 pub enum TorrentEvent {
     TorrentComplete,
     MetadataComplete(Box<lava_torrent::torrent::v1::Torrent>),
+    ListenerStarted {
+        port: u16,
+    },
     PeerMetrics {
         /// Note that these are not stable and might
         /// be reused

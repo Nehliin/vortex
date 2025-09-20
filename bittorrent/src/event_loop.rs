@@ -311,6 +311,14 @@ impl<'scope, 'state: 'scope> EventLoop {
         let port = self.setup_listener(&mut ring);
         state.listener_port = Some(port);
 
+        // Emit listener started event
+        if event_tx
+            .enqueue(TorrentEvent::ListenerStarted { port })
+            .is_err()
+        {
+            log::error!("Failed to enqueue ListenerStarted event");
+        }
+
         let mut state_ref = state.as_ref();
 
         let mut prev_state_initialized = state_ref.is_initialzied();
