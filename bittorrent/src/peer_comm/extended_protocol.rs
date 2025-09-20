@@ -26,6 +26,9 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef) -> PeerMessage {
         "v",
         bt_bencode::value::to_value(&format!("Vortex {}", env!("CARGO_PKG_VERSION"))).unwrap(),
     );
+    if let Some(listener_port) = state_ref.listener_port {
+        handshake.insert("p", bt_bencode::value::to_value(listener_port).unwrap());
+    }
     if let Some((file_and_meta, _)) = state_ref.state() {
         let metadata_size = file_and_meta.metadata.construct_info().encode().len();
         handshake.insert(

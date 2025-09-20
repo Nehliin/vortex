@@ -94,7 +94,7 @@ pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], mut buffer: &mu
     buffer.put_slice(&our_peer_id.0 as &[u8]);
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(transparent)]
 pub struct PeerId([u8; 20]);
 

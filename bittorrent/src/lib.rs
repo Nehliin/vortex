@@ -2,21 +2,17 @@ use std::{
     cell::OnceCell,
     collections::VecDeque,
     io::{self},
-    net::{SocketAddrV4, TcpListener},
-    os::fd::AsRawFd,
+    net::SocketAddrV4,
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
 };
 
-use event_loop::{ConnectionId, EventData, EventId, EventLoop, EventType};
+use event_loop::{ConnectionId, EventLoop};
 use file_store::FileStore;
 use heapless::spsc::{Consumer, Producer};
-use io_uring::{
-    IoUring, opcode,
-    types::{self},
-};
+use io_uring::IoUring;
 use piece_selector::{CompletedPiece, Piece, PieceSelector, Subpiece};
-use slotmap::{Key, SlotMap};
+use slotmap::SlotMap;
 use thiserror::Error;
 
 mod buf_pool;
@@ -59,7 +55,7 @@ impl Torrent {
         command_rc: Consumer<Command, 64>,
     ) -> Result<(), Error> {
         // check ulimit
-        let mut ring: IoUring = IoUring::builder()
+        let ring: IoUring = IoUring::builder()
             .setup_single_issuer()
             .setup_clamp()
             .setup_cqsize(4096)
@@ -67,22 +63,7 @@ impl Torrent {
             .setup_coop_taskrun()
             .build(4096)
             .unwrap();
-
-        let mut events = SlotMap::with_capacity_and_key(4096);
-        let event_idx: EventId = events.insert(EventData {
-            typ: EventType::Accept,
-            buffer_idx: None,
-        });
-
-        let listener = TcpListener::bind(("0.0.0.0", 6881)).unwrap();
-        let accept_op = opcode::AcceptMulti::new(types::Fd(listener.as_raw_fd()))
-            .build()
-            .user_data(event_idx.data().as_ffi());
-
-        unsafe {
-            ring.submission().push(&accept_op).unwrap();
-        }
-        ring.submission().sync();
+        let events = SlotMap::with_capacity_and_key(4096);
         let mut event_loop = EventLoop::new(self.our_id, events);
         event_loop.run(ring, &mut self.state, event_tx, command_rc)
     }
@@ -103,6 +84,9 @@ pub enum Command {
 pub enum TorrentEvent {
     TorrentComplete,
     MetadataComplete(Box<lava_torrent::torrent::v1::Torrent>),
+    ListenerStarted {
+        port: u16,
+    },
     PeerMetrics {
         /// Note that these are not stable and might
         /// be reused
@@ -274,6 +258,7 @@ pub struct FileAndMetadata {
 
 pub struct State {
     info_hash: [u8; 20],
+    listener_port: Option<u16>,
     // TODO: Consider checking this is accessible at construction
     root: PathBuf,
     torrent_state: Option<InitializedState>,
@@ -289,6 +274,7 @@ impl State {
         Self {
             info_hash,
             root,
+            listener_port: None,
             torrent_state: None,
             file: OnceCell::new(),
         }
@@ -305,6 +291,7 @@ impl State {
                 .try_into()
                 .expect("Invalid info hash"),
             root,
+            listener_port: None,
             torrent_state: Some(InitializedState::new(&metadata)),
             file: OnceCell::from(FileAndMetadata {
                 file_store,
@@ -323,6 +310,7 @@ impl State {
         Self {
             info_hash,
             root,
+            listener_port: None,
             torrent_state: Some(state),
             file: OnceCell::from(FileAndMetadata {
                 file_store,
@@ -335,6 +323,7 @@ impl State {
         StateRef {
             info_hash: self.info_hash,
             root: &self.root,
+            listener_port: &self.listener_port,
             torrent: &mut self.torrent_state,
             full: &self.file,
         }
@@ -344,6 +333,7 @@ impl State {
 pub struct StateRef<'state> {
     info_hash: [u8; 20],
     root: &'state Path,
+    listener_port: &'state Option<u16>,
     torrent: &'state mut Option<InitializedState>,
     full: &'state OnceCell<FileAndMetadata>,
 }

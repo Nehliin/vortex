@@ -334,7 +334,7 @@ impl TryFrom<Answer> for AnnounceResponse {
 }
 
 fn deserialize_compact_nodes(bytes: ByteBuf) -> Vec<Node> {
-    if (bytes.len() % 26) != 0 {
+    if !bytes.len().is_multiple_of(26) {
         log::warn!("Invalid compact node buffer, not divisible by 26");
     }
     bytes

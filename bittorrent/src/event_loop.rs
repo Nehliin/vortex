@@ -1,7 +1,8 @@
 use std::{
     collections::HashSet,
     io,
-    os::fd::{AsRawFd, FromRawFd},
+    net::TcpListener,
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd},
     time::{Duration, Instant},
 };
 
@@ -307,6 +308,17 @@ impl<'scope, 'state: 'scope> EventLoop {
     ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
 
+        let port = self.setup_listener(&mut ring);
+        state.listener_port = Some(port);
+
+        // Emit listener started event
+        if event_tx
+            .enqueue(TorrentEvent::ListenerStarted { port })
+            .is_err()
+        {
+            log::error!("Failed to enqueue ListenerStarted event");
+        }
+
         let mut state_ref = state.as_ref();
 
         let mut prev_state_initialized = state_ref.is_initialzied();
@@ -466,6 +478,49 @@ impl<'scope, 'state: 'scope> EventLoop {
         result
     }
 
+    fn setup_listener(&mut self, ring: &mut IoUring) -> u16 {
+        let event_idx: EventId = self.events.insert(EventData {
+            typ: EventType::Accept,
+            buffer_idx: None,
+        });
+
+        let listener = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept_op = opcode::AcceptMulti::new(types::Fd(listener.into_raw_fd()))
+            .build()
+            .user_data(event_idx.data().as_ffi());
+        unsafe {
+            ring.submission().push(&accept_op).unwrap();
+        }
+        ring.submission().sync();
+        port
+    }
+
+    fn write_handshake<Q: SubmissionQueue>(
+        &mut self,
+        sq: &mut BackloggedSubmissionQueue<Q>,
+        info_hash: [u8; 20],
+        socket: Socket,
+        addr: SockAddr,
+    ) {
+        let buffer = self.write_pool.get_buffer();
+        write_handshake(self.our_id, info_hash, buffer.inner);
+        let fd = socket.as_raw_fd();
+        let write_event_id = self.events.insert(EventData {
+            typ: EventType::Write { socket, addr },
+            buffer_idx: Some(buffer.index),
+        });
+        let write_op = opcode::Write::new(
+            types::Fd(fd),
+            buffer.inner.as_ptr(),
+            // TODO: Handle this better
+            HANDSHAKE_SIZE as u32,
+        )
+        .build()
+        .user_data(write_event_id.data().as_ffi());
+        sq.push(write_op);
+    }
+
     fn handle_commands<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
@@ -611,17 +666,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                     "Accepted connection: {:?}",
                     addr.as_socket().expect("must be AF_INET")
                 );
-                // Construct new recv token on accept, after that it lives forever and or is reused
-                // since this is a recvmulti operation
-                let read_event_id = self.events.insert(EventData {
-                    typ: EventType::Recv { socket, addr },
-                    buffer_idx: None,
-                });
-                let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
-                    .build()
-                    .user_data(read_event_id.data().as_ffi())
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                sq.push(read_op);
+                // Trigger a write handshake here so we end up in the same code path
+                // as outgoing connections. It will simplify things greatly
+                self.write_handshake(sq, state.info_hash, socket, addr);
             }
             EventType::Connect { socket, addr } => {
                 log::info!(
@@ -630,25 +677,10 @@ impl<'scope, 'state: 'scope> EventLoop {
                 );
                 let connect_success_counter = metrics::counter!("peer_connect_success");
                 connect_success_counter.increment(1);
-
-                let buffer = self.write_pool.get_buffer();
-                write_handshake(self.our_id, state.info_hash, buffer.inner);
-                let fd = socket.as_raw_fd();
                 let old = self.events.remove(io_event.event_data_idx).unwrap();
                 debug_assert!(matches!(old.typ, EventType::Dummy));
-                let write_event_id = self.events.insert(EventData {
-                    typ: EventType::Write { socket, addr },
-                    buffer_idx: Some(buffer.index),
-                });
-                let write_op = opcode::Write::new(
-                    types::Fd(fd),
-                    buffer.inner.as_ptr(),
-                    // TODO: Handle this better
-                    HANDSHAKE_SIZE as u32,
-                )
-                .build()
-                .user_data(write_event_id.data().as_ffi());
-                sq.push(write_op);
+
+                self.write_handshake(sq, state.info_hash, socket, addr);
             }
             EventType::Write { socket, addr } => {
                 let fd = socket.as_raw_fd();
@@ -711,12 +743,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                 let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
                 let parsed_handshake = parse_handshake(state.info_hash, handshake_data).unwrap();
-                assert!(
-                    self.pending_connections
-                        .remove(&<std::net::SocketAddr as Into<socket2::SockAddr>>::into(
-                            addr
-                        ))
-                );
+                // Remove from pending connections if this was an outgoing connection
+                // For incoming connections (from Accept), this will be false and that's ok
+                self.pending_connections
+                    .remove(&<std::net::SocketAddr as Into<socket2::SockAddr>>::into(
+                        addr,
+                    ));
 
                 let conn_id = self.connections.insert_with_key(|conn_id| {
                     PeerConnection::new(socket, addr, conn_id, parsed_handshake)
@@ -1085,6 +1117,117 @@ mod tests {
     // fn invalid_handshake() {
     //     todo!()
     // }
+
+    // Tests that a peer can successfully connect to our listener
+    #[test]
+    fn peer_can_connect_to_listener() {
+        env_logger::builder()
+            .filter_level(log::LevelFilter::Trace)
+            .init();
+
+        let debbuging = DebuggingRecorder::new();
+        let snapshotter = debbuging.snapshotter();
+
+        let mut command_q = heapless::spsc::Queue::new();
+        let (mut command_tx, command_rc) = command_q.split();
+        let mut event_q = Queue::<TorrentEvent, 512>::new();
+        let (event_tx, mut event_rx) = event_q.split();
+
+        let (info_hash_tx, info_hash_rx) = std::sync::mpsc::channel();
+        let our_id = generate_peer_id();
+
+        std::thread::scope(|s| {
+            let event_loop_thread = s.spawn(move || {
+                let mut download_state = setup_test();
+                let info_hash = download_state.info_hash;
+                info_hash_tx.send(info_hash).unwrap();
+
+                metrics::with_local_recorder(&debbuging, || {
+                    let mut event_loop =
+                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key());
+                    let ring = IoUring::builder()
+                        .setup_single_issuer()
+                        .setup_clamp()
+                        .setup_cqsize(4096)
+                        .setup_defer_taskrun()
+                        .setup_coop_taskrun()
+                        .build(4096)
+                        .unwrap();
+
+                    let result = event_loop.run(ring, &mut download_state, event_tx, command_rc);
+                    assert!(result.is_ok());
+                })
+            });
+
+            // Get the info hash first
+            let info_hash = info_hash_rx.recv().unwrap();
+
+            // Wait for the ListenerStarted event to get the port
+            let listener_port = loop {
+                if let Some(event) = event_rx.dequeue() {
+                    match event {
+                        TorrentEvent::ListenerStarted { port } => {
+                            break port;
+                        }
+                        _ => continue,
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+
+            // Spawn a thread to connect as a peer and perform handshake
+            let simulated_peer_thread = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                use std::net::TcpStream;
+
+                // Connect to the listener
+                let mut stream =
+                    TcpStream::connect(format!("127.0.0.1:{}", listener_port)).unwrap();
+
+                // Send a valid handshake
+                let mut handshake = vec![0u8; HANDSHAKE_SIZE];
+                let peer_id = generate_peer_id();
+                write_handshake(peer_id, info_hash, &mut handshake);
+                stream.write_all(&handshake).unwrap();
+
+                // Read the handshake response
+                let mut response = vec![0u8; HANDSHAKE_SIZE];
+                stream.read_exact(&mut response).unwrap();
+
+                // Verify we got a valid handshake back
+                assert_eq!(response.len(), HANDSHAKE_SIZE);
+                let handshake = parse_handshake(info_hash, &response).unwrap();
+                assert!(handshake.fast_ext);
+                assert!(handshake.extension_protocol);
+                assert_eq!(handshake.peer_id, our_id);
+
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
+                // Keep connection alive for a moment to allow processing
+                std::thread::sleep(Duration::from_secs(1));
+            });
+
+            // Give some time for the handshake to complete
+            std::thread::sleep(Duration::from_secs(1));
+            command_tx.enqueue(Command::Stop).unwrap();
+            simulated_peer_thread.join().unwrap();
+            event_loop_thread.join().unwrap();
+
+            let snapshot = snapshotter.snapshot();
+            #[allow(clippy::mutable_key_type)]
+            let metrics = snapshot.into_hashmap();
+
+            // Verify successful handshake metrics
+            let val = metrics.get(&CompositeKey::new(
+                MetricKind::Counter,
+                Key::from_name("peer_handshake_success"),
+            ));
+            if let Some((_, _, DebugValue::Counter(num_success))) = val {
+                assert_eq!(*num_success, 1);
+            } else {
+                panic!("Expected peer_handshake_success metric to be recorded");
+            }
+        });
+    }
 
     // // Tests that the handshake is valid and that we send a proper bitfield afterwards
     // #[test]

@@ -251,6 +251,9 @@ impl<'queue> VortexApp<'queue> {
                     //let elapsed = self.start_time.elapsed();
                     self.shutdown();
                 }
+                TorrentEvent::ListenerStarted { port: _ } => {
+                    // Nothing to do here
+                }
                 TorrentEvent::MetadataComplete(metadata) => {
                     self.metadata = Some(metadata);
                 }
