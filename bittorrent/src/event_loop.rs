@@ -496,6 +496,31 @@ impl<'scope, 'state: 'scope> EventLoop {
         port
     }
 
+    fn write_handshake<Q: SubmissionQueue>(
+        &mut self,
+        sq: &mut BackloggedSubmissionQueue<Q>,
+        info_hash: [u8; 20],
+        socket: Socket,
+        addr: SockAddr,
+    ) {
+        let buffer = self.write_pool.get_buffer();
+        write_handshake(self.our_id, info_hash, buffer.inner);
+        let fd = socket.as_raw_fd();
+        let write_event_id = self.events.insert(EventData {
+            typ: EventType::Write { socket, addr },
+            buffer_idx: Some(buffer.index),
+        });
+        let write_op = opcode::Write::new(
+            types::Fd(fd),
+            buffer.inner.as_ptr(),
+            // TODO: Handle this better
+            HANDSHAKE_SIZE as u32,
+        )
+        .build()
+        .user_data(write_event_id.data().as_ffi());
+        sq.push(write_op);
+    }
+
     fn handle_commands<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
@@ -641,17 +666,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                     "Accepted connection: {:?}",
                     addr.as_socket().expect("must be AF_INET")
                 );
-                // Construct new recv token on accept, after that it lives forever and or is reused
-                // since this is a recvmulti operation
-                let read_event_id = self.events.insert(EventData {
-                    typ: EventType::Recv { socket, addr },
-                    buffer_idx: None,
-                });
-                let read_op = opcode::RecvMulti::new(types::Fd(fd), self.read_ring.bgid())
-                    .build()
-                    .user_data(read_event_id.data().as_ffi())
-                    .flags(io_uring::squeue::Flags::BUFFER_SELECT);
-                sq.push(read_op);
+                // Trigger a write handshake here so we end up in the same code path
+                // as outgoing connections. It will simplify things greatly
+                self.write_handshake(sq, state.info_hash, socket, addr);
             }
             EventType::Connect { socket, addr } => {
                 log::info!(
@@ -660,25 +677,10 @@ impl<'scope, 'state: 'scope> EventLoop {
                 );
                 let connect_success_counter = metrics::counter!("peer_connect_success");
                 connect_success_counter.increment(1);
-
-                let buffer = self.write_pool.get_buffer();
-                write_handshake(self.our_id, state.info_hash, buffer.inner);
-                let fd = socket.as_raw_fd();
                 let old = self.events.remove(io_event.event_data_idx).unwrap();
                 debug_assert!(matches!(old.typ, EventType::Dummy));
-                let write_event_id = self.events.insert(EventData {
-                    typ: EventType::Write { socket, addr },
-                    buffer_idx: Some(buffer.index),
-                });
-                let write_op = opcode::Write::new(
-                    types::Fd(fd),
-                    buffer.inner.as_ptr(),
-                    // TODO: Handle this better
-                    HANDSHAKE_SIZE as u32,
-                )
-                .build()
-                .user_data(write_event_id.data().as_ffi());
-                sq.push(write_op);
+
+                self.write_handshake(sq, state.info_hash, socket, addr);
             }
             EventType::Write { socket, addr } => {
                 let fd = socket.as_raw_fd();
@@ -741,12 +743,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                 let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
                 let parsed_handshake = parse_handshake(state.info_hash, handshake_data).unwrap();
-                assert!(
-                    self.pending_connections
-                        .remove(&<std::net::SocketAddr as Into<socket2::SockAddr>>::into(
-                            addr
-                        ))
-                );
+                // Remove from pending connections if this was an outgoing connection
+                // For incoming connections (from Accept), this will be false and that's ok
+                self.pending_connections
+                    .remove(&<std::net::SocketAddr as Into<socket2::SockAddr>>::into(
+                        addr,
+                    ));
 
                 let conn_id = self.connections.insert_with_key(|conn_id| {
                     PeerConnection::new(socket, addr, conn_id, parsed_handshake)
