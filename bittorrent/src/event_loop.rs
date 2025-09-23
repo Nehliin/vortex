@@ -117,15 +117,21 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                 EventType::Connect { socket, addr } => {
                     log::debug!("[{}] Connect timed out!", addr.as_socket().unwrap());
                     assert!(pending_connections.remove(&addr));
-                    let connect_fail_counter = metrics::counter!("peer_connect_timeout");
-                    connect_fail_counter.increment(1);
+                    #[cfg(feature = "metrics")]
+                    {
+                        let connect_fail_counter = metrics::counter!("peer_connect_timeout");
+                        connect_fail_counter.increment(1);
+                    }
                     socket
                 }
                 EventType::Recv { socket, addr } => {
                     log::debug!("[{}] Handshake timed out!", addr.as_socket().unwrap());
                     assert!(pending_connections.remove(&addr));
-                    let handshake_timeout_counter = metrics::counter!("peer_handshake_timeout");
-                    handshake_timeout_counter.increment(1);
+                    #[cfg(feature = "metrics")]
+                    {
+                        let handshake_timeout_counter = metrics::counter!("peer_handshake_timeout");
+                        handshake_timeout_counter.increment(1);
+                    }
                     socket
                 }
                 _ => unreachable!(),
@@ -387,8 +393,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                     for connection in self.connections.values_mut() {
                         if let Some(reason) = &connection.pending_disconnect {
                             log::warn!("Disconnect: {} reason {reason}", connection.peer_id,);
-                            let counter = metrics::counter!("disconnects");
-                            counter.increment(1);
+                            #[cfg(feature = "metrics")]
+                            {
+                                let counter = metrics::counter!("disconnects");
+                                counter.increment(1);
+                            }
                             connection.disconnect(&mut sq, &mut self.events, &mut state_ref);
                         }
                     }
@@ -599,8 +608,11 @@ impl<'scope, 'state: 'scope> EventLoop {
             "[{}] Connecting to peer",
             addr.as_socket().expect("must be AF_INET")
         );
-        let connect_counter = metrics::counter!("peer_connect_attempts");
-        connect_counter.increment(1);
+        #[cfg(feature = "metrics")]
+        {
+            let connect_counter = metrics::counter!("peer_connect_attempts");
+            connect_counter.increment(1);
+        }
 
         let connect_op = opcode::Connect::new(
             types::Fd(socket.as_raw_fd()),
@@ -675,8 +687,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                     "Connected to: {}",
                     addr.as_socket().expect("must be AF_INET")
                 );
-                let connect_success_counter = metrics::counter!("peer_connect_success");
-                connect_success_counter.increment(1);
+                #[cfg(feature = "metrics")]
+                {
+                    let connect_success_counter = metrics::counter!("peer_connect_success");
+                    connect_success_counter.increment(1);
+                }
                 let old = self.events.remove(io_event.event_data_idx).unwrap();
                 debug_assert!(matches!(old.typ, EventType::Dummy));
 
@@ -695,8 +710,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                     buffer_idx: None,
                 });
                 // Write is only used for unestablished connections aka when doing handshake
-                let handshake_counter = metrics::counter!("peer_handshake_attempt");
-                handshake_counter.increment(1);
+                #[cfg(feature = "metrics")]
+                {
+                    let handshake_counter = metrics::counter!("peer_handshake_attempt");
+                    handshake_counter.increment(1);
+                }
                 // Multishot isn't used here to simplify error handling
                 // when the read is invalid or otherwise doesn't lead to
                 // a full connection which does have graceful shutdown mechanisms
@@ -754,8 +772,13 @@ impl<'scope, 'state: 'scope> EventLoop {
                     PeerConnection::new(socket, addr, conn_id, parsed_handshake)
                 });
                 log::info!("[{addr}] Finished handshake! [{conn_id:?}]");
-                let handshake_success_counter = metrics::counter!("peer_handshake_success");
-                handshake_success_counter.increment(1);
+
+                #[cfg(feature = "metrics")]
+                {
+                    let handshake_success_counter = metrics::counter!("peer_handshake_success");
+                    handshake_success_counter.increment(1);
+                }
+
                 // We are now connected!
                 // The event is replaced (this removes the dummy)
                 let old = self.events.remove(io_event.event_data_idx).unwrap();
@@ -816,8 +839,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                         connection.peer_id,
                         connection.peer_addr,
                     );
-                    let counter = metrics::counter!("graceful_disconnect");
-                    counter.increment(1);
+                    #[cfg(feature = "metrics")]
+                    {
+                        let counter = metrics::counter!("graceful_disconnect");
+                        counter.increment(1);
+                    }
                     self.events.remove(io_event.event_data_idx);
                     connection.disconnect(sq, &mut self.events, state);
                     return Ok(());
@@ -882,28 +908,34 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
 fn report_tick_metrics(
     state: &mut StateRef<'_>,
     peer_metrics: Vec<PeerMetrics>,
-    pending_connections: &HashSet<SockAddr>,
+    _pending_connections: &HashSet<SockAddr>,
     event_tx: &mut Producer<TorrentEvent, 512>,
 ) {
     let mut pieces_completed = 0;
     let mut pieces_allocated = 0;
+
     if let Some((_, torrent_state)) = state.state() {
         let total_completed = torrent_state.piece_selector.total_completed();
-        let counter = metrics::counter!("pieces_completed");
-        counter.absolute(total_completed as u64);
         let total_allocated = torrent_state.piece_selector.total_allocated();
-        let gauge = metrics::gauge!("pieces_allocated");
-        gauge.set(total_allocated as u32);
-        let gauge = metrics::gauge!("num_unchoked");
-        gauge.set(torrent_state.num_unchoked);
         pieces_completed = total_completed;
         pieces_allocated = total_allocated;
+        #[cfg(feature = "metrics")]
+        {
+            let counter = metrics::counter!("pieces_completed");
+            counter.absolute(total_completed as u64);
+            let gauge = metrics::gauge!("pieces_allocated");
+            gauge.set(total_allocated as u32);
+            let gauge = metrics::gauge!("num_unchoked");
+            gauge.set(torrent_state.num_unchoked);
+        }
     }
-    let gauge = metrics::gauge!("num_connections");
-    gauge.set(peer_metrics.len() as u32);
-    let gauge = metrics::gauge!("num_pending_connections");
-    gauge.set(pending_connections.len() as u32);
-
+    #[cfg(feature = "metrics")]
+    {
+        let gauge = metrics::gauge!("num_connections");
+        gauge.set(peer_metrics.len() as u32);
+        let gauge = metrics::gauge!("num_pending_connections");
+        gauge.set(_pending_connections.len() as u32);
+    }
     if event_tx
         .enqueue(TorrentEvent::TorrentMetrics {
             pieces_completed,
