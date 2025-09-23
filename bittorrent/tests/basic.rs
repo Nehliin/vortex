@@ -57,16 +57,10 @@ fn basic_seeded_download() {
                     TorrentEvent::MetadataComplete(_torrent) => {
                         log::info!("METADATA COMPLETE");
                     }
-                    TorrentEvent::PeerMetrics {
-                        conn_id: _,
-                        throuhgput: _,
-                        endgame: _,
-                        snubbed: _,
-                    } => {}
                     TorrentEvent::TorrentMetrics {
                         pieces_completed: _,
                         pieces_allocated: _,
-                        num_connections: _,
+                        peer_metrics: _,
                     } => {}
                     TorrentEvent::ListenerStarted { port: _ } => {}
                 }

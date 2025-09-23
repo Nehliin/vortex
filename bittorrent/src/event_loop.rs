@@ -19,7 +19,7 @@ use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    Command, Error, State, StateRef, TorrentEvent,
+    Command, Error, PeerMetrics, State, StateRef, TorrentEvent,
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
@@ -881,7 +881,7 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
 
 fn report_tick_metrics(
     state: &mut StateRef<'_>,
-    connections: &SlotMap<ConnectionId, PeerConnection>,
+    peer_metrics: Vec<PeerMetrics>,
     pending_connections: &HashSet<SockAddr>,
     event_tx: &mut Producer<TorrentEvent, 512>,
 ) {
@@ -900,7 +900,7 @@ fn report_tick_metrics(
         pieces_allocated = total_allocated;
     }
     let gauge = metrics::gauge!("num_connections");
-    gauge.set(connections.len() as u32);
+    gauge.set(peer_metrics.len() as u32);
     let gauge = metrics::gauge!("num_pending_connections");
     gauge.set(pending_connections.len() as u32);
 
@@ -908,7 +908,7 @@ fn report_tick_metrics(
         .enqueue(TorrentEvent::TorrentMetrics {
             pieces_completed,
             pieces_allocated,
-            num_connections: connections.len(),
+            peer_metrics,
         })
         .is_err()
     {
@@ -975,6 +975,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             connection.throughput = 0;
         }
     }
+    let mut peer_metrics = Vec::with_capacity(connections.len());
     if let Some((file_and_info, torrent_state)) = torrent_state.state() {
         // Request new pieces and fill up request queues
         let mut peer_bandwidth: Vec<_> = connections
@@ -1017,11 +1018,11 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
                 }
             }
             peer.fill_request_queue();
-            peer.report_metrics(event_tx);
+            let metrics = peer.report_metrics();
+            peer_metrics.push(metrics);
         }
     }
-
-    report_tick_metrics(torrent_state, connections, pending_connections, event_tx);
+    report_tick_metrics(torrent_state, peer_metrics, pending_connections, event_tx);
 }
 
 #[cfg(test)]

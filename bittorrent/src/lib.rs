@@ -79,6 +79,13 @@ pub enum Command {
     Stop,
 }
 
+#[derive(Debug)]
+pub struct PeerMetrics {
+    pub throuhgput: u64,
+    pub endgame: bool,
+    pub snubbed: bool,
+}
+
 /// Events from the inprogress torrent
 #[derive(Debug)]
 pub enum TorrentEvent {
@@ -87,18 +94,10 @@ pub enum TorrentEvent {
     ListenerStarted {
         port: u16,
     },
-    PeerMetrics {
-        /// Note that these are not stable and might
-        /// be reused
-        conn_id: usize,
-        throuhgput: u64,
-        endgame: bool,
-        snubbed: bool,
-    },
     TorrentMetrics {
         pieces_completed: usize,
         pieces_allocated: usize,
-        num_connections: usize,
+        peer_metrics: Vec<PeerMetrics>,
     },
 }
 

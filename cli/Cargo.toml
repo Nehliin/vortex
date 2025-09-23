@@ -10,7 +10,6 @@ license = "BSD-3-Clause"
 
 [dependencies]
 anyhow = { workspace = true }
-ahash = { workspace = true }
 parking_lot = { workspace = true }
 lava_torrent = { workspace = true }
 log = { workspace = true }
