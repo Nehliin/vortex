@@ -187,7 +187,6 @@ struct VortexApp<'queue> {
     event_rc: Consumer<'queue, TorrentEvent, 512>,
     should_exit: bool,
     start_time: Instant,
-    peer_throughput: ahash::HashMap<usize, u64>,
     total_throughput: Box<HistoryBuffer<(f64, f64), 64>>,
     pieces_completed: usize,
     num_connections: usize,
@@ -213,7 +212,6 @@ impl<'queue> VortexApp<'queue> {
             pieces_completed: 0,
             total_throughput: Box::new(HistoryBuffer::new()),
             num_connections: 0,
-            peer_throughput: Default::default(),
             metadata_spinner_state: Default::default(),
             last_tick: Instant::now(),
             metadata,
@@ -257,25 +255,14 @@ impl<'queue> VortexApp<'queue> {
                 TorrentEvent::MetadataComplete(metadata) => {
                     self.metadata = Some(metadata);
                 }
-                TorrentEvent::PeerMetrics {
-                    conn_id,
-                    throuhgput,
-                    endgame: _,
-                    snubbed: _,
-                } => {
-                    self.peer_throughput
-                        .entry(conn_id)
-                        .and_modify(|val| *val = throuhgput)
-                        .or_insert(throuhgput);
-                }
                 TorrentEvent::TorrentMetrics {
                     pieces_completed,
                     pieces_allocated: _,
-                    num_connections,
+                    peer_metrics,
                 } => {
                     self.pieces_completed = pieces_completed;
-                    self.num_connections = num_connections;
-                    let tick_throuhput: u64 = self.peer_throughput.values().copied().sum();
+                    self.num_connections = peer_metrics.len();
+                    let tick_throuhput: u64 = peer_metrics.iter().map(|val| val.throuhgput).sum();
                     let curr_time = self.start_time.elapsed().as_secs_f64();
                     self.total_throughput
                         .write((curr_time, tick_throuhput as f64));

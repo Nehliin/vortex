@@ -10,12 +10,11 @@ license = "BSD-3-Clause"
 
 [dependencies]
 anyhow = { workspace = true }
-ahash = { workspace = true }
 parking_lot = { workspace = true }
 lava_torrent = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
-vortex-bittorrent = { path = "../bittorrent" }
+vortex-bittorrent = { path = "../bittorrent", features = ["metrics"] }
 heapless = { workspace = true }
 tikv-jemallocator = "0.5"
 mainline = { git = "https://github.com/Nehliin/mainline.git", branch = "feature-gate", default-features = false, features = ["node"]}

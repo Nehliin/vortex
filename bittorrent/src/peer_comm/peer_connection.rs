@@ -7,15 +7,14 @@ use std::{
 use bitvec::vec::BitVec;
 use bt_bencode::{Deserializer, Value};
 use bytes::Bytes;
-use heapless::spsc::Producer;
 use rayon::Scope;
 use serde::Deserialize;
 use sha1::Digest;
-use slotmap::{Key, SlotMap};
+use slotmap::SlotMap;
 use socket2::Socket;
 
 use crate::{
-    Error, InitializedState, StateRef, TorrentEvent,
+    Error, InitializedState, PeerMetrics, StateRef,
     event_loop::{ConnectionId, EventData, EventId},
     file_store::FileStore,
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
@@ -451,42 +450,40 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.moving_rtt.add_sample(&rtt);
     }
 
-    pub fn report_metrics(&self, event_tx: &mut Producer<TorrentEvent, 512>) {
-        let gauge = metrics::gauge!("peer.throughput.bytes", "peer_id" => self.peer_id.to_string());
-        // Prev throughput is used since the mertics are reported at the end of TICK and
-        // throughput have been reset and stored here at that point
-        gauge.set(self.prev_throughput as u32);
-
-        let gauge = metrics::gauge!("peer.target_inflight", "peer_id" => self.peer_id.to_string());
-        gauge.set(self.target_inflight as u32);
-
-        let gauge = metrics::gauge!("peer.queued", "peer_id" => self.peer_id.to_string());
-        gauge.set(self.queued.len() as u32);
-
-        let gauge = metrics::gauge!("peer.snubbed", "peer_id" => self.peer_id.to_string());
-        gauge.set(if self.snubbed { 1 } else { 0 } as u32);
-
-        let gauge = metrics::gauge!("peer.endgame", "peer_id" => self.peer_id.to_string());
-        gauge.set(if self.endgame { 1 } else { 0 } as u32);
-
-        let gauge = metrics::gauge!("peer.inflight", "peer_id" => self.peer_id.to_string());
-        gauge.set(self.inflight.len() as u32);
-
-        let histogram = metrics::histogram!("rtt", "peer_id" => self.peer_id.to_string());
-        histogram.record(self.moving_rtt.mean());
-
-        if event_tx
-            .enqueue(TorrentEvent::PeerMetrics {
-                conn_id: self.conn_id.data().as_ffi() as usize,
-                // Prev throughput is used since the mertics are reported at the end of TICK and
-                // throughput have been reset and stored here at that point
-                throuhgput: self.prev_throughput,
-                endgame: self.endgame,
-                snubbed: self.endgame,
-            })
-            .is_err()
+    pub fn report_metrics(&self) -> PeerMetrics {
+        #[cfg(feature = "metrics")]
         {
-            log::error!("Peer metrics event missed");
+            let gauge =
+                metrics::gauge!("peer.throughput.bytes", "peer_id" => self.peer_id.to_string());
+            // Prev throughput is used since the mertics are reported at the end of TICK and
+            // throughput have been reset and stored here at that point
+            gauge.set(self.prev_throughput as u32);
+
+            let gauge =
+                metrics::gauge!("peer.target_inflight", "peer_id" => self.peer_id.to_string());
+            gauge.set(self.target_inflight as u32);
+
+            let gauge = metrics::gauge!("peer.queued", "peer_id" => self.peer_id.to_string());
+            gauge.set(self.queued.len() as u32);
+
+            let gauge = metrics::gauge!("peer.snubbed", "peer_id" => self.peer_id.to_string());
+            gauge.set(if self.snubbed { 1 } else { 0 } as u32);
+
+            let gauge = metrics::gauge!("peer.endgame", "peer_id" => self.peer_id.to_string());
+            gauge.set(if self.endgame { 1 } else { 0 } as u32);
+
+            let gauge = metrics::gauge!("peer.inflight", "peer_id" => self.peer_id.to_string());
+            gauge.set(self.inflight.len() as u32);
+
+            let histogram = metrics::histogram!("rtt", "peer_id" => self.peer_id.to_string());
+            histogram.record(self.moving_rtt.mean());
+        }
+        PeerMetrics {
+            // Prev throughput is used since the mertics are reported at the end of TICK and
+            // throughput have been reset and stored here at that point
+            throuhgput: self.prev_throughput,
+            endgame: self.endgame,
+            snubbed: self.snubbed,
         }
     }
 

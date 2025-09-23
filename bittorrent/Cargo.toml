@@ -25,14 +25,16 @@ sha1 = { workspace = true }
 smallvec= { version = "2.0.0-alpha.10" , features = ["std"]}
 heapless = { workspace = true }
 rayon = "1"
-metrics = "0.24"
+metrics = { version = "0.24", optional = true }
 bt_bencode = "0.8.2"
 serde = { version = "1", features = ["derive"]}
 
 [features]
 fuzzing = ["dep:arbitrary"]
+metrics = ["dep:metrics"]
 
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }
 metrics-util = "0.20"
+metrics = "0.24"
 env_logger = { workspace = true }
