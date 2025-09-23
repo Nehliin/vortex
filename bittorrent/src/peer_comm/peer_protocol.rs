@@ -127,10 +127,14 @@ pub fn parse_handshake(info_hash: [u8; 20], mut buffer: &[u8]) -> io::Result<Par
         return Err(ErrorKind::UnexpectedEof.into());
     }
     let str_len = buffer.get_u8() as usize;
-    if &buffer[..str_len] != b"BitTorrent protocol" as &[u8] {
+    let expected_str = b"BitTorrent protocol";
+    if str_len != expected_str.len() {
+        return Err(ErrorKind::UnexpectedEof.into());
+    }
+    if &buffer[..expected_str.len()] != expected_str as &[u8] {
         return Err(ErrorKind::InvalidData.into());
     }
-    buffer.advance(str_len);
+    buffer.advance(expected_str.len());
     // Extensions
     let fast_ext = buffer[7] & 0x04 != 0;
     let extension_protocol = buffer[5] & 0x10 != 0;
