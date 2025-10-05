@@ -81,7 +81,8 @@ pub enum Command {
 
 #[derive(Debug)]
 pub struct PeerMetrics {
-    pub throuhgput: u64,
+    pub download_throughput: u64,
+    pub upload_throughput: u64,
     pub endgame: bool,
     pub snubbed: bool,
 }
