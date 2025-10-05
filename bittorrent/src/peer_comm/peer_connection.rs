@@ -1062,7 +1062,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     scope.spawn(move |_| {
                         let hash = &torrent_info.pieces[readable_piece_view.index as usize];
                         let hash_check_result =
-                            readable_piece_view.sync_and_check_hash(hash, file_store);
+                            readable_piece_view.check_hash(hash, file_store, true);
                         complete_tx
                             .send(CompletedPiece {
                                 index: index as usize,

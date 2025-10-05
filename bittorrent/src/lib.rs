@@ -7,11 +7,15 @@ use std::{
     sync::mpsc::{Receiver, Sender},
 };
 
+use bitvec::{boxed::BitBox, order::Msb0, vec::BitVec};
 use event_loop::{ConnectionId, EventLoop};
 use file_store::FileStore;
 use heapless::spsc::{Consumer, Producer};
 use io_uring::IoUring;
 use piece_selector::{CompletedPiece, Piece, PieceSelector, Subpiece};
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+};
 use slotmap::SlotMap;
 use thiserror::Error;
 
@@ -280,11 +284,46 @@ impl State {
         }
     }
 
-    pub fn unstarted_from_metadata(
+    /// This requires validating all the files on disk which may be slow
+    /// TODO: Use custom file format to avoid having to do hash checking of all files
+    pub fn from_metadata_and_root(
         metadata: lava_torrent::torrent::v1::Torrent,
         root: PathBuf,
     ) -> io::Result<Self> {
         let file_store = FileStore::new(&root, &metadata)?;
+        let mut initialized_state = InitializedState::new(&metadata);
+        let completed_pieces: Box<[bool]> = metadata
+            .pieces
+            .as_slice()
+            .par_iter()
+            .enumerate()
+            .map(|(idx, hash)| {
+                // SAFETY: The filestore we are reading from is created above and thus there
+                // should not exist any existing writable_piece_views. NOTE: this isn't 100%
+                // guraranteed since someone else could be mmapping the file but it's not much
+                // we can do about that
+                match unsafe { file_store.readable_piece_view(idx as i32) } {
+                    Ok(readable_view) => {
+                        // Since we do not sync it should never panic
+                        readable_view.check_hash(hash, &file_store, false).unwrap()
+                    }
+                    Err(err) => {
+                        if err.kind() != io::ErrorKind::NotFound {
+                            panic!("Unexpected error reading file {err}");
+                        }
+                        false
+                    }
+                }
+            })
+            .collect();
+        let completed_pieces: BitVec<u8, Msb0> = completed_pieces.into_iter().collect();
+        let completed_pieces: BitBox<u8, Msb0> = completed_pieces.into_boxed_bitslice();
+        log::trace!("Completed pieces: {completed_pieces}");
+        initialized_state
+            .piece_selector
+            .set_completed_bitfield(completed_pieces);
+        initialized_state.is_complete = initialized_state.piece_selector.completed_all();
+
         Ok(Self {
             info_hash: metadata
                 .info_hash_bytes()
@@ -292,7 +331,7 @@ impl State {
                 .expect("Invalid info hash"),
             root,
             listener_port: None,
-            torrent_state: Some(InitializedState::new(&metadata)),
+            torrent_state: Some(initialized_state),
             file: OnceCell::from(FileAndMetadata {
                 file_store,
                 metadata: Box::new(metadata),
