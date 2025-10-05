@@ -1008,6 +1008,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             connection.prev_download_throughput = connection.download_throughput;
             connection.prev_upload_throughput = connection.upload_thorughput;
             connection.download_throughput = 0;
+            connection.upload_thorughput = 0;
         }
     }
     let mut peer_metrics = Vec::with_capacity(connections.len());
