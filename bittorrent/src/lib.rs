@@ -445,7 +445,8 @@ mod test_utils {
         )
     }
 
-    struct TempDir {
+    #[derive(Debug)]
+    pub struct TempDir {
         path: PathBuf,
     }
 
@@ -477,28 +478,19 @@ mod test_utils {
     fn setup_torrent(
         torrent_name: &str,
         torrent_tmp_dir: TempDir,
-        download_tmp_dir: TempDir,
         piece_len: usize,
         file_data: HashMap<String, Vec<u8>>,
-    ) -> (FileStore, Torrent) {
-        setup_torrent_with_metadata_size(
-            torrent_name,
-            torrent_tmp_dir,
-            download_tmp_dir,
-            piece_len,
-            file_data,
-            false,
-        )
+    ) -> Torrent {
+        setup_torrent_with_metadata_size(torrent_name, torrent_tmp_dir, piece_len, file_data, false)
     }
 
     fn setup_torrent_with_metadata_size(
         torrent_name: &str,
         torrent_tmp_dir: TempDir,
-        download_tmp_dir: TempDir,
         piece_len: usize,
         file_data: HashMap<String, Vec<u8>>,
         large_metadata: bool,
-    ) -> (FileStore, Torrent) {
+    ) -> Torrent {
         use lava_torrent::bencode::BencodeElem;
 
         file_data.iter().for_each(|(path, data)| {
@@ -563,11 +555,7 @@ mod test_utils {
                 BencodeElem::String("A".repeat(3000)), // 3KB description
             );
         }
-
-        let torrent_info = builder.build().unwrap();
-        let download_tmp_dir_path = download_tmp_dir.path.clone();
-        let file_store = FileStore::new(&download_tmp_dir_path, &torrent_info).unwrap();
-        (file_store, torrent_info)
+        builder.build().unwrap()
     }
 
     pub fn setup_test() -> State {
@@ -582,13 +570,14 @@ mod test_utils {
         let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
         let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
         let root = download_tmp_dir.path.clone();
-        let (file_store, torrent_info) = setup_torrent(
+        let torrent_info = setup_torrent(
             &torrent_name,
             torrent_tmp_dir,
-            download_tmp_dir,
             (SUBPIECE_SIZE * 2) as usize,
             files,
         );
+        let download_tmp_dir_path = root.clone();
+        let file_store = FileStore::new(&download_tmp_dir_path, &torrent_info).unwrap();
         let state = InitializedState::new(&torrent_info);
         State::inprogress(
             torrent_info.info_hash_bytes().try_into().unwrap(),
@@ -619,18 +608,46 @@ mod test_utils {
         let root = download_tmp_dir.path.clone();
 
         // Create the torrent to get the metadata, but don't initialize the state with it
-        let (_, torrent_info) = setup_torrent_with_metadata_size(
+        let torrent_info = setup_torrent_with_metadata_size(
             &torrent_name,
             torrent_tmp_dir,
-            download_tmp_dir,
             (SUBPIECE_SIZE * 2) as usize,
             files,
             large_metadata,
         );
-
         let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
         let uninitialized_state = State::unstarted(info_hash, root);
 
         (uninitialized_state, torrent_info)
+    }
+
+    pub fn setup_seeding_test() -> State {
+        let files: HashMap<String, Vec<u8>> = [
+            ("f1.txt".to_owned(), vec![1_u8; 64]),
+            ("f2.txt".to_owned(), vec![2_u8; 100]),
+            ("f3.txt".to_owned(), vec![3_u8; SUBPIECE_SIZE as usize * 16]),
+        ]
+        .into_iter()
+        .collect();
+        let torrent_name = format!("{}", rand::random::<u16>());
+        let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
+        let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
+        let root = download_tmp_dir.path.clone();
+
+        let torrent_info = setup_torrent(
+            &torrent_name,
+            torrent_tmp_dir,
+            (SUBPIECE_SIZE * 2) as usize,
+            files.clone(),
+        );
+
+        // Add files to the download directory so they're available for seeding
+        // Files need to be in the subdirectory matching the torrent name
+        files.iter().for_each(|(path, data)| {
+            download_tmp_dir.add_file(&format!("{}/{}", torrent_name, path), data);
+        });
+
+        // Use from_metadata_and_root to create a state with already completed pieces
+        State::from_metadata_and_root(torrent_info, root).unwrap()
     }
 }
