@@ -985,8 +985,8 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             // Take delta into account when calculating throughput
             connection.download_throughput =
                 (connection.download_throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
-            connection.upload_thorughput =
-                (connection.upload_thorughput as f64 / tick_delta.as_secs_f64()).round() as u64;
+            connection.upload_throughput =
+                (connection.upload_throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
             if !connection.peer_choking {
                 // slow start win size increase is handled in update_stats
                 if !connection.slow_start {
@@ -1006,9 +1006,9 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
                 connection.slow_start = false;
             }
             connection.prev_download_throughput = connection.download_throughput;
-            connection.prev_upload_throughput = connection.upload_thorughput;
+            connection.prev_upload_throughput = connection.upload_throughput;
             connection.download_throughput = 0;
-            connection.upload_thorughput = 0;
+            connection.upload_throughput = 0;
         }
     }
     let mut peer_metrics = Vec::with_capacity(connections.len());

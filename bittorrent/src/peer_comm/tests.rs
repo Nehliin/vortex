@@ -2367,7 +2367,7 @@ fn upload_throughput_tracking() {
         connections[key].handle_message(PeerMessage::HaveNone, &mut state_ref, scope);
         connections[key].handle_message(PeerMessage::Interested, &mut state_ref, scope);
 
-        assert_eq!(connections[key].upload_thorughput, 0);
+        assert_eq!(connections[key].upload_throughput, 0);
         assert_eq!(connections[key].prev_upload_throughput, 0);
 
         connections[key].handle_message(
@@ -2381,7 +2381,7 @@ fn upload_throughput_tracking() {
         );
 
         // After sending the piece, upload throughput should be tracked
-        assert_eq!(connections[key].upload_thorughput, SUBPIECE_SIZE as u64);
+        assert_eq!(connections[key].upload_throughput, SUBPIECE_SIZE as u64);
 
         // Request another subpiece
         connections[key].handle_message(
@@ -2395,7 +2395,7 @@ fn upload_throughput_tracking() {
         );
 
         // Upload throughput should accumulate
-        assert_eq!(connections[key].upload_thorughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(connections[key].upload_throughput, (SUBPIECE_SIZE * 2) as u64);
 
         // Simulate a tick to move current throughput to prev_throughput
         let mut event_q = Queue::<TorrentEvent, 512>::new();
@@ -2410,6 +2410,6 @@ fn upload_throughput_tracking() {
 
         // After tick, current throughput is reset and moved to prev
         assert_eq!(connections[key].prev_upload_throughput, ((SUBPIECE_SIZE * 2) as f64 / 1.5) as u64);
-        assert_eq!(connections[key].upload_thorughput, 0);
+        assert_eq!(connections[key].upload_throughput, 0);
     });
 }

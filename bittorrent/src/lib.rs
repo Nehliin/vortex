@@ -13,9 +13,7 @@ use file_store::FileStore;
 use heapless::spsc::{Consumer, Producer};
 use io_uring::IoUring;
 use piece_selector::{CompletedPiece, Piece, PieceSelector, Subpiece};
-use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
-};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use slotmap::SlotMap;
 use thiserror::Error;
 

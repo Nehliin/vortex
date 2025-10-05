@@ -178,7 +178,7 @@ pub struct PeerConnection {
     pub moving_rtt: MovingRttAverage,
     pub download_throughput: u64,
     pub prev_download_throughput: u64,
-    pub upload_thorughput: u64,
+    pub upload_throughput: u64,
     pub prev_upload_throughput: u64,
     // If this connection is about to be disconnected
     pub pending_disconnect: Option<DisconnectReason>,
@@ -228,7 +228,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             pending_disconnect: None,
             download_throughput: 0,
             prev_download_throughput: 0,
-            upload_thorughput: 0,
+            upload_throughput: 0,
             prev_upload_throughput: 0,
             outgoing_msgs_buffer: Default::default(),
             extensions: Default::default(),
@@ -314,7 +314,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     fn send_piece(&mut self, index: i32, offset: i32, data: Bytes, ordered: bool) {
-        self.upload_thorughput += data.len() as u64;
+        self.upload_throughput += data.len() as u64;
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Piece {
                 index,
