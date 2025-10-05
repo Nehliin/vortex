@@ -421,9 +421,7 @@ mod tests {
                 view.write_subpiece(subpiece_offset, subpiece_data, &file_store);
             }
             let readable = view.into_readable();
-            let hash_matches = readable
-                .check_hash(piece_hash, &file_store, true)
-                .unwrap();
+            let hash_matches = readable.check_hash(piece_hash, &file_store, true).unwrap();
             assert!(hash_matches);
             all_data = remainder.to_vec();
         }

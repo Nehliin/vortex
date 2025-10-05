@@ -6,9 +6,15 @@ use serde::Deserialize;
 use slotmap::SlotMap;
 
 use crate::{
-    event_loop::{tick, ConnectionId, MAX_OUTSTANDING_REQUESTS}, peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason}, peer_connection::OutgoingMsg, piece_selector::{Subpiece, SUBPIECE_SIZE}, test_utils::{
-        generate_peer, setup_seeding_test, setup_test, setup_uninitialized_test, setup_uninitialized_test_with_metadata_size
-    }, TorrentEvent
+    TorrentEvent,
+    event_loop::{ConnectionId, MAX_OUTSTANDING_REQUESTS, tick},
+    peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
+    peer_connection::OutgoingMsg,
+    piece_selector::{SUBPIECE_SIZE, Subpiece},
+    test_utils::{
+        generate_peer, setup_seeding_test, setup_test, setup_uninitialized_test,
+        setup_uninitialized_test_with_metadata_size,
+    },
 };
 
 use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};
@@ -344,7 +350,10 @@ fn slow_start() {
             &mut state_ref,
             scope,
         );
-        assert_eq!(connections[key].download_throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(
+            connections[key].download_throughput,
+            (SUBPIECE_SIZE * 2) as u64
+        );
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].prev_download_throughput, 0);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
@@ -399,7 +408,10 @@ fn slow_start() {
             &mut event_tx,
         );
 
-        assert_eq!(connections[key].prev_download_throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(
+            connections[key].prev_download_throughput,
+            (SUBPIECE_SIZE * 2) as u64
+        );
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 4);
 
@@ -441,7 +453,10 @@ fn slow_start() {
             &mut event_tx,
         );
 
-        assert_eq!(connections[key].prev_download_throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(
+            connections[key].prev_download_throughput,
+            (SUBPIECE_SIZE * 2) as u64
+        );
         // No longer slow start
         assert!(!connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 6);
@@ -2395,7 +2410,10 @@ fn upload_throughput_tracking() {
         );
 
         // Upload throughput should accumulate
-        assert_eq!(connections[key].upload_throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(
+            connections[key].upload_throughput,
+            (SUBPIECE_SIZE * 2) as u64
+        );
 
         // Simulate a tick to move current throughput to prev_throughput
         let mut event_q = Queue::<TorrentEvent, 512>::new();
@@ -2409,7 +2427,10 @@ fn upload_throughput_tracking() {
         );
 
         // After tick, current throughput is reset and moved to prev
-        assert_eq!(connections[key].prev_upload_throughput, ((SUBPIECE_SIZE * 2) as f64 / 1.5) as u64);
+        assert_eq!(
+            connections[key].prev_upload_throughput,
+            ((SUBPIECE_SIZE * 2) as f64 / 1.5) as u64
+        );
         assert_eq!(connections[key].upload_throughput, 0);
     });
 }
