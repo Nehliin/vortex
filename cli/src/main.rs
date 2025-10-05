@@ -1,6 +1,6 @@
 use std::{
     fs::OpenOptions,
-    io,
+    io::{self, ErrorKind},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -134,18 +134,35 @@ fn main() -> io::Result<()> {
 
     let cli = Cli::parse();
 
+    let root = cli.download_folder.clone();
+
     let mut state = match cli.torrent_info {
         TorrentInfo {
             info_hash: Some(info_hash),
             torrent_file: None,
-        } => State::unstarted(decode_info_hash_hex(&info_hash), cli.download_folder),
+        } => {
+            match lava_torrent::torrent::v1::Torrent::read_from_file(
+                root.join(info_hash.to_lowercase()),
+            ) {
+                // Metadata has been saved from previous run
+                Ok(metadata) => State::from_metadata_and_root(metadata, cli.download_folder)?,
+                Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
+                    if io_err.kind() == ErrorKind::NotFound {
+                        State::unstarted(decode_info_hash_hex(&info_hash), cli.download_folder)
+                    } else {
+                        panic!("Failed looking for stored metadata {io_err}");
+                    }
+                }
+                Err(err) => panic!("Failed looking for stored metadata {err}"),
+            }
+        }
         TorrentInfo {
             info_hash: None,
             torrent_file: Some(metadata),
         } => {
             let parsed_metadata =
                 lava_torrent::torrent::v1::Torrent::read_from_file(metadata).unwrap();
-            State::unstarted_from_metadata(parsed_metadata, cli.download_folder).unwrap()
+            State::from_metadata_and_root(parsed_metadata, cli.download_folder)?
         }
         _ => unreachable!(),
     };
@@ -174,7 +191,7 @@ fn main() -> io::Result<()> {
         let cmd_tx_clone = command_tx.clone();
         s.spawn(move || dht_thread(info_hash_id, cmd_tx_clone, shutdown_signal_rc));
 
-        let mut app = VortexApp::new(command_tx, event_rc, shutdown_signal_tx, metadata);
+        let mut app = VortexApp::new(command_tx, event_rc, shutdown_signal_tx, metadata, root);
         let terminal = ratatui::init();
         let result = app.run(terminal);
         ratatui::restore();
@@ -192,6 +209,7 @@ struct VortexApp<'queue> {
     pieces_completed: usize,
     num_connections: usize,
     metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
+    root: PathBuf,
     metadata_spinner_state: ThrobberState,
     last_tick: Instant,
     // Signal the other threads we they shutdown
@@ -204,6 +222,7 @@ impl<'queue> VortexApp<'queue> {
         event_rc: Consumer<'queue, TorrentEvent, 512>,
         shutdown_signal_tx: Sender<()>,
         metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
+        root: PathBuf,
     ) -> Self {
         Self {
             cmd_tx,
@@ -217,6 +236,7 @@ impl<'queue> VortexApp<'queue> {
             metadata_spinner_state: Default::default(),
             last_tick: Instant::now(),
             metadata,
+            root,
             shutdown_signal_tx,
         }
     }
@@ -255,7 +275,17 @@ impl<'queue> VortexApp<'queue> {
                     // Nothing to do here
                 }
                 TorrentEvent::MetadataComplete(metadata) => {
-                    self.metadata = Some(metadata);
+                    self.metadata = Some(metadata.clone());
+                    let root = self.root.clone();
+                    // Store the metadata as the info hash in the download folder, that will
+                    // ensure it's possible to recover from downloads that's already started
+                    // The thread is used to keep this non blocking
+                    std::thread::spawn(move || {
+                        let path = root.join(metadata.info_hash());
+                        if let Err(err) = metadata.write_into_file(path) {
+                            log::error!("Failed to save metadata to disk: {err}")
+                        }
+                    });
                 }
                 TorrentEvent::TorrentMetrics {
                     pieces_completed,
