@@ -137,11 +137,12 @@ impl ReadablePieceFileView {
         assert_eq!(subpiece_read, buffer.len());
     }
 
-    /// Sync the relevant file pieces to disk and compare against expected hash
-    pub fn sync_and_check_hash(
+    /// Compare against the expected hash and optionally sync the files to disk
+    pub fn check_hash(
         &self,
         expected_piece_hash: &[u8],
         file_store: &FileStore,
+        sync: bool,
     ) -> io::Result<bool> {
         let mut hasher = sha1::Sha1::new();
         let mut total_read = 0;
@@ -170,7 +171,9 @@ impl ReadablePieceFileView {
             let file_data = file.file_handle.get();
             let file_data_start = file_offset as usize;
             let file_data_end = file_offset as usize + to_read;
-            file.file_handle.sync(file_data_start, file_data_end)?;
+            if sync {
+                file.file_handle.sync(file_data_start, file_data_end)?;
+            }
             let relevant_piece_data: &[u8] = &file_data[file_data_start..file_data_end];
             hasher.update(relevant_piece_data);
             total_read += to_read;
@@ -418,9 +421,7 @@ mod tests {
                 view.write_subpiece(subpiece_offset, subpiece_data, &file_store);
             }
             let readable = view.into_readable();
-            let hash_matches = readable
-                .sync_and_check_hash(piece_hash, &file_store)
-                .unwrap();
+            let hash_matches = readable.check_hash(piece_hash, &file_store, true).unwrap();
             assert!(hash_matches);
             all_data = remainder.to_vec();
         }

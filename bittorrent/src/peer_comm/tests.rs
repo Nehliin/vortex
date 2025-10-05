@@ -12,7 +12,7 @@ use crate::{
     peer_connection::OutgoingMsg,
     piece_selector::{SUBPIECE_SIZE, Subpiece},
     test_utils::{
-        generate_peer, setup_test, setup_uninitialized_test,
+        generate_peer, setup_seeding_test, setup_test, setup_uninitialized_test,
         setup_uninitialized_test_with_metadata_size,
     },
 };
@@ -311,8 +311,8 @@ fn slow_start() {
             &mut event_tx,
         );
         assert!(connections[key].slow_start);
-        assert_eq!(connections[key].prev_throughput, 0);
-        assert_eq!(connections[key].throughput, 0);
+        assert_eq!(connections[key].prev_download_throughput, 0);
+        assert_eq!(connections[key].download_throughput, 0);
         assert!(connections[key].target_inflight > 1);
         let old_desired_queue = connections[key].target_inflight;
 
@@ -350,9 +350,12 @@ fn slow_start() {
             &mut state_ref,
             scope,
         );
-        assert_eq!(connections[key].throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(
+            connections[key].download_throughput,
+            (SUBPIECE_SIZE * 2) as u64
+        );
         assert!(connections[key].slow_start);
-        assert_eq!(connections[key].prev_throughput, 0);
+        assert_eq!(connections[key].prev_download_throughput, 0);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
 
         tick(
@@ -363,8 +366,8 @@ fn slow_start() {
             &mut event_tx,
         );
 
-        assert_eq!(connections[key].prev_throughput, 21845);
-        assert_eq!(connections[key].throughput, 0);
+        assert_eq!(connections[key].prev_download_throughput, 21845);
+        assert_eq!(connections[key].download_throughput, 0);
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
 
@@ -405,7 +408,10 @@ fn slow_start() {
             &mut event_tx,
         );
 
-        assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(
+            connections[key].prev_download_throughput,
+            (SUBPIECE_SIZE * 2) as u64
+        );
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 4);
 
@@ -447,7 +453,10 @@ fn slow_start() {
             &mut event_tx,
         );
 
-        assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(
+            connections[key].prev_download_throughput,
+            (SUBPIECE_SIZE * 2) as u64
+        );
         // No longer slow start
         assert!(!connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 6);
@@ -2356,5 +2365,72 @@ fn metadata_download_multiple_pieces() {
         assert_eq!(torrent_state.num_pieces(), torrent_info.pieces.len());
 
         assert!(connections[key_a].pending_disconnect.is_none());
+    });
+}
+
+#[test]
+fn upload_throughput_tracking() {
+    let mut download_state = setup_seeding_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+
+        // Setup: peer have no pieces and is interested in our data
+        connections[key].handle_message(PeerMessage::HaveNone, &mut state_ref, scope);
+        connections[key].handle_message(PeerMessage::Interested, &mut state_ref, scope);
+
+        assert_eq!(connections[key].upload_throughput, 0);
+        assert_eq!(connections[key].prev_upload_throughput, 0);
+
+        connections[key].handle_message(
+            PeerMessage::Request {
+                index: 0,
+                begin: 0,
+                length: SUBPIECE_SIZE,
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        // After sending the piece, upload throughput should be tracked
+        assert_eq!(connections[key].upload_throughput, SUBPIECE_SIZE as u64);
+
+        // Request another subpiece
+        connections[key].handle_message(
+            PeerMessage::Request {
+                index: 0,
+                begin: SUBPIECE_SIZE,
+                length: SUBPIECE_SIZE,
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        // Upload throughput should accumulate
+        assert_eq!(
+            connections[key].upload_throughput,
+            (SUBPIECE_SIZE * 2) as u64
+        );
+
+        // Simulate a tick to move current throughput to prev_throughput
+        let mut event_q = Queue::<TorrentEvent, 512>::new();
+        let (mut event_tx, _event_rx) = event_q.split();
+        tick(
+            &Duration::from_millis(1500),
+            &mut connections,
+            &Default::default(),
+            &mut state_ref,
+            &mut event_tx,
+        );
+
+        // After tick, current throughput is reset and moved to prev
+        assert_eq!(
+            connections[key].prev_upload_throughput,
+            ((SUBPIECE_SIZE * 2) as f64 / 1.5) as u64
+        );
+        assert_eq!(connections[key].upload_throughput, 0);
     });
 }

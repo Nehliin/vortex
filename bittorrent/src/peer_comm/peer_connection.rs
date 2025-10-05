@@ -176,8 +176,10 @@ pub struct PeerConnection {
     pub snubbed: bool,
     // The averge time between pieces being received
     pub moving_rtt: MovingRttAverage,
-    pub throughput: u64,
-    pub prev_throughput: u64,
+    pub download_throughput: u64,
+    pub prev_download_throughput: u64,
+    pub upload_throughput: u64,
+    pub prev_upload_throughput: u64,
     // If this connection is about to be disconnected
     pub pending_disconnect: Option<DisconnectReason>,
     pub stateful_decoder: PeerMessageDecoder,
@@ -224,8 +226,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             max_queue_size: 200,
             moving_rtt: Default::default(),
             pending_disconnect: None,
-            throughput: 0,
-            prev_throughput: 0,
+            download_throughput: 0,
+            prev_download_throughput: 0,
+            upload_throughput: 0,
+            prev_upload_throughput: 0,
             outgoing_msgs_buffer: Default::default(),
             extensions: Default::default(),
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
@@ -310,6 +314,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     fn send_piece(&mut self, index: i32, offset: i32, data: Bytes, ordered: bool) {
+        self.upload_throughput += data.len() as u64;
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Piece {
                 index,
@@ -440,7 +445,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         if self.slow_start {
             self.update_target_inflight(self.target_inflight + 1);
         }
-        self.throughput += length as u64;
+        self.download_throughput += length as u64;
         let request = self.inflight.remove(pos).unwrap();
         log::trace!("Subpiece completed: {}, {}", request.index, request.offset);
         let rtt = self.last_received_subpiece.take().unwrap().elapsed();
@@ -457,7 +462,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 metrics::gauge!("peer.throughput.bytes", "peer_id" => self.peer_id.to_string());
             // Prev throughput is used since the mertics are reported at the end of TICK and
             // throughput have been reset and stored here at that point
-            gauge.set(self.prev_throughput as u32);
+            gauge.set(self.prev_download_throughput as u32);
 
             let gauge =
                 metrics::gauge!("peer.target_inflight", "peer_id" => self.peer_id.to_string());
@@ -481,7 +486,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         PeerMetrics {
             // Prev throughput is used since the mertics are reported at the end of TICK and
             // throughput have been reset and stored here at that point
-            throuhgput: self.prev_throughput,
+            download_throughput: self.prev_download_throughput,
+            // Same goes for upload data
+            upload_throughput: self.prev_upload_throughput,
             endgame: self.endgame,
             snubbed: self.snubbed,
         }
@@ -1055,7 +1062,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     scope.spawn(move |_| {
                         let hash = &torrent_info.pieces[readable_piece_view.index as usize];
                         let hash_check_result =
-                            readable_piece_view.sync_and_check_hash(hash, file_store);
+                            readable_piece_view.check_hash(hash, file_store, true);
                         complete_tx
                             .send(CompletedPiece {
                                 index: index as usize,

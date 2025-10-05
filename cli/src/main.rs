@@ -1,6 +1,6 @@
 use std::{
     fs::OpenOptions,
-    io,
+    io::{self, ErrorKind},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -134,18 +134,35 @@ fn main() -> io::Result<()> {
 
     let cli = Cli::parse();
 
+    let root = cli.download_folder.clone();
+
     let mut state = match cli.torrent_info {
         TorrentInfo {
             info_hash: Some(info_hash),
             torrent_file: None,
-        } => State::unstarted(decode_info_hash_hex(&info_hash), cli.download_folder),
+        } => {
+            match lava_torrent::torrent::v1::Torrent::read_from_file(
+                root.join(info_hash.to_lowercase()),
+            ) {
+                // Metadata has been saved from previous run
+                Ok(metadata) => State::from_metadata_and_root(metadata, cli.download_folder)?,
+                Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
+                    if io_err.kind() == ErrorKind::NotFound {
+                        State::unstarted(decode_info_hash_hex(&info_hash), cli.download_folder)
+                    } else {
+                        panic!("Failed looking for stored metadata {io_err}");
+                    }
+                }
+                Err(err) => panic!("Failed looking for stored metadata {err}"),
+            }
+        }
         TorrentInfo {
             info_hash: None,
             torrent_file: Some(metadata),
         } => {
             let parsed_metadata =
                 lava_torrent::torrent::v1::Torrent::read_from_file(metadata).unwrap();
-            State::unstarted_from_metadata(parsed_metadata, cli.download_folder).unwrap()
+            State::from_metadata_and_root(parsed_metadata, cli.download_folder)?
         }
         _ => unreachable!(),
     };
@@ -174,7 +191,7 @@ fn main() -> io::Result<()> {
         let cmd_tx_clone = command_tx.clone();
         s.spawn(move || dht_thread(info_hash_id, cmd_tx_clone, shutdown_signal_rc));
 
-        let mut app = VortexApp::new(command_tx, event_rc, shutdown_signal_tx, metadata);
+        let mut app = VortexApp::new(command_tx, event_rc, shutdown_signal_tx, metadata, root);
         let terminal = ratatui::init();
         let result = app.run(terminal);
         ratatui::restore();
@@ -187,10 +204,12 @@ struct VortexApp<'queue> {
     event_rc: Consumer<'queue, TorrentEvent, 512>,
     should_exit: bool,
     start_time: Instant,
-    total_throughput: Box<HistoryBuffer<(f64, f64), 64>>,
+    total_download_throughput: Box<HistoryBuffer<(f64, f64), 256>>,
+    total_upload_throughput: Box<HistoryBuffer<(f64, f64), 256>>,
     pieces_completed: usize,
     num_connections: usize,
     metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
+    root: PathBuf,
     metadata_spinner_state: ThrobberState,
     last_tick: Instant,
     // Signal the other threads we they shutdown
@@ -203,6 +222,7 @@ impl<'queue> VortexApp<'queue> {
         event_rc: Consumer<'queue, TorrentEvent, 512>,
         shutdown_signal_tx: Sender<()>,
         metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
+        root: PathBuf,
     ) -> Self {
         Self {
             cmd_tx,
@@ -210,11 +230,13 @@ impl<'queue> VortexApp<'queue> {
             should_exit: false,
             start_time: Instant::now(),
             pieces_completed: 0,
-            total_throughput: Box::new(HistoryBuffer::new()),
+            total_download_throughput: Box::new(HistoryBuffer::new()),
+            total_upload_throughput: Box::new(HistoryBuffer::new()),
             num_connections: 0,
             metadata_spinner_state: Default::default(),
             last_tick: Instant::now(),
             metadata,
+            root,
             shutdown_signal_tx,
         }
     }
@@ -253,7 +275,17 @@ impl<'queue> VortexApp<'queue> {
                     // Nothing to do here
                 }
                 TorrentEvent::MetadataComplete(metadata) => {
-                    self.metadata = Some(metadata);
+                    self.metadata = Some(metadata.clone());
+                    let root = self.root.clone();
+                    // Store the metadata as the info hash in the download folder, that will
+                    // ensure it's possible to recover from downloads that's already started
+                    // The thread is used to keep this non blocking
+                    std::thread::spawn(move || {
+                        let path = root.join(metadata.info_hash());
+                        if let Err(err) = metadata.write_into_file(path) {
+                            log::error!("Failed to save metadata to disk: {err}")
+                        }
+                    });
                 }
                 TorrentEvent::TorrentMetrics {
                     pieces_completed,
@@ -262,10 +294,15 @@ impl<'queue> VortexApp<'queue> {
                 } => {
                     self.pieces_completed = pieces_completed;
                     self.num_connections = peer_metrics.len();
-                    let tick_throuhput: u64 = peer_metrics.iter().map(|val| val.throuhgput).sum();
+                    let tick_download_throughput: u64 =
+                        peer_metrics.iter().map(|val| val.download_throughput).sum();
+                    let tick_upload_throughput: u64 =
+                        peer_metrics.iter().map(|val| val.upload_throughput).sum();
                     let curr_time = self.start_time.elapsed().as_secs_f64();
-                    self.total_throughput
-                        .write((curr_time, tick_throuhput as f64));
+                    self.total_download_throughput
+                        .write((curr_time, tick_download_throughput as f64));
+                    self.total_upload_throughput
+                        .write((curr_time, tick_upload_throughput as f64));
                 }
             }
         }
@@ -294,79 +331,16 @@ impl<'queue> VortexApp<'queue> {
     }
 
     fn render_throughput(&self, top: Rect, buf: &mut Buffer) {
-        // TODO: smallvec
-        let total_throughput: Vec<(f64, f64)> =
-            self.total_throughput.oldest_ordered().copied().collect();
-        let (oldest_time, _) = total_throughput.first().copied().unwrap_or((0.0, 0.0));
-        let (newest_time, _) = total_throughput.last().copied().unwrap_or((0.0, 0.0));
+        let [upload_area, download_area] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
 
-        let smallest = total_throughput
-            .iter()
-            .copied()
-            .min_by(|(_, a), (_, b)| a.total_cmp(b))
-            .map(|(_, throughput)| throughput)
-            .unwrap_or(0.0);
-
-        let largest = total_throughput
-            .iter()
-            .copied()
-            .max_by(|(_, a), (_, b)| a.total_cmp(b))
-            .map(|(_, throughput)| throughput)
-            .unwrap_or(0.0);
-
-        let x_labels = vec![
-            Span::styled(
-                "".to_string(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Time ".to_string(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-        ];
-        let y_labels = vec![
-            Span::styled(
-                format!("{}/s", human_bytes::human_bytes(smallest)),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{}/s", human_bytes::human_bytes((smallest + largest) / 2.0)),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{}/s", human_bytes::human_bytes(largest)),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-        ];
-        let data = vec![
-            Dataset::default()
-                .graph_type(ratatui::widgets::GraphType::Line)
-                .marker(ratatui::symbols::Marker::Braille)
-                .style(Style::default().fg(ratatui::style::Color::Green))
-                .data(&total_throughput),
-        ];
-
-        let chart = Chart::new(data)
-            .block(
-                Block::bordered()
-                    .title("Download Speed")
-                    .title_alignment(Alignment::Center)
-                    .border_type(ratatui::widgets::BorderType::Rounded),
-            )
-            .x_axis(
-                Axis::default()
-                    .style(Style::default().fg(ratatui::style::Color::Gray))
-                    .labels(x_labels)
-                    .bounds([oldest_time, newest_time]),
-            )
-            .y_axis(
-                Axis::default()
-                    .style(Style::default().fg(ratatui::style::Color::Gray))
-                    .labels(y_labels)
-                    .bounds([smallest, largest]),
-            );
-
-        chart.render(top, buf);
+        render_througput_graph(
+            "Download",
+            &self.total_download_throughput,
+            download_area,
+            buf,
+        );
+        render_througput_graph("Upload", &self.total_upload_throughput, upload_area, buf);
     }
 
     fn render_completion(&self, bottom: Rect, buf: &mut Buffer) {
@@ -381,7 +355,7 @@ impl<'queue> VortexApp<'queue> {
             let remaining = metadata.length - self.pieces_completed as i64 * metadata.piece_length;
 
             let maybe_seconds_left = (remaining as u64).checked_div(
-                self.total_throughput
+                self.total_download_throughput
                     .recent()
                     .map(|(_, throughput)| *throughput as u64)
                     .unwrap_or_default(),
@@ -413,7 +387,11 @@ impl<'queue> VortexApp<'queue> {
     fn render_label(&self, network_chunk: Rect, buf: &mut Buffer) {
         const NETWORK_HEADERS: [&str; 2] = ["Download speed:", "Name:"];
 
-        let current_throughput = self.total_throughput.recent().copied().unwrap_or_default();
+        let current_throughput = self
+            .total_download_throughput
+            .recent()
+            .copied()
+            .unwrap_or_default();
 
         let throuhput_label = human_bytes(current_throughput.1);
         let name = self
@@ -437,6 +415,85 @@ impl<'queue> VortexApp<'queue> {
             .style(Style::default())
             .render(network_chunk, buf);
     }
+}
+
+fn render_througput_graph(
+    name: &str,
+    data: &HistoryBuffer<(f64, f64), 256>,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let total_throughput: Vec<(f64, f64)> = data.oldest_ordered().copied().collect();
+    let (oldest_time, _) = total_throughput.first().copied().unwrap_or((0.0, 0.0));
+    let (newest_time, _) = total_throughput.last().copied().unwrap_or((0.0, 0.0));
+
+    let smallest = total_throughput
+        .iter()
+        .copied()
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(_, throughput)| throughput)
+        .unwrap_or(0.0);
+
+    let largest = total_throughput
+        .iter()
+        .copied()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(_, throughput)| throughput)
+        .unwrap_or(0.0);
+
+    let x_labels = vec![
+        Span::styled(
+            "".to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Time ".to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let y_labels = vec![
+        Span::styled(
+            format!("{}/s", human_bytes::human_bytes(smallest)),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{}/s", human_bytes::human_bytes((smallest + largest) / 2.0)),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{}/s", human_bytes::human_bytes(largest)),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let data = vec![
+        Dataset::default()
+            .graph_type(ratatui::widgets::GraphType::Line)
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(ratatui::style::Color::Green))
+            .data(&total_throughput),
+    ];
+
+    let chart = Chart::new(data)
+        .block(
+            Block::bordered()
+                .title(name)
+                .title_alignment(Alignment::Center)
+                .border_type(ratatui::widgets::BorderType::Rounded),
+        )
+        .x_axis(
+            Axis::default()
+                .style(Style::default().fg(ratatui::style::Color::Gray))
+                .labels(x_labels)
+                .bounds([oldest_time, newest_time]),
+        )
+        .y_axis(
+            Axis::default()
+                .style(Style::default().fg(ratatui::style::Color::Gray))
+                .labels(y_labels)
+                .bounds([smallest, largest]),
+        );
+
+    chart.render(area, buf);
 }
 
 fn center(area: Rect, horizontal: Constraint, vertical: Constraint) -> Rect {

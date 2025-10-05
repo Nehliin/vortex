@@ -78,6 +78,11 @@ impl PieceSelector {
         }
     }
 
+    pub(crate) fn set_completed_bitfield(&mut self, completed_pieces: BitBox<u8, Msb0>) {
+        assert_eq!(self.completed_pieces.len(), completed_pieces.len());
+        self.completed_pieces = completed_pieces;
+    }
+
     // Returns index and if the peer is in endgame mode
     pub fn next_piece(
         &mut self,
