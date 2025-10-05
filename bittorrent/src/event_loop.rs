@@ -983,28 +983,31 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             }
 
             // Take delta into account when calculating throughput
-            connection.throughput =
-                (connection.throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
+            connection.download_throughput =
+                (connection.download_throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
+            connection.upload_thorughput =
+                (connection.upload_thorughput as f64 / tick_delta.as_secs_f64()).round() as u64;
             if !connection.peer_choking {
                 // slow start win size increase is handled in update_stats
                 if !connection.slow_start {
                     // From the libtorrent impl, request queue time = 3
                     let new_queue_capacity =
-                        3 * connection.throughput / piece_selector::SUBPIECE_SIZE as u64;
+                        3 * connection.download_throughput / piece_selector::SUBPIECE_SIZE as u64;
                     connection.update_target_inflight(new_queue_capacity as usize);
                 }
             }
 
             if !connection.peer_choking
                 && connection.slow_start
-                && connection.throughput > 0
-                && connection.throughput < connection.prev_throughput + 5000
+                && connection.download_throughput > 0
+                && connection.download_throughput < connection.prev_download_throughput + 5000
             {
                 log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
                 connection.slow_start = false;
             }
-            connection.prev_throughput = connection.throughput;
-            connection.throughput = 0;
+            connection.prev_download_throughput = connection.download_throughput;
+            connection.prev_upload_throughput = connection.upload_thorughput;
+            connection.download_throughput = 0;
         }
     }
     let mut peer_metrics = Vec::with_capacity(connections.len());

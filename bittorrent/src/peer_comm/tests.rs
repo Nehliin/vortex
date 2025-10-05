@@ -311,8 +311,8 @@ fn slow_start() {
             &mut event_tx,
         );
         assert!(connections[key].slow_start);
-        assert_eq!(connections[key].prev_throughput, 0);
-        assert_eq!(connections[key].throughput, 0);
+        assert_eq!(connections[key].prev_download_throughput, 0);
+        assert_eq!(connections[key].download_throughput, 0);
         assert!(connections[key].target_inflight > 1);
         let old_desired_queue = connections[key].target_inflight;
 
@@ -350,9 +350,9 @@ fn slow_start() {
             &mut state_ref,
             scope,
         );
-        assert_eq!(connections[key].throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(connections[key].download_throughput, (SUBPIECE_SIZE * 2) as u64);
         assert!(connections[key].slow_start);
-        assert_eq!(connections[key].prev_throughput, 0);
+        assert_eq!(connections[key].prev_download_throughput, 0);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
 
         tick(
@@ -363,8 +363,8 @@ fn slow_start() {
             &mut event_tx,
         );
 
-        assert_eq!(connections[key].prev_throughput, 21845);
-        assert_eq!(connections[key].throughput, 0);
+        assert_eq!(connections[key].prev_download_throughput, 21845);
+        assert_eq!(connections[key].download_throughput, 0);
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
 
@@ -405,7 +405,7 @@ fn slow_start() {
             &mut event_tx,
         );
 
-        assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(connections[key].prev_download_throughput, (SUBPIECE_SIZE * 2) as u64);
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 4);
 
@@ -447,7 +447,7 @@ fn slow_start() {
             &mut event_tx,
         );
 
-        assert_eq!(connections[key].prev_throughput, (SUBPIECE_SIZE * 2) as u64);
+        assert_eq!(connections[key].prev_download_throughput, (SUBPIECE_SIZE * 2) as u64);
         // No longer slow start
         assert!(!connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 6);
