@@ -311,10 +311,11 @@ impl<'scope, 'state: 'scope> EventLoop {
         state: &'state mut State,
         mut event_tx: Producer<TorrentEvent, 512>,
         mut command_rc: Consumer<Command, 64>,
+        listener: TcpListener,
     ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
 
-        let port = self.setup_listener(&mut ring);
+        let port = self.setup_listener(listener, &mut ring);
         state.listener_port = Some(port);
 
         // Emit listener started event
@@ -487,13 +488,11 @@ impl<'scope, 'state: 'scope> EventLoop {
         result
     }
 
-    fn setup_listener(&mut self, ring: &mut IoUring) -> u16 {
+    fn setup_listener(&mut self, listener: TcpListener, ring: &mut IoUring) -> u16 {
         let event_idx: EventId = self.events.insert(EventData {
             typ: EventType::Accept,
             buffer_idx: None,
         });
-
-        let listener = TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let accept_op = opcode::AcceptMulti::new(types::Fd(listener.into_raw_fd()))
             .build()

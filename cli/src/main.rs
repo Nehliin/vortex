@@ -1,6 +1,7 @@
 use std::{
     fs::OpenOptions,
     io::{self, ErrorKind},
+    net::TcpListener,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -179,6 +180,7 @@ fn main() -> io::Result<()> {
     // simpler (and better suited to an event loop) compared to a mpmc channel.
     let command_tx = Arc::new(Mutex::new(command_tx));
 
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     let id = generate_peer_id();
     let metadata = state.as_ref().state().map(|state| state.0.metadata.clone());
     let mut torrent = Torrent::new(id, state);
@@ -186,7 +188,7 @@ fn main() -> io::Result<()> {
 
     std::thread::scope(|s| {
         s.spawn(move || {
-            torrent.start(event_tx, command_rc).unwrap();
+            torrent.start(event_tx, command_rc, listener).unwrap();
         });
         let cmd_tx_clone = command_tx.clone();
         s.spawn(move || dht_thread(info_hash_id, cmd_tx_clone, shutdown_signal_rc));
