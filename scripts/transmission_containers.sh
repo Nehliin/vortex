@@ -108,9 +108,9 @@ then
         --env PUID=$UID \
         --env PGID=$UID \
         --replace \
-        -v "${tr_config_dir}:/config:Z" \
-        -v "${tr_downloads_dir}:/downloads:Z" \
-        -v "${tr_watch_dir}:/watch:Z" \
+        -v "${tr_config_dir}:/config:z" \
+        -v "${tr_downloads_dir}:/downloads:z" \
+        -v "${tr_watch_dir}:/watch:z" \
         -p 51413:51413 \
         --detach \
         linuxserver/transmission
