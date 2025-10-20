@@ -3,8 +3,8 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU16, Ordering},
-        Arc,
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -57,7 +57,10 @@ fn basic_seeding() {
     // Generate test files
     let test_files: HashMap<String, Vec<u8>> = [
         ("file1.txt".to_string(), b"Hello, World!".repeat(100)),
-        ("file2.txt".to_string(), b"BitTorrent Test Data!".repeat(200)),
+        (
+            "file2.txt".to_string(),
+            b"BitTorrent Test Data!".repeat(200),
+        ),
         ("subdir/file3.txt".to_string(), vec![42u8; 16384]),
     ]
     .into_iter()
@@ -103,27 +106,27 @@ fn basic_seeding() {
         State::from_metadata_and_root(metadata.clone(), downloader_dir.path().clone())
             .expect("Failed to create downloader state");
     let mut downloader_torrent = Torrent::new(downloader_id, downloader_state);
+    let mut downloader_command_q = heapless::spsc::Queue::new();
+    let (downloader_command_tx, downloader_command_rc) = downloader_command_q.split();
+    // just to use it from both threads
+    let downloader_command_tx = Arc::new(Mutex::new(downloader_command_tx));
+    let downloader_command_tx_clone = downloader_command_tx.clone();
 
-    // Shared port for coordination
-    let seeder_port = Arc::new(AtomicU16::new(0));
-    let seeder_port_clone = seeder_port.clone();
+    let mut seeder_command_q = heapless::spsc::Queue::new();
+    let (mut seeder_command_tx, seeder_command_rc) = seeder_command_q.split();
 
     let test_time = Instant::now();
+
+    let seeder_shutting_down = Arc::new(AtomicBool::new(false));
+    let seeder_shutting_down_clone = seeder_shutting_down.clone();
 
     std::thread::scope(|s| {
         // Seeder thread
         let seeder_handle = s.spawn(move || {
-            let mut seeder_command_q = heapless::spsc::Queue::new();
             let mut seeder_event_q = heapless::spsc::Queue::new();
-
-            let (mut seeder_command_tx, seeder_command_rc) = seeder_command_q.split();
             let (seeder_event_tx, mut seeder_event_rc) = seeder_event_q.split();
 
             let seeder_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let actual_port = seeder_listener.local_addr().unwrap().port();
-            seeder_port_clone.store(actual_port, Ordering::Release);
-            log::info!("Seeder listening on port {}", actual_port);
-
             std::thread::scope(|seeder_scope| {
                 seeder_scope.spawn(move || {
                     seeder_torrent
@@ -153,17 +156,20 @@ fn basic_seeding() {
                             }
                             TorrentEvent::ListenerStarted { port } => {
                                 log::info!("Seeder listener started on port {}", port);
+                                downloader_command_tx_clone
+                                    .lock()
+                                    .unwrap()
+                                    .enqueue(Command::ConnectToPeers(vec![
+                                        format!("127.0.0.1:{}", port).parse().unwrap(),
+                                    ]))
+                                    .unwrap();
                             }
-                            TorrentEvent::TorrentComplete => {
-                                log::info!("Seeder: Torrent already complete");
-                            }
-                            TorrentEvent::MetadataComplete(_) => {}
+                            TorrentEvent::TorrentComplete | TorrentEvent::MetadataComplete(_) => {}
                         }
                     }
 
                     // Keep seeding for a bit after we see upload activity
-                    if saw_upload && test_time.elapsed() >= Duration::from_secs(5) {
-                        let _ = seeder_command_tx.enqueue(Command::Stop);
+                    if seeder_shutting_down.load(Ordering::Acquire) {
                         break;
                     }
                 }
@@ -171,34 +177,21 @@ fn basic_seeding() {
             })
         });
 
-        // Wait for seeder to start listening
-        while seeder_port.load(Ordering::Acquire) == 0 {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let port = seeder_port.load(Ordering::Acquire);
-        log::info!("Downloader connecting to seeder on port {}", port);
-
         // Downloader thread
         let downloader_handle = s.spawn(move || {
-            let mut downloader_command_q = heapless::spsc::Queue::new();
             let mut downloader_event_q = heapless::spsc::Queue::new();
-
-            let (mut downloader_command_tx, downloader_command_rc) = downloader_command_q.split();
             let (downloader_event_tx, mut downloader_event_rc) = downloader_event_q.split();
-
-            // Connect to seeder
-            downloader_command_tx
-                .enqueue(Command::ConnectToPeers(vec![
-                    format!("127.0.0.1:{}", port).parse().unwrap()
-                ]))
-                .unwrap();
 
             let downloader_listener = TcpListener::bind("127.0.0.1:0").unwrap();
 
             std::thread::scope(|downloader_scope| {
                 downloader_scope.spawn(move || {
                     downloader_torrent
-                        .start(downloader_event_tx, downloader_command_rc, downloader_listener)
+                        .start(
+                            downloader_event_tx,
+                            downloader_command_rc,
+                            downloader_listener,
+                        )
                         .unwrap();
                 });
 
@@ -212,7 +205,10 @@ fn basic_seeding() {
                             TorrentEvent::TorrentComplete => {
                                 let elapsed = test_time.elapsed();
                                 log::info!("Download complete in: {:.2}s", elapsed.as_secs_f64());
-                                let _ = downloader_command_tx.enqueue(Command::Stop);
+                                let _ =
+                                    downloader_command_tx.lock().unwrap().enqueue(Command::Stop);
+                                let _ = seeder_command_tx.enqueue(Command::Stop);
+                                seeder_shutting_down_clone.store(true, Ordering::Release);
                                 return;
                             }
                             TorrentEvent::TorrentMetrics {
