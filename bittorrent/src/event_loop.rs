@@ -328,6 +328,8 @@ impl<'scope, 'state: 'scope> EventLoop {
 
         let mut state_ref = state.as_ref();
 
+        // Used to avoid spamming torrent complete events
+        let mut prev_state_torrent_complete = false;
         let mut prev_state_initialized = state_ref.is_initialzied();
         // lambda to be able to catch errors an always unregistering the read ring
         let result = rayon::in_place_scope(|scope| {
@@ -344,7 +346,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                         log::warn!("Ring busy")
                     }
                     Err(ref err) if err.raw_os_error() == Some(libc::ETIME) => {
-                        log::debug!("CQE_WAIT_TIME was reached before target events")
+                        log::trace!("CQE_WAIT_TIME was reached before target events")
                     }
                     Err(err) => {
                         log::error!("Failed ring submission, aborting: {err}");
@@ -475,11 +477,13 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                 if let Some((_, torrent_state)) = state_ref.state()
                     && torrent_state.is_complete
+                    && !prev_state_torrent_complete
                 {
                     log::info!("Torrent complete!");
                     if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
                         log::error!("Torrent completion event missed");
                     }
+                    prev_state_torrent_complete = true;
                 }
             }
         });
@@ -1077,6 +1081,7 @@ mod tests {
     #[test]
     fn handshake_timeout() {
         env_logger::builder()
+            .is_test(true)
             .filter_level(log::LevelFilter::Trace)
             .init();
 
@@ -1117,7 +1122,9 @@ mod tests {
                         .setup_coop_taskrun()
                         .build(4096)
                         .unwrap();
-                    let result = event_loop.run(ring, &mut download_state, event_tx, command_rc);
+                    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let result =
+                        event_loop.run(ring, &mut download_state, event_tx, command_rc, listener);
                     assert!(result.is_ok());
                 })
             });
@@ -1158,6 +1165,7 @@ mod tests {
     #[test]
     fn peer_can_connect_to_listener() {
         env_logger::builder()
+            .is_test(true)
             .filter_level(log::LevelFilter::Trace)
             .init();
 
@@ -1190,7 +1198,9 @@ mod tests {
                         .build(4096)
                         .unwrap();
 
-                    let result = event_loop.run(ring, &mut download_state, event_tx, command_rc);
+                    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let result =
+                        event_loop.run(ring, &mut download_state, event_tx, command_rc, listener);
                     assert!(result.is_ok());
                 })
             });
