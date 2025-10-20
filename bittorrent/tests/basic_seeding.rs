@@ -52,7 +52,9 @@ fn basic_seeding() {
         .filter_level(log::LevelFilter::Trace)
         .init();
     let builder = PrometheusBuilder::new();
-    builder.install().unwrap();
+    if let Err(err) = builder.install() {
+        log::error!("failed installing PrometheusBuilder: {err}");
+    }
 
     // Generate test files
     let test_files: HashMap<String, Vec<u8>> = [

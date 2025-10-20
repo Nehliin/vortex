@@ -12,7 +12,9 @@ fn basic_seeded_download() {
         .filter_level(log::LevelFilter::Trace)
         .init();
     let builder = PrometheusBuilder::new();
-    builder.install().unwrap();
+    if let Err(err) = builder.install() {
+        log::error!("failed installing PrometheusBuilder: {err}");
+    }
     let metadata =
         lava_torrent::torrent::v1::Torrent::read_from_file("../assets/test-file-1.torrent")
             .unwrap();
