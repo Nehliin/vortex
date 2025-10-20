@@ -327,6 +327,7 @@ impl Piece {
     /// to download
     pub fn allocate_remaining_subpieces(&mut self) -> VecDeque<Subpiece> {
         let mut deque = VecDeque::with_capacity(self.completed_subpieces.len());
+        // TODO: This panicked?
         let last_subpiece_index = self.completed_subpieces.len() - 1;
         // Do we need to adjust the piece size of the last subpiece?
         let mut last_is_last_index = false;
