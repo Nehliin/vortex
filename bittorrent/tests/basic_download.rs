@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    net::TcpListener,
+    time::{Duration, Instant},
+};
 
 use metrics_exporter_prometheus::PrometheusBuilder;
 use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
@@ -9,7 +12,9 @@ fn basic_seeded_download() {
         .filter_level(log::LevelFilter::Trace)
         .init();
     let builder = PrometheusBuilder::new();
-    builder.install().unwrap();
+    if let Err(err) = builder.install() {
+        log::error!("failed installing PrometheusBuilder: {err}");
+    }
     let metadata =
         lava_torrent::torrent::v1::Torrent::read_from_file("../assets/test-file-1.torrent")
             .unwrap();
@@ -32,10 +37,12 @@ fn basic_seeded_download() {
         ]))
         .unwrap();
 
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+
     std::thread::scope(move |s| {
         // Spawn a thread to send Stop command after a timeout
         s.spawn(move || {
-            torrent.start(event_tx, command_rc).unwrap();
+            torrent.start(event_tx, command_rc, listener).unwrap();
         });
         'outer: loop {
             if download_time.elapsed() >= Duration::from_secs(60) {

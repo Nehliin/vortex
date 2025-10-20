@@ -2,7 +2,7 @@ use std::{
     cell::OnceCell,
     collections::VecDeque,
     io::{self},
-    net::SocketAddrV4,
+    net::{SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
 };
@@ -55,6 +55,7 @@ impl Torrent {
         &mut self,
         event_tx: Producer<TorrentEvent, 512>,
         command_rc: Consumer<Command, 64>,
+        listener: TcpListener,
     ) -> Result<(), Error> {
         // check ulimit
         let ring: IoUring = IoUring::builder()
@@ -67,7 +68,7 @@ impl Torrent {
             .unwrap();
         let events = SlotMap::with_capacity_and_key(4096);
         let mut event_loop = EventLoop::new(self.our_id, events);
-        event_loop.run(ring, &mut self.state, event_tx, command_rc)
+        event_loop.run(ring, &mut self.state, event_tx, command_rc, listener)
     }
 }
 
