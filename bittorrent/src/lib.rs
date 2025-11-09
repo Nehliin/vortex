@@ -249,7 +249,7 @@ impl InitializedState {
         }
     }
 
-    pub fn should_unchoke(&self) -> bool {
+    pub fn can_preemtively_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
     }
 }

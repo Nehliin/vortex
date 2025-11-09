@@ -986,32 +986,37 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             }
 
             // Take delta into account when calculating throughput
-            connection.download_throughput =
-                (connection.download_throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
-            connection.upload_throughput =
-                (connection.upload_throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
+            connection.network_stats.download_throughput =
+                (connection.network_stats.download_throughput as f64 / tick_delta.as_secs_f64())
+                    .round() as u64;
+            connection.network_stats.upload_throughput =
+                (connection.network_stats.upload_throughput as f64 / tick_delta.as_secs_f64())
+                    .round() as u64;
             if !connection.peer_choking {
                 // slow start win size increase is handled in update_stats
                 if !connection.slow_start {
                     // From the libtorrent impl, request queue time = 3
-                    let new_queue_capacity =
-                        3 * connection.download_throughput / piece_selector::SUBPIECE_SIZE as u64;
+                    let new_queue_capacity = 3 * connection.network_stats.download_throughput
+                        / piece_selector::SUBPIECE_SIZE as u64;
                     connection.update_target_inflight(new_queue_capacity as usize);
                 }
             }
 
             if !connection.peer_choking
                 && connection.slow_start
-                && connection.download_throughput > 0
-                && connection.download_throughput < connection.prev_download_throughput + 5000
+                && connection.network_stats.download_throughput > 0
+                && connection.network_stats.download_throughput
+                    < connection.network_stats.prev_download_throughput + 5000
             {
                 log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
                 connection.slow_start = false;
             }
-            connection.prev_download_throughput = connection.download_throughput;
-            connection.prev_upload_throughput = connection.upload_throughput;
-            connection.download_throughput = 0;
-            connection.upload_throughput = 0;
+            connection.network_stats.prev_download_throughput =
+                connection.network_stats.download_throughput;
+            connection.network_stats.prev_upload_throughput =
+                connection.network_stats.upload_throughput;
+            connection.network_stats.download_throughput = 0;
+            connection.network_stats.upload_throughput = 0;
         }
     }
     let mut peer_metrics = Vec::with_capacity(connections.len());
