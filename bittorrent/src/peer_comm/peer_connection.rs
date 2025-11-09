@@ -285,6 +285,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
 
     fn unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
         if self.is_choking {
+            log::info!("[Peer: {}] is unchoked", self.peer_id);
             torrent_state.num_unchoked += 1;
         }
         self.is_choking = false;
@@ -584,8 +585,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         .piece_selector
                         .next_piece(self.conn_id, &mut self.endgame)
                     {
-                        log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
-                        self.unchoke(torrent_state, true);
+                        log::info!("[Peer: {}] Unchoked us, start downloading", self.peer_id);
+                        if torrent_state.should_unchoke() {
+                            self.unchoke(torrent_state, true);
+                        }
                         let mut subpieces = torrent_state.allocate_piece(
                             piece_idx,
                             self.conn_id,
