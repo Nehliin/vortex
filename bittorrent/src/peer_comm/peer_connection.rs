@@ -292,7 +292,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.queued.clear();
     }
 
-    fn unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
+    pub fn unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
         if self.is_choking {
             log::info!("[Peer: {}] is unchoked", self.peer_id);
             torrent_state.num_unchoked += 1;
@@ -301,7 +301,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Unchoke,
             ordered,
-        });
+       });
     }
 
     pub fn have(&mut self, index: i32, ordered: bool) {
@@ -353,7 +353,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         });
     }
 
-    fn choke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
+    pub fn choke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
         if !self.is_choking {
             torrent_state.num_unchoked -= 1;
         }

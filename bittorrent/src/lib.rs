@@ -102,13 +102,18 @@ pub enum TorrentEvent {
         pieces_completed: usize,
         pieces_allocated: usize,
         peer_metrics: Vec<PeerMetrics>,
+        num_unchoked: usize,
     },
 }
+
+const MAX_UNCHOKED: u32 = 8;
+const UNCHOKE_INTERVAL: u32 = 15;
 
 pub struct InitializedState {
     piece_selector: PieceSelector,
     num_unchoked: u32,
     max_unchoked: u32,
+    unchoke_time_scaler: u32,
     completed_piece_rc: Receiver<CompletedPiece>,
     completed_piece_tx: Sender<CompletedPiece>,
     pieces: Vec<Option<Piece>>,
@@ -125,7 +130,8 @@ impl InitializedState {
         Self {
             piece_selector: PieceSelector::new(torrent),
             num_unchoked: 0,
-            max_unchoked: 8,
+            max_unchoked: MAX_UNCHOKED,
+            unchoke_time_scaler: UNCHOKE_INTERVAL,
             completed_piece_rc: rc,
             completed_piece_tx: tx,
             pieces,
@@ -251,6 +257,43 @@ impl InitializedState {
 
     pub fn can_preemtively_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
+    }
+
+    // TODO: Optimistic unchokes
+    pub fn recalculate_unchokes(
+        &mut self,
+        connections: &mut SlotMap<ConnectionId, PeerConnection>,
+    ) {
+        log::info!("Recalculating unchokes");
+        let mut peers = Vec::with_capacity(connections.len());
+        for (id, connection) in connections.iter_mut() {
+            if !connection.peer_interested || connection.pending_disconnect.is_some() {
+                connection.network_stats.downloaded_in_last_round = 0;
+                if !connection.is_choking {
+                    connection.choke(self, true);
+                }
+                continue;
+            }
+            peers.push((id, connection.network_stats.downloaded_in_last_round));
+        }
+        peers.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
+        let mut remaining_unchoke_slots = self.max_unchoked;
+        for (id, _) in peers {
+            let peer = &mut connections[id];
+            log::debug!(
+                "Peer: {id:?}, last_round: {}",
+                peer.network_stats.downloaded_in_last_round
+            );
+            peer.network_stats.downloaded_in_last_round = 0;
+            if remaining_unchoke_slots > 0 {
+                if peer.is_choking {
+                    peer.unchoke(self, true);
+                }
+                remaining_unchoke_slots -= 1;
+            } else if !peer.is_choking {
+                peer.choke(self, true);
+            }
+        }
     }
 }
 

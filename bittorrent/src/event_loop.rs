@@ -19,7 +19,7 @@ use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    Command, Error, PeerMetrics, State, StateRef, TorrentEvent,
+    Command, Error, PeerMetrics, State, StateRef, TorrentEvent, UNCHOKE_INTERVAL,
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
@@ -916,12 +916,14 @@ fn report_tick_metrics(
 ) {
     let mut pieces_completed = 0;
     let mut pieces_allocated = 0;
+    let mut num_unchoked = 0;
 
     if let Some((_, torrent_state)) = state.state() {
         let total_completed = torrent_state.piece_selector.total_completed();
         let total_allocated = torrent_state.piece_selector.total_allocated();
         pieces_completed = total_completed;
         pieces_allocated = total_allocated;
+        num_unchoked = torrent_state.num_unchoked as usize;
         #[cfg(feature = "metrics")]
         {
             let counter = metrics::counter!("pieces_completed");
@@ -944,6 +946,7 @@ fn report_tick_metrics(
             pieces_completed,
             pieces_allocated,
             peer_metrics,
+            num_unchoked,
         })
         .is_err()
     {
@@ -959,9 +962,14 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
     event_tx: &mut Producer<TorrentEvent, 512>,
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
-    // 1. Calculate bandwidth (deal with initial start up)
-    // 2. Go through them in order
-    // 3. select pieces
+    if let Some((_, torrent_state)) = torrent_state.state() {
+        torrent_state.unchoke_time_scaler -= 1;
+        if torrent_state.unchoke_time_scaler == 0 {
+            torrent_state.unchoke_time_scaler = UNCHOKE_INTERVAL;
+            torrent_state.recalculate_unchokes(connections);
+        }
+    } 
+
     for connection in connections
         .values_mut()
         // Filter out connections that are pending diconnect
@@ -969,6 +977,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
     {
         if connection.last_seen.elapsed() > Duration::from_secs(120) {
             log::warn!("Timeout due to inactivity: {}", connection.peer_id);
+            // TODO: This will not release it's unchoke slot until next interval
             connection.pending_disconnect = Some(DisconnectReason::Idle);
             continue;
         }
