@@ -1,11 +1,12 @@
 use std::{
-    collections::HashSet,
     io,
     net::TcpListener,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd},
     time::{Duration, Instant},
 };
 
+use ahash::HashSet;
+use ahash::HashSetExt;
 use heapless::spsc::{Consumer, Producer};
 use io_uring::{
     IoUring,
@@ -964,8 +965,8 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
     if let Some((_, torrent_state)) = torrent_state.state() {
-        torrent_state.unchoke_time_scaler.saturating_sub(1);
-        torrent_state
+        torrent_state.unchoke_time_scaler = torrent_state.unchoke_time_scaler.saturating_sub(1);
+        torrent_state.optimistic_unchoke_time_scaler = torrent_state
             .optimistic_unchoke_time_scaler
             .saturating_sub(1);
 
