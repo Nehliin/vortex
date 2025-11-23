@@ -159,6 +159,11 @@ pub struct PeerConnection {
     pub peer_addr: SocketAddr,
     pub conn_id: ConnectionId,
     pub peer_id: PeerId,
+    /// This peer is currently optimistically unchoked by us
+    pub optimistically_unchoked: bool,
+    /// Last time this peer was optimistically unchoked or None if
+    /// it hasn't happen yet
+    pub last_optimistically_unchoked: Option<Instant>,
     /// This side is choking the peer
     pub is_choking: bool,
     /// This side is interested what the peer has to offer
@@ -220,6 +225,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             peer_addr,
             conn_id,
             peer_id: parsed_handshake.peer_id,
+            optimistically_unchoked: false,
+            last_optimistically_unchoked: None,
             is_choking: true,
             is_interesting: false,
             sent_allowed_fast: false,
@@ -292,6 +299,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.queued.clear();
     }
 
+    pub fn optimistically_unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
+        self.optimistically_unchoked = true;
+        self.last_optimistically_unchoked = Some(Instant::now());
+        self.unchoke(torrent_state, ordered);
+    }
+
     pub fn unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
         if self.is_choking {
             log::info!("[Peer: {}] is unchoked", self.peer_id);
@@ -301,7 +314,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Unchoke,
             ordered,
-       });
+        });
     }
 
     pub fn have(&mut self, index: i32, ordered: bool) {

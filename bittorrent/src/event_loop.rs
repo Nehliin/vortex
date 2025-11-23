@@ -19,7 +19,8 @@ use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    Command, Error, PeerMetrics, State, StateRef, TorrentEvent, UNCHOKE_INTERVAL,
+    Command, Error, OPTIMISTIC_UNCHOKE_INTERVAL, PeerMetrics, State, StateRef, TorrentEvent,
+    UNCHOKE_INTERVAL,
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
@@ -963,12 +964,21 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
     if let Some((_, torrent_state)) = torrent_state.state() {
-        torrent_state.unchoke_time_scaler -= 1;
-        if torrent_state.unchoke_time_scaler == 0 {
+        torrent_state.unchoke_time_scaler.saturating_sub(1);
+        torrent_state
+            .optimistic_unchoke_time_scaler
+            .saturating_sub(1);
+
+        if torrent_state.unchoke_time_scaler == 0 && !connections.is_empty() {
             torrent_state.unchoke_time_scaler = UNCHOKE_INTERVAL;
             torrent_state.recalculate_unchokes(connections);
         }
-    } 
+
+        if torrent_state.optimistic_unchoke_time_scaler == 0 {
+            torrent_state.optimistic_unchoke_time_scaler = OPTIMISTIC_UNCHOKE_INTERVAL;
+            torrent_state.recalculate_optimistic_unchokes(connections);
+        }
+    }
 
     for connection in connections
         .values_mut()
