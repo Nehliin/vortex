@@ -975,7 +975,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             torrent_state.recalculate_unchokes(connections);
         }
 
-        if torrent_state.optimistic_unchoke_time_scaler == 0 {
+        if torrent_state.optimistic_unchoke_time_scaler == 0 && !connections.is_empty() {
             torrent_state.optimistic_unchoke_time_scaler = OPTIMISTIC_UNCHOKE_INTERVAL;
             torrent_state.recalculate_optimistic_unchokes(connections);
         }
