@@ -279,6 +279,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             if !self.is_choking {
                 torrent_state.num_unchoked -= 1;
             }
+            if self.optimistically_unchoked {
+                // Reset time scaler so another peer can be optimistically unchoked
+                self.optimistically_unchoked = false;
+                torrent_state.optimistic_unchoke_time_scaler = 0;
+            }
         }
     }
 
@@ -369,6 +374,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     pub fn choke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
         if !self.is_choking {
             torrent_state.num_unchoked -= 1;
+        }
+        if self.optimistically_unchoked {
+            self.optimistically_unchoked = false;
         }
         self.is_choking = true;
         self.outgoing_msgs_buffer.push(OutgoingMsg {

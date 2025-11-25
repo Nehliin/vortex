@@ -4,7 +4,7 @@ use std::{
     io::{self},
     net::{SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender},
+    sync::mpsc::{Receiver, Sender}, u64,
 };
 
 use ahash::HashSetExt;
@@ -348,7 +348,7 @@ impl InitializedState {
                 candidates.push((
                     id,
                     peer.last_optimistically_unchoked
-                        .map_or(0, |time| time.elapsed().as_secs()),
+                        .map_or(u64::MAX, |time| time.elapsed().as_secs()),
                 ));
             }
         }
