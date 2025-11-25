@@ -68,6 +68,7 @@ fn basic_seeded_download() {
                         pieces_completed: _,
                         pieces_allocated: _,
                         peer_metrics: _,
+                        num_unchoked: _,
                     } => {}
                     TorrentEvent::ListenerStarted { port: _ } => {}
                 }

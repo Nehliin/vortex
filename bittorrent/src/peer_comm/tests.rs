@@ -311,8 +311,8 @@ fn slow_start() {
             &mut event_tx,
         );
         assert!(connections[key].slow_start);
-        assert_eq!(connections[key].prev_download_throughput, 0);
-        assert_eq!(connections[key].download_throughput, 0);
+        assert_eq!(connections[key].network_stats.prev_download_throughput, 0);
+        assert_eq!(connections[key].network_stats.download_throughput, 0);
         assert!(connections[key].target_inflight > 1);
         let old_desired_queue = connections[key].target_inflight;
 
@@ -351,11 +351,11 @@ fn slow_start() {
             scope,
         );
         assert_eq!(
-            connections[key].download_throughput,
+            connections[key].network_stats.download_throughput,
             (SUBPIECE_SIZE * 2) as u64
         );
         assert!(connections[key].slow_start);
-        assert_eq!(connections[key].prev_download_throughput, 0);
+        assert_eq!(connections[key].network_stats.prev_download_throughput, 0);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
 
         tick(
@@ -366,8 +366,11 @@ fn slow_start() {
             &mut event_tx,
         );
 
-        assert_eq!(connections[key].prev_download_throughput, 21845);
-        assert_eq!(connections[key].download_throughput, 0);
+        assert_eq!(
+            connections[key].network_stats.prev_download_throughput,
+            21845
+        );
+        assert_eq!(connections[key].network_stats.download_throughput, 0);
         assert!(connections[key].slow_start);
         assert_eq!(connections[key].target_inflight, old_desired_queue + 2);
 
@@ -409,7 +412,7 @@ fn slow_start() {
         );
 
         assert_eq!(
-            connections[key].prev_download_throughput,
+            connections[key].network_stats.prev_download_throughput,
             (SUBPIECE_SIZE * 2) as u64
         );
         assert!(connections[key].slow_start);
@@ -454,7 +457,7 @@ fn slow_start() {
         );
 
         assert_eq!(
-            connections[key].prev_download_throughput,
+            connections[key].network_stats.prev_download_throughput,
             (SUBPIECE_SIZE * 2) as u64
         );
         // No longer slow start
@@ -2382,8 +2385,8 @@ fn upload_throughput_tracking() {
         connections[key].handle_message(PeerMessage::HaveNone, &mut state_ref, scope);
         connections[key].handle_message(PeerMessage::Interested, &mut state_ref, scope);
 
-        assert_eq!(connections[key].upload_throughput, 0);
-        assert_eq!(connections[key].prev_upload_throughput, 0);
+        assert_eq!(connections[key].network_stats.upload_throughput, 0);
+        assert_eq!(connections[key].network_stats.prev_upload_throughput, 0);
 
         connections[key].handle_message(
             PeerMessage::Request {
@@ -2396,7 +2399,10 @@ fn upload_throughput_tracking() {
         );
 
         // After sending the piece, upload throughput should be tracked
-        assert_eq!(connections[key].upload_throughput, SUBPIECE_SIZE as u64);
+        assert_eq!(
+            connections[key].network_stats.upload_throughput,
+            SUBPIECE_SIZE as u64
+        );
 
         // Request another subpiece
         connections[key].handle_message(
@@ -2411,7 +2417,7 @@ fn upload_throughput_tracking() {
 
         // Upload throughput should accumulate
         assert_eq!(
-            connections[key].upload_throughput,
+            connections[key].network_stats.upload_throughput,
             (SUBPIECE_SIZE * 2) as u64
         );
 
@@ -2428,9 +2434,484 @@ fn upload_throughput_tracking() {
 
         // After tick, current throughput is reset and moved to prev
         assert_eq!(
-            connections[key].prev_upload_throughput,
+            connections[key].network_stats.prev_upload_throughput,
             ((SUBPIECE_SIZE * 2) as f64 / 1.5) as u64
         );
-        assert_eq!(connections[key].upload_throughput, 0);
+        assert_eq!(connections[key].network_stats.upload_throughput, 0);
+    });
+}
+
+#[test]
+fn unchoke_selection_based_on_download_throughput() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        // Set max_unchoked to 10 so we have room for regular and optimistic unchokes
+        torrent_state.max_unchoked = 10;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create 12 interested peers with varying download throughputs
+        // All peers start choked
+        let peer_ids: Vec<_> = (0..12)
+            .map(|i| {
+                let key = connections.insert_with_key(|k| generate_peer(true, k));
+                connections[key].peer_interested = true;
+                connections[key].is_choking = true;
+                // Simulate different download amounts in last round
+                connections[key].network_stats.downloaded_in_last_round = i * 1000;
+                key
+            })
+            .collect();
+
+        // Verify initial state
+        assert_eq!(torrent_state.num_unchoked, 0);
+
+        // Recalculate unchokes
+        torrent_state.recalculate_unchokes(&mut connections);
+
+        // With max_unchoked = 10, we expect:
+        // - 8 regular unchoke slots (10 - 10/5)
+        // - 2 optimistic unchoke slots reserved
+
+        // The top 8 peers by download throughput should be unchoked (indices 11 down to 4)
+        for i in 4..12 {
+            assert!(
+                !connections[peer_ids[i]].is_choking,
+                "Peer {} with throughput {} should be unchoked",
+                i,
+                connections[peer_ids[i]]
+                    .network_stats
+                    .downloaded_in_last_round
+            );
+            assert!(!connections[peer_ids[i]].optimistically_unchoked);
+        }
+
+        // The bottom 4 peers should still be choked
+        for i in 0..4 {
+            assert!(
+                connections[peer_ids[i]].is_choking,
+                "Peer {} with throughput {} should be choked",
+                i,
+                connections[peer_ids[i]]
+                    .network_stats
+                    .downloaded_in_last_round
+            );
+        }
+
+        // Verify num_unchoked matches actual unchoked count
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked, 8);
+    });
+}
+
+#[test]
+fn unchoke_chokes_non_interested_peers() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        torrent_state.max_unchoked = 5;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create 3 peers - 2 start unchoked, 1 starts choked
+        let interested_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[interested_peer].peer_interested = true;
+        connections[interested_peer].is_choking = false; // Currently unchoked
+        connections[interested_peer]
+            .network_stats
+            .downloaded_in_last_round = 5000;
+        torrent_state.num_unchoked += 1; // Track unchoked peer
+
+        let not_interested_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[not_interested_peer].peer_interested = false;
+        connections[not_interested_peer].is_choking = false; // Currently unchoked
+        connections[not_interested_peer]
+            .network_stats
+            .downloaded_in_last_round = 10000;
+        torrent_state.num_unchoked += 1; // Track unchoked peer
+
+        let new_interested_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[new_interested_peer].peer_interested = true;
+        connections[new_interested_peer].is_choking = true;
+        connections[new_interested_peer]
+            .network_stats
+            .downloaded_in_last_round = 3000;
+
+        // Verify initial state: 2 unchoked
+        assert_eq!(torrent_state.num_unchoked, 2);
+
+        // Recalculate unchokes
+        torrent_state.recalculate_unchokes(&mut connections);
+
+        // Not interested peer should be choked even with high throughput
+        assert!(connections[not_interested_peer].is_choking);
+
+        // Interested peers should remain or become unchoked
+        assert!(!connections[interested_peer].is_choking);
+        assert!(!connections[new_interested_peer].is_choking);
+
+        // Verify num_unchoked matches actual unchoked count
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked, 2);
+    });
+}
+
+#[test]
+fn unchoke_chokes_pending_disconnect_peers() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        torrent_state.max_unchoked = 5;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        let pending_disconnect_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[pending_disconnect_peer].peer_interested = true;
+        connections[pending_disconnect_peer].is_choking = false; // Currently unchoked
+        connections[pending_disconnect_peer].pending_disconnect = Some(DisconnectReason::Idle);
+        connections[pending_disconnect_peer]
+            .network_stats
+            .downloaded_in_last_round = 10000;
+        torrent_state.num_unchoked += 1; // Track unchoked peer
+
+        let healthy_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[healthy_peer].peer_interested = true;
+        connections[healthy_peer].is_choking = true;
+        connections[healthy_peer]
+            .network_stats
+            .downloaded_in_last_round = 3000;
+
+        // Verify initial state: 1 unchoked
+        assert_eq!(torrent_state.num_unchoked, 1);
+
+        // Recalculate unchokes
+        torrent_state.recalculate_unchokes(&mut connections);
+
+        // Pending disconnect peer should be choked
+        assert!(connections[pending_disconnect_peer].is_choking);
+
+        // Healthy peer should be unchoked
+        assert!(!connections[healthy_peer].is_choking);
+
+        // Verify num_unchoked matches actual unchoked count
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked, 1);
+    });
+}
+
+#[test]
+fn unchoke_promotes_optimistic_unchoke_to_regular() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        torrent_state.max_unchoked = 5;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create a peer that was optimistically unchoked and has good throughput
+        let opt_unchoked_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[opt_unchoked_peer].peer_interested = true;
+        connections[opt_unchoked_peer].is_choking = false;
+        connections[opt_unchoked_peer].optimistically_unchoked = true;
+        connections[opt_unchoked_peer]
+            .network_stats
+            .downloaded_in_last_round = 10000;
+        torrent_state.num_unchoked += 1; // Track unchoked peer
+
+        // Create some lower throughput peers
+        for i in 0..3 {
+            let key = connections.insert_with_key(|k| generate_peer(true, k));
+            connections[key].peer_interested = true;
+            connections[key].is_choking = true;
+            connections[key].network_stats.downloaded_in_last_round = i * 1000;
+        }
+
+        // Verify initial state: 1 unchoked (optimistically)
+        assert_eq!(torrent_state.num_unchoked, 1);
+
+        // Recalculate unchokes
+        torrent_state.recalculate_unchokes(&mut connections);
+
+        // Optimistically unchoked peer should be promoted (no longer optimistically unchoked)
+        assert!(!connections[opt_unchoked_peer].is_choking);
+        assert!(!connections[opt_unchoked_peer].optimistically_unchoked);
+
+        // The optimistic unchoke time scaler should be reset
+        assert_eq!(torrent_state.optimistic_unchoke_time_scaler, 0);
+
+        // Verify num_unchoked matches actual unchoked count
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked, 4);
+    });
+}
+
+#[test]
+fn optimistic_unchoke_selection() {
+    use std::time::Instant;
+
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        torrent_state.max_unchoked = 10;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create choked interested peers with different last_optimistically_unchoked times
+        let old_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[old_peer].peer_interested = true;
+        connections[old_peer].is_choking = true;
+        connections[old_peer].last_optimistically_unchoked =
+            Some(Instant::now() - std::time::Duration::from_secs(100));
+
+        let recent_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[recent_peer].peer_interested = true;
+        connections[recent_peer].is_choking = true;
+        connections[recent_peer].last_optimistically_unchoked =
+            Some(Instant::now() - std::time::Duration::from_secs(10));
+
+        let never_unchoked_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[never_unchoked_peer].peer_interested = true;
+        connections[never_unchoked_peer].is_choking = true;
+        connections[never_unchoked_peer].last_optimistically_unchoked = None;
+
+        // Verify initial state: all choked
+        assert_eq!(torrent_state.num_unchoked, 0);
+
+        // Recalculate optimistic unchokes
+        torrent_state.recalculate_optimistic_unchokes(&mut connections);
+
+        // With max_unchoked = 10, num_opt_unchoked = max(1, 10/5) = 2
+        // Both never_unchoked_peer and old_peer should be optimistically unchoked
+        // (they have the longest wait times: infinity and 100 seconds)
+        // Note: must be both optimistically_unchoked AND not choking (active)
+        let num_actively_opt_unchoked = connections
+            .values()
+            .filter(|p| p.optimistically_unchoked && !p.is_choking)
+            .count();
+
+        assert_eq!(num_actively_opt_unchoked, 2);
+
+        // The peers with longest wait should be selected and actually unchoked
+        assert!(
+            connections[old_peer].optimistically_unchoked && !connections[old_peer].is_choking,
+            "Old peer should be optimistically unchoked and not choking"
+        );
+        assert!(
+            connections[never_unchoked_peer].optimistically_unchoked
+                && !connections[never_unchoked_peer].is_choking,
+            "Never unchoked peer should be optimistically unchoked and not choking"
+        );
+
+        // Verify num_unchoked matches actual unchoked count
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked, 2);
+    });
+}
+
+#[test]
+fn optimistic_unchoke_rotates_out_previous() {
+    use std::time::Instant;
+
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        torrent_state.max_unchoked = 5;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create a peer that's currently optimistically unchoked
+        let current_opt = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[current_opt].peer_interested = true;
+        connections[current_opt].is_choking = false;
+        connections[current_opt].optimistically_unchoked = true;
+        connections[current_opt].last_optimistically_unchoked =
+            Some(Instant::now() - std::time::Duration::from_secs(5));
+        torrent_state.num_unchoked += 1; // Track unchoked peer
+
+        // Create a peer that has been waiting longer
+        let waiting_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[waiting_peer].peer_interested = true;
+        connections[waiting_peer].is_choking = true;
+        connections[waiting_peer].last_optimistically_unchoked =
+            Some(Instant::now() - std::time::Duration::from_secs(100));
+
+        // Verify initial state: 1 unchoked (optimistically)
+        assert_eq!(torrent_state.num_unchoked, 1);
+
+        // Recalculate optimistic unchokes
+        torrent_state.recalculate_optimistic_unchokes(&mut connections);
+
+        // With max_unchoked = 5, num_opt_unchoked = max(1, 5/5) = 1
+        // The waiting peer should now be optimistically unchoked and not choking
+        assert!(
+            connections[waiting_peer].optimistically_unchoked
+                && !connections[waiting_peer].is_choking
+        );
+
+        // Only 1 peer should be actively (not choked) optimistically unchoked
+        let num_actively_opt_unchoked = connections
+            .values()
+            .filter(|p| p.optimistically_unchoked && !p.is_choking)
+            .count();
+
+        assert_eq!(num_actively_opt_unchoked, 1);
+
+        // The current_opt should have been choked (rotated out)
+        assert!(connections[current_opt].is_choking);
+
+        // Verify num_unchoked matches actual unchoked count
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked, 1);
+    });
+}
+
+#[test]
+fn optimistic_unchoke_ignores_non_interested_peers() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        torrent_state.max_unchoked = 5;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create a not-interested peer
+        let not_interested = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[not_interested].peer_interested = false;
+        connections[not_interested].is_choking = true;
+
+        // Create an interested peer
+        let interested = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[interested].peer_interested = true;
+        connections[interested].is_choking = true;
+
+        // Verify initial state: all choked
+        assert_eq!(torrent_state.num_unchoked, 0);
+
+        // Recalculate optimistic unchokes
+        torrent_state.recalculate_optimistic_unchokes(&mut connections);
+
+        // Only the interested peer should be optimistically unchoked
+        assert!(!connections[not_interested].optimistically_unchoked);
+        assert!(
+            connections[interested].optimistically_unchoked && !connections[interested].is_choking
+        );
+
+        // Verify num_unchoked matches actual unchoked count
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked, 1);
+    });
+}
+
+#[test]
+fn optimistic_unchoke_ignores_pending_disconnect_peers() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        torrent_state.max_unchoked = 5;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create a peer pending disconnect
+        let pending = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[pending].peer_interested = true;
+        connections[pending].is_choking = true;
+        connections[pending].pending_disconnect = Some(DisconnectReason::Idle);
+
+        // Create a healthy peer
+        let healthy = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[healthy].peer_interested = true;
+        connections[healthy].is_choking = true;
+
+        // Verify initial state: all choked
+        assert_eq!(torrent_state.num_unchoked, 0);
+
+        // Recalculate optimistic unchokes
+        torrent_state.recalculate_optimistic_unchokes(&mut connections);
+
+        // Only the healthy peer should be optimistically unchoked
+        assert!(!connections[pending].optimistically_unchoked);
+        assert!(connections[healthy].optimistically_unchoked);
+
+        // Verify num_unchoked matches actual unchoked count
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked, 1);
+    });
+}
+
+#[test]
+fn unchoke_reserves_slots_for_optimistic() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        torrent_state.max_unchoked = 10;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create 15 interested peers with varying throughput - all start choked
+        for i in 0..15 {
+            let key = connections.insert_with_key(|k| generate_peer(true, k));
+            connections[key].peer_interested = true;
+            connections[key].is_choking = true;
+            connections[key].network_stats.downloaded_in_last_round = i * 1000;
+        }
+
+        // Verify initial state: all choked
+        assert_eq!(torrent_state.num_unchoked, 0);
+
+        // Recalculate unchokes
+        torrent_state.recalculate_unchokes(&mut connections);
+
+        // With max_unchoked = 10:
+        // - optimistic_slots = max(1, 10/5) = 2
+        // - regular_slots = 10 - 2 = 8
+
+        // Should have exactly 8 non-optimistically unchoked peers
+        let regular_unchoked = connections
+            .values()
+            .filter(|p| !p.is_choking && !p.optimistically_unchoked)
+            .count();
+
+        assert_eq!(regular_unchoked, 8);
+        assert_eq!(torrent_state.num_unchoked, 8);
+
+        // Verify num_unchoked matches actual unchoked count
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
     });
 }
