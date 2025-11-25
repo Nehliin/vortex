@@ -7,7 +7,8 @@ use slotmap::SlotMap;
 
 use crate::{
     TorrentEvent,
-    event_loop::{ConnectionId, MAX_OUTSTANDING_REQUESTS, tick},
+    event_loop::{ConnectionId, EventData, EventId, MAX_OUTSTANDING_REQUESTS, tick},
+    io_utils::{BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
     peer_connection::OutgoingMsg,
     piece_selector::{SUBPIECE_SIZE, Subpiece},
@@ -18,6 +19,29 @@ use crate::{
 };
 
 use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};
+
+// Mock SubmissionQueue for tests that need to call disconnect
+struct MockSubmissionQueue;
+
+impl SubmissionQueue for MockSubmissionQueue {
+    fn sync(&mut self) {}
+
+    fn capacity(&self) -> usize {
+        128
+    }
+
+    fn len(&self) -> usize {
+        0
+    }
+
+    fn is_full(&self) -> bool {
+        false
+    }
+
+    unsafe fn push(&mut self, _entry: &io_uring::squeue::Entry) -> Result<(), io_uring::squeue::PushError> {
+        Ok(())
+    }
+}
 
 #[track_caller]
 fn sent_and_marked_interested(peer: &PeerConnection) {
@@ -2913,5 +2937,39 @@ fn unchoke_reserves_slots_for_optimistic() {
         // Verify num_unchoked matches actual unchoked count
         let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
         assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+    });
+}
+
+#[test]
+fn optimistically_unchoked_disconnect_resets_timer() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        {
+            let (_, torrent_state) = state_ref.state().unwrap();
+
+            torrent_state.max_unchoked = 5;
+
+            // A single peer that is optimistically unchoked
+            connections[key].peer_interested = true;
+            connections[key].is_choking = false;
+            connections[key].optimistically_unchoked = true;
+            torrent_state.num_unchoked += 1;
+            assert!(torrent_state.optimistic_unchoke_time_scaler > 0);
+        }
+
+        let mut sq = BackloggedSubmissionQueue::new(MockSubmissionQueue);
+        let mut events = SlotMap::<EventId, EventData>::with_key();
+
+        connections[key].disconnect(&mut sq, &mut events, &mut state_ref);
+
+        {
+            let (_, torrent_state) = state_ref.state().unwrap();
+            assert_eq!(torrent_state.optimistic_unchoke_time_scaler, 0);
+            assert_eq!(torrent_state.num_unchoked, 0);
+        }
     });
 }
