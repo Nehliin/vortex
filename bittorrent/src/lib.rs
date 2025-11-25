@@ -4,7 +4,7 @@ use std::{
     io::{self},
     net::{SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender}, u64,
+    sync::mpsc::{Receiver, Sender},
 };
 
 use ahash::HashSetExt;

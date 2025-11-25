@@ -38,7 +38,10 @@ impl SubmissionQueue for MockSubmissionQueue {
         false
     }
 
-    unsafe fn push(&mut self, _entry: &io_uring::squeue::Entry) -> Result<(), io_uring::squeue::PushError> {
+    unsafe fn push(
+        &mut self,
+        _entry: &io_uring::squeue::Entry,
+    ) -> Result<(), io_uring::squeue::PushError> {
         Ok(())
     }
 }
