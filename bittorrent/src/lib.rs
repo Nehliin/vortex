@@ -7,6 +7,7 @@ use std::{
     sync::mpsc::{Receiver, Sender},
 };
 
+use ahash::HashSetExt;
 use bitvec::{boxed::BitBox, order::Msb0, vec::BitVec};
 use event_loop::{ConnectionId, EventLoop};
 use file_store::FileStore;
@@ -102,13 +103,20 @@ pub enum TorrentEvent {
         pieces_completed: usize,
         pieces_allocated: usize,
         peer_metrics: Vec<PeerMetrics>,
+        num_unchoked: usize,
     },
 }
+
+const MAX_UNCHOKED: u32 = 8;
+const UNCHOKE_INTERVAL: u32 = 15;
+const OPTIMISTIC_UNCHOKE_INTERVAL: u32 = 30;
 
 pub struct InitializedState {
     piece_selector: PieceSelector,
     num_unchoked: u32,
     max_unchoked: u32,
+    unchoke_time_scaler: u32,
+    optimistic_unchoke_time_scaler: u32,
     completed_piece_rc: Receiver<CompletedPiece>,
     completed_piece_tx: Sender<CompletedPiece>,
     pieces: Vec<Option<Piece>>,
@@ -125,7 +133,9 @@ impl InitializedState {
         Self {
             piece_selector: PieceSelector::new(torrent),
             num_unchoked: 0,
-            max_unchoked: 8,
+            max_unchoked: MAX_UNCHOKED,
+            unchoke_time_scaler: UNCHOKE_INTERVAL,
+            optimistic_unchoke_time_scaler: OPTIMISTIC_UNCHOKE_INTERVAL,
             completed_piece_rc: rc,
             completed_piece_tx: tx,
             pieces,
@@ -249,8 +259,115 @@ impl InitializedState {
         }
     }
 
-    pub fn should_unchoke(&self) -> bool {
+    pub fn can_preemtively_unchoke(&self) -> bool {
         self.num_unchoked < self.max_unchoked
+    }
+
+    /// Determine the most suited peers to be unchoked based on throughput.
+    /// Some unchoke slots are left for optimistic unchokes
+    pub fn recalculate_unchokes(
+        &mut self,
+        connections: &mut SlotMap<ConnectionId, PeerConnection>,
+    ) {
+        log::info!("Recalculating unchokes");
+        let mut peers = Vec::with_capacity(connections.len());
+        for (id, peer) in connections.iter_mut() {
+            if !peer.peer_interested || peer.pending_disconnect.is_some() {
+                peer.network_stats.downloaded_in_last_round = 0;
+                if !peer.is_choking {
+                    if peer.optimistically_unchoked {
+                        peer.optimistically_unchoked = false;
+                        // reset so another peer can be optimistically unchoked
+                        self.optimistic_unchoke_time_scaler = 0;
+                    }
+                    peer.choke(self, true);
+                }
+
+                continue;
+            }
+            peers.push((id, peer.network_stats.downloaded_in_last_round));
+        }
+        peers.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
+        let optimistic_unchoke_slots = std::cmp::max(1, self.max_unchoked / 5);
+        let mut remaining_unchoke_slots = self.max_unchoked - optimistic_unchoke_slots;
+        for (id, _) in peers {
+            let peer = &mut connections[id];
+            log::trace!(
+                "Peer: {id:?}, last_round: {}",
+                peer.network_stats.downloaded_in_last_round
+            );
+            peer.network_stats.downloaded_in_last_round = 0;
+            if remaining_unchoke_slots > 0 {
+                if peer.is_choking {
+                    log::debug!(
+                        "Peer[{}] now unchoked after recalculating throughputs",
+                        peer.peer_id
+                    );
+                    peer.unchoke(self, true);
+                }
+                remaining_unchoke_slots -= 1;
+                if peer.optimistically_unchoked {
+                    log::trace!(
+                        "Peer[{}] previously optimistically unchoked, promoted to normal unchoke",
+                        peer.peer_id
+                    );
+                    // no longer optimistic, the peer is "promoted"
+                    // to a normal unchoke slot
+                    peer.optimistically_unchoked = false;
+                    // reset so another peer can be optimistically unchoked
+                    self.optimistic_unchoke_time_scaler = 0;
+                }
+            } else if !peer.is_choking && !peer.optimistically_unchoked {
+                log::debug!(
+                    "Peer[{}] no longer unchoked after recalculating throughputs",
+                    peer.peer_id
+                );
+                peer.choke(self, true);
+            }
+        }
+    }
+
+    // Give some lucky winners unchokes to test if they will have better throughput than the
+    // currently unchoked peers
+    pub fn recalculate_optimistic_unchokes(
+        &mut self,
+        connections: &mut SlotMap<ConnectionId, PeerConnection>,
+    ) {
+        log::info!("Recalculating optimistic unchokes");
+        let num_opt_unchoked = std::cmp::max(1, self.max_unchoked / 5) as usize;
+        let mut previously_opt_unchoked = ahash::HashSet::with_capacity(num_opt_unchoked);
+        let mut candidates = Vec::with_capacity(self.max_unchoked as usize);
+        for (id, peer) in connections.iter_mut() {
+            if peer.optimistically_unchoked {
+                previously_opt_unchoked.insert(id);
+            }
+            if peer.pending_disconnect.is_none()
+                && peer.peer_interested
+                && (peer.is_choking || peer.optimistically_unchoked)
+            {
+                candidates.push((
+                    id,
+                    peer.last_optimistically_unchoked
+                        .map_or(u64::MAX, |time| time.elapsed().as_secs()),
+                ));
+            }
+        }
+        // Sort in the order of peers that have waited the longest
+        candidates.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
+        for (id, _) in candidates.iter().take(num_opt_unchoked) {
+            let peer = &mut connections[*id];
+            if peer.optimistically_unchoked {
+                log::debug!("Peer[{}] optmistically unchoked again", peer.peer_id);
+                previously_opt_unchoked.remove(id);
+            } else {
+                peer.optimistically_unchoke(self, true);
+            }
+        }
+
+        for id in previously_opt_unchoked {
+            let peer = &mut connections[id];
+            peer.choke(self, true);
+        }
     }
 }
 

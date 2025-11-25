@@ -139,11 +139,31 @@ pub enum ConnectionState {
     Disconnecting,
 }
 
+#[derive(Debug, Default)]
+pub struct NetworkStats {
+    /// Download throughput in the current tick
+    pub download_throughput: u64,
+    /// Download throughput in the previous tick
+    pub prev_download_throughput: u64,
+    /// Total piece data downloaded since last
+    /// unchoke distribution round
+    pub downloaded_in_last_round: u64,
+    /// Upload throughput in the current tick
+    pub upload_throughput: u64,
+    /// Upload throughput in the previous tick
+    pub prev_upload_throughput: u64,
+}
+
 pub struct PeerConnection {
     pub connection_state: ConnectionState,
     pub peer_addr: SocketAddr,
     pub conn_id: ConnectionId,
     pub peer_id: PeerId,
+    /// This peer is currently optimistically unchoked by us
+    pub optimistically_unchoked: bool,
+    /// Last time this peer was optimistically unchoked or None if
+    /// it hasn't happen yet
+    pub last_optimistically_unchoked: Option<Instant>,
     /// This side is choking the peer
     pub is_choking: bool,
     /// This side is interested what the peer has to offer
@@ -176,10 +196,7 @@ pub struct PeerConnection {
     pub snubbed: bool,
     // The averge time between pieces being received
     pub moving_rtt: MovingRttAverage,
-    pub download_throughput: u64,
-    pub prev_download_throughput: u64,
-    pub upload_throughput: u64,
-    pub prev_upload_throughput: u64,
+    pub network_stats: NetworkStats,
     // If this connection is about to be disconnected
     pub pending_disconnect: Option<DisconnectReason>,
     pub stateful_decoder: PeerMessageDecoder,
@@ -208,6 +225,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             peer_addr,
             conn_id,
             peer_id: parsed_handshake.peer_id,
+            optimistically_unchoked: false,
+            last_optimistically_unchoked: None,
             is_choking: true,
             is_interesting: false,
             sent_allowed_fast: false,
@@ -226,10 +245,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             max_queue_size: 200,
             moving_rtt: Default::default(),
             pending_disconnect: None,
-            download_throughput: 0,
-            prev_download_throughput: 0,
-            upload_throughput: 0,
-            prev_upload_throughput: 0,
+            network_stats: Default::default(),
             outgoing_msgs_buffer: Default::default(),
             extensions: Default::default(),
             stateful_decoder: PeerMessageDecoder::new(2 << 15),
@@ -263,6 +279,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             if !self.is_choking {
                 torrent_state.num_unchoked -= 1;
             }
+            if self.optimistically_unchoked {
+                // Reset time scaler so another peer can be optimistically unchoked
+                self.optimistically_unchoked = false;
+                torrent_state.optimistic_unchoke_time_scaler = 0;
+            }
         }
     }
 
@@ -283,8 +304,15 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.queued.clear();
     }
 
-    fn unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
+    pub fn optimistically_unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
+        self.optimistically_unchoked = true;
+        self.last_optimistically_unchoked = Some(Instant::now());
+        self.unchoke(torrent_state, ordered);
+    }
+
+    pub fn unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
         if self.is_choking {
+            log::info!("[Peer: {}] is unchoked", self.peer_id);
             torrent_state.num_unchoked += 1;
         }
         self.is_choking = false;
@@ -314,7 +342,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     fn send_piece(&mut self, index: i32, offset: i32, data: Bytes, ordered: bool) {
-        self.upload_throughput += data.len() as u64;
+        self.network_stats.upload_throughput += data.len() as u64;
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Piece {
                 index,
@@ -343,9 +371,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         });
     }
 
-    fn choke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
+    pub fn choke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
         if !self.is_choking {
             torrent_state.num_unchoked -= 1;
+        }
+        if self.optimistically_unchoked {
+            self.optimistically_unchoked = false;
         }
         self.is_choking = true;
         self.outgoing_msgs_buffer.push(OutgoingMsg {
@@ -445,7 +476,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         if self.slow_start {
             self.update_target_inflight(self.target_inflight + 1);
         }
-        self.download_throughput += length as u64;
+        self.network_stats.download_throughput += length as u64;
+        self.network_stats.downloaded_in_last_round += length as u64;
         let request = self.inflight.remove(pos).unwrap();
         log::trace!("Subpiece completed: {}, {}", request.index, request.offset);
         let rtt = self.last_received_subpiece.take().unwrap().elapsed();
@@ -462,7 +494,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 metrics::gauge!("peer.throughput.bytes", "peer_id" => self.peer_id.to_string());
             // Prev throughput is used since the mertics are reported at the end of TICK and
             // throughput have been reset and stored here at that point
-            gauge.set(self.prev_download_throughput as u32);
+            gauge.set(self.network_stats.prev_download_throughput as u32);
 
             let gauge =
                 metrics::gauge!("peer.target_inflight", "peer_id" => self.peer_id.to_string());
@@ -486,9 +518,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         PeerMetrics {
             // Prev throughput is used since the mertics are reported at the end of TICK and
             // throughput have been reset and stored here at that point
-            download_throughput: self.prev_download_throughput,
+            download_throughput: self.network_stats.prev_download_throughput,
             // Same goes for upload data
-            upload_throughput: self.prev_upload_throughput,
+            upload_throughput: self.network_stats.prev_upload_throughput,
             endgame: self.endgame,
             snubbed: self.snubbed,
         }
@@ -584,8 +616,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         .piece_selector
                         .next_piece(self.conn_id, &mut self.endgame)
                     {
-                        log::info!("[Peer: {}] Unchoked and start downloading", self.peer_id);
-                        self.unchoke(torrent_state, true);
+                        log::info!("[Peer: {}] Unchoked us, start downloading", self.peer_id);
                         let mut subpieces = torrent_state.allocate_piece(
                             piece_idx,
                             self.conn_id,
@@ -643,7 +674,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         // unchoke to avoid some race conditions. Libtorrent
                         // uses the same type of logic
                         self.unchoke(torrent_state, true);
-                    } else if torrent_state.should_unchoke() {
+                    } else if torrent_state.can_preemtively_unchoke() {
                         log::debug!("[Peer: {}] Unchoking peer after intrest", self.peer_id);
                         self.unchoke(torrent_state, true);
                     }
@@ -851,7 +882,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         if !self.peer_interested {
                             self.peer_interested = true;
                         }
-                        let should_unchoke = torrent_state.should_unchoke();
+                        let should_unchoke = torrent_state.can_preemtively_unchoke();
                         if should_unchoke && self.is_choking {
                             self.unchoke(torrent_state, true);
                         }

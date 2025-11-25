@@ -9,6 +9,7 @@ repository = "https://github.com/Nehliin/vortex"
 license = "BSD-3-Clause"
 
 [dependencies]
+ahash = "0.8"
 io-uring = "0.7"
 libc = "0.2"
 slotmap = "1"

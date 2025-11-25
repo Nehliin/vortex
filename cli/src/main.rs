@@ -210,6 +210,7 @@ struct VortexApp<'queue> {
     total_upload_throughput: Box<HistoryBuffer<(f64, f64), 256>>,
     pieces_completed: usize,
     num_connections: usize,
+    num_unchoked: usize,
     metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
     root: PathBuf,
     metadata_spinner_state: ThrobberState,
@@ -235,6 +236,7 @@ impl<'queue> VortexApp<'queue> {
             total_download_throughput: Box::new(HistoryBuffer::new()),
             total_upload_throughput: Box::new(HistoryBuffer::new()),
             num_connections: 0,
+            num_unchoked: 0,
             metadata_spinner_state: Default::default(),
             last_tick: Instant::now(),
             metadata,
@@ -293,9 +295,11 @@ impl<'queue> VortexApp<'queue> {
                     pieces_completed,
                     pieces_allocated: _,
                     peer_metrics,
+                    num_unchoked,
                 } => {
                     self.pieces_completed = pieces_completed;
                     self.num_connections = peer_metrics.len();
+                    self.num_unchoked = num_unchoked;
                     let tick_download_throughput: u64 =
                         peer_metrics.iter().map(|val| val.download_throughput).sum();
                     let tick_upload_throughput: u64 =
@@ -387,7 +391,7 @@ impl<'queue> VortexApp<'queue> {
     }
 
     fn render_label(&self, network_chunk: Rect, buf: &mut Buffer) {
-        const NETWORK_HEADERS: [&str; 2] = ["Download speed:", "Name:"];
+        const NETWORK_HEADERS: [&str; 3] = ["Download epeed:", "Unchoked:", "Name:"];
 
         let current_throughput = self
             .total_download_throughput
@@ -404,10 +408,11 @@ impl<'queue> VortexApp<'queue> {
 
         let network = vec![Row::new([
             Text::styled(throuhput_label, Style::default()),
+            Text::styled(format!("{}", self.num_unchoked), Style::default()),
             Text::styled(name, Style::default()),
         ])];
 
-        Table::new(network, [Constraint::Length(20), Constraint::Fill(1)])
+        Table::new(network, [Constraint::Fill(1), Constraint::Fill(1)])
             .header(Row::new(NETWORK_HEADERS).style(Style::default()))
             .block(
                 Block::default()

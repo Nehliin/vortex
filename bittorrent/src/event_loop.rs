@@ -1,11 +1,12 @@
 use std::{
-    collections::HashSet,
     io,
     net::TcpListener,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd},
     time::{Duration, Instant},
 };
 
+use ahash::HashSet;
+use ahash::HashSetExt;
 use heapless::spsc::{Consumer, Producer};
 use io_uring::{
     IoUring,
@@ -19,7 +20,8 @@ use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    Command, Error, PeerMetrics, State, StateRef, TorrentEvent,
+    Command, Error, OPTIMISTIC_UNCHOKE_INTERVAL, PeerMetrics, State, StateRef, TorrentEvent,
+    UNCHOKE_INTERVAL,
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
@@ -916,12 +918,14 @@ fn report_tick_metrics(
 ) {
     let mut pieces_completed = 0;
     let mut pieces_allocated = 0;
+    let mut num_unchoked = 0;
 
     if let Some((_, torrent_state)) = state.state() {
         let total_completed = torrent_state.piece_selector.total_completed();
         let total_allocated = torrent_state.piece_selector.total_allocated();
         pieces_completed = total_completed;
         pieces_allocated = total_allocated;
+        num_unchoked = torrent_state.num_unchoked as usize;
         #[cfg(feature = "metrics")]
         {
             let counter = metrics::counter!("pieces_completed");
@@ -944,6 +948,7 @@ fn report_tick_metrics(
             pieces_completed,
             pieces_allocated,
             peer_metrics,
+            num_unchoked,
         })
         .is_err()
     {
@@ -959,9 +964,23 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
     event_tx: &mut Producer<TorrentEvent, 512>,
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
-    // 1. Calculate bandwidth (deal with initial start up)
-    // 2. Go through them in order
-    // 3. select pieces
+    if let Some((_, torrent_state)) = torrent_state.state() {
+        torrent_state.unchoke_time_scaler = torrent_state.unchoke_time_scaler.saturating_sub(1);
+        torrent_state.optimistic_unchoke_time_scaler = torrent_state
+            .optimistic_unchoke_time_scaler
+            .saturating_sub(1);
+
+        if torrent_state.unchoke_time_scaler == 0 && !connections.is_empty() {
+            torrent_state.unchoke_time_scaler = UNCHOKE_INTERVAL;
+            torrent_state.recalculate_unchokes(connections);
+        }
+
+        if torrent_state.optimistic_unchoke_time_scaler == 0 && !connections.is_empty() {
+            torrent_state.optimistic_unchoke_time_scaler = OPTIMISTIC_UNCHOKE_INTERVAL;
+            torrent_state.recalculate_optimistic_unchokes(connections);
+        }
+    }
+
     for connection in connections
         .values_mut()
         // Filter out connections that are pending diconnect
@@ -969,6 +988,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
     {
         if connection.last_seen.elapsed() > Duration::from_secs(120) {
             log::warn!("Timeout due to inactivity: {}", connection.peer_id);
+            // TODO: This will not release it's unchoke slot until next interval
             connection.pending_disconnect = Some(DisconnectReason::Idle);
             continue;
         }
@@ -986,32 +1006,37 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             }
 
             // Take delta into account when calculating throughput
-            connection.download_throughput =
-                (connection.download_throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
-            connection.upload_throughput =
-                (connection.upload_throughput as f64 / tick_delta.as_secs_f64()).round() as u64;
+            connection.network_stats.download_throughput =
+                (connection.network_stats.download_throughput as f64 / tick_delta.as_secs_f64())
+                    .round() as u64;
+            connection.network_stats.upload_throughput =
+                (connection.network_stats.upload_throughput as f64 / tick_delta.as_secs_f64())
+                    .round() as u64;
             if !connection.peer_choking {
                 // slow start win size increase is handled in update_stats
                 if !connection.slow_start {
                     // From the libtorrent impl, request queue time = 3
-                    let new_queue_capacity =
-                        3 * connection.download_throughput / piece_selector::SUBPIECE_SIZE as u64;
+                    let new_queue_capacity = 3 * connection.network_stats.download_throughput
+                        / piece_selector::SUBPIECE_SIZE as u64;
                     connection.update_target_inflight(new_queue_capacity as usize);
                 }
             }
 
             if !connection.peer_choking
                 && connection.slow_start
-                && connection.download_throughput > 0
-                && connection.download_throughput < connection.prev_download_throughput + 5000
+                && connection.network_stats.download_throughput > 0
+                && connection.network_stats.download_throughput
+                    < connection.network_stats.prev_download_throughput + 5000
             {
                 log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
                 connection.slow_start = false;
             }
-            connection.prev_download_throughput = connection.download_throughput;
-            connection.prev_upload_throughput = connection.upload_throughput;
-            connection.download_throughput = 0;
-            connection.upload_throughput = 0;
+            connection.network_stats.prev_download_throughput =
+                connection.network_stats.download_throughput;
+            connection.network_stats.prev_upload_throughput =
+                connection.network_stats.upload_throughput;
+            connection.network_stats.download_throughput = 0;
+            connection.network_stats.upload_throughput = 0;
         }
     }
     let mut peer_metrics = Vec::with_capacity(connections.len());
