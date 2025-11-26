@@ -1,7 +1,8 @@
+mod common;
+
 use std::{
     collections::HashMap,
     net::TcpListener,
-    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -9,52 +10,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use lava_torrent::torrent::v1::TorrentBuilder;
-use metrics_exporter_prometheus::PrometheusBuilder;
-use sha1::{Digest, Sha1};
 use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
 
-/// Temporary directory that auto-cleans on drop
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new(prefix: &str) -> Self {
-        let path = format!("/tmp/vortex_test_{}_{}", prefix, rand::random::<u32>());
-        std::fs::create_dir_all(&path).unwrap();
-        let path = std::fs::canonicalize(path).unwrap();
-        Self { path }
-    }
-
-    fn add_file(&self, file_path: &str, data: &[u8]) {
-        let file_path = self.path.join(file_path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(file_path, data).unwrap();
-    }
-
-    fn path(&self) -> &PathBuf {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
+use common::{
+    TempDir, calculate_file_hashes, create_test_torrent, init_test_environment,
+    verify_downloaded_files,
+};
 
 #[test]
 fn basic_seeding() {
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Trace)
-        .init();
-    let builder = PrometheusBuilder::new();
-    if let Err(err) = builder.install() {
-        log::error!("failed installing PrometheusBuilder: {err}");
-    }
+    init_test_environment();
 
     // Generate test files
     let test_files: HashMap<String, Vec<u8>> = [
@@ -69,29 +34,12 @@ fn basic_seeding() {
     .collect();
 
     // Calculate expected file hashes for later verification
-    let expected_hashes: HashMap<String, Vec<u8>> = test_files
-        .iter()
-        .map(|(name, data)| {
-            let mut hasher = Sha1::new();
-            hasher.update(data);
-            (name.clone(), hasher.finalize().to_vec())
-        })
-        .collect();
+    let expected_hashes = calculate_file_hashes(&test_files);
 
     let torrent_name = format!("test_seeding_{}", rand::random::<u32>());
 
-    // Create seeder directory with test files
-    // Note: FileStore expects files to be in root/torrent_name/, so we need to create them there
-    let seeder_dir = TempDir::new(&format!("{}_seeder", torrent_name));
-    for (file_path, data) in &test_files {
-        seeder_dir.add_file(&format!("{}/{}", torrent_name, file_path), data);
-    }
-
-    // Build torrent metadata from the torrent subdirectory
-    let metadata = TorrentBuilder::new(seeder_dir.path().join(&torrent_name), 16384)
-        .set_name(torrent_name.clone())
-        .build()
-        .unwrap();
+    // Create seeder directory with test files and build torrent metadata
+    let (seeder_dir, metadata) = create_test_torrent(&test_files, &torrent_name, 16384);
 
     // Create downloader directory (empty initially)
     let downloader_dir = TempDir::new(&format!("{}_downloader", torrent_name));
@@ -243,23 +191,12 @@ fn basic_seeding() {
     });
 
     // Verify downloaded files match original files
-    log::info!("Verifying downloaded file hashes...");
-    for (file_name, expected_hash) in expected_hashes {
-        let downloaded_path = downloader_dir.path().join(&torrent_name).join(&file_name);
-        let downloaded_data = std::fs::read(&downloaded_path)
-            .unwrap_or_else(|_| panic!("Failed to read downloaded file: {}", file_name));
-
-        let mut hasher = Sha1::new();
-        hasher.update(&downloaded_data);
-        let actual_hash = hasher.finalize().to_vec();
-
-        assert_eq!(
-            actual_hash, expected_hash,
-            "Hash mismatch for file: {}",
-            file_name
-        );
-        log::info!("File {} hash verified", file_name);
-    }
+    verify_downloaded_files(
+        &downloader_dir,
+        &torrent_name,
+        &expected_hashes,
+        "downloader",
+    );
 
     log::info!("All files verified successfully!");
 }
