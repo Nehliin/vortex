@@ -160,6 +160,8 @@ fn fast_ext_have_none() {
 #[test]
 fn have() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -245,7 +247,7 @@ fn have() {
         assert_eq!(torrent_state.num_allocated(), 0);
         // To ensure we do not miss the completion event
         std::thread::sleep(Duration::from_millis(100));
-        torrent_state.update_torrent_status(&mut connections);
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
 
         // C is not interesting
         assert!(!connections[key_c].is_interesting);
@@ -928,6 +930,8 @@ fn bitfield_recv() {
 #[test]
 fn interest_is_updated_when_recv_piece() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -992,7 +996,7 @@ fn interest_is_updated_when_recv_piece() {
         // To ensure we do not miss the completion event
         std::thread::sleep(Duration::from_millis(100));
         let (_, torrent_state) = state_ref.state().unwrap();
-        torrent_state.update_torrent_status(&mut connections);
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
         assert!(connections[key].is_interesting);
         connections[key].handle_message(
             PeerMessage::Piece {
@@ -1015,7 +1019,7 @@ fn interest_is_updated_when_recv_piece() {
         // To ensure we do not miss the completion event
         std::thread::sleep(Duration::from_millis(100));
         let (_, torrent_state) = state_ref.state().unwrap();
-        torrent_state.update_torrent_status(&mut connections);
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
         sent_and_marked_not_interested(&connections[key]);
     });
 }
@@ -1023,6 +1027,8 @@ fn interest_is_updated_when_recv_piece() {
 #[test]
 fn send_have_to_peers_when_piece_completes() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -1075,7 +1081,7 @@ fn send_have_to_peers_when_piece_completes() {
         // To ensure we do not miss the completion event
         std::thread::sleep(Duration::from_millis(150));
         let (_, torrent_state) = state_ref.state().unwrap();
-        torrent_state.update_torrent_status(&mut connections);
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
         for (_, peer) in &mut connections {
             assert!(
                 peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
@@ -1110,7 +1116,7 @@ fn send_have_to_peers_when_piece_completes() {
         // To ensure we do not miss the completion event
         std::thread::sleep(Duration::from_millis(100));
         let (_, torrent_state) = state_ref.state().unwrap();
-        torrent_state.update_torrent_status(&mut connections);
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
         for (_, peer) in &connections {
             assert!(
                 peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
@@ -1153,6 +1159,8 @@ fn assume_intrest_when_request_recv() {
 #[test]
 fn piece_recv() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -1222,7 +1230,7 @@ fn piece_recv() {
         assert_eq!(torrent_state.num_allocated(), 0);
         // To ensure we do not miss the completion event
         std::thread::sleep(Duration::from_millis(100));
-        torrent_state.update_torrent_status(&mut connections);
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
         assert_eq!(torrent_state.piece_selector.total_allocated(), 0);
         assert!(!torrent_state.piece_selector.is_allocated(index as usize));
         assert!(torrent_state.piece_selector.has_completed(index as usize));
@@ -1233,6 +1241,8 @@ fn piece_recv() {
 #[test]
 fn handles_duplicate_piece_recv() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -1292,7 +1302,7 @@ fn handles_duplicate_piece_recv() {
         assert_eq!(torrent_state.num_allocated(), 0);
         // To ensure we do not miss the completion event
         std::thread::sleep(Duration::from_millis(100));
-        torrent_state.update_torrent_status(&mut connections);
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
         assert_eq!(torrent_state.piece_selector.total_allocated(), 0);
         assert!(!torrent_state.piece_selector.is_allocated(index as usize));
         assert!(torrent_state.piece_selector.has_completed(index as usize));
@@ -1597,6 +1607,8 @@ fn invalid_reject_request() {
 #[test]
 fn endgame_mode() {
     let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
 
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
@@ -1653,7 +1665,7 @@ fn endgame_mode() {
         // To ensure we do not miss the completion event
         std::thread::sleep(Duration::from_millis(100));
         let (_, torrent_state) = state_ref.state().unwrap();
-        torrent_state.update_torrent_status(&mut connections);
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
         assert!(!connections[key_a].endgame);
         assert!(!connections[key_b].endgame);
         let (_, torrent_state) = state_ref.state().unwrap();
