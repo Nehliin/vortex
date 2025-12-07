@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use bt_bencode::Deserializer;
+use bytes::Buf;
 use heapless::spsc::Queue;
 use serde::Deserialize;
 use slotmap::SlotMap;
@@ -2977,5 +2978,512 @@ fn optimistically_unchoked_disconnect_resets_timer() {
             assert_eq!(torrent_state.optimistic_unchoke_time_scaler, 0);
             assert_eq!(torrent_state.num_unchoked, 0);
         }
+    });
+}
+#[test]
+fn upload_only_field_in_extended_handshake() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let (file_and_meta, _) = state_ref.state().unwrap();
+        let metadata_size = file_and_meta.metadata.construct_info().encode().len() as i64;
+
+        // Peer hasn't declared upload_only yet
+        assert!(!connections[key].is_upload_only);
+
+        // Simulate receiving extended handshake with upload_only field set to 1
+        let mut handshake = std::collections::BTreeMap::new();
+        let m: std::collections::BTreeMap<&str, u8> = [("ut_metadata", 1u8)].into_iter().collect();
+        handshake.insert("m", bt_bencode::to_value(&m).unwrap());
+        handshake.insert("upload_only", bt_bencode::to_value(&1i64).unwrap());
+        // Needed for ut_metadata
+        handshake.insert(
+            "metadata_size",
+            bt_bencode::to_value(dbg!(&metadata_size)).unwrap(),
+        );
+
+        let handshake_data = bt_bencode::to_vec(&handshake).unwrap();
+        connections[key].handle_message(
+            PeerMessage::Extended {
+                id: 0,
+                data: handshake_data.into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        // Peer should now be marked as upload_only based on handshake field
+        assert!(connections[key].is_upload_only);
+
+        // Test with upload_only = 0
+        let key2 = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut handshake2 = std::collections::BTreeMap::new();
+        let m2: std::collections::BTreeMap<&str, u8> = [("ut_metadata", 1u8)].into_iter().collect();
+        handshake2.insert("m", bt_bencode::to_value(&m2).unwrap());
+        handshake2.insert("upload_only", bt_bencode::to_value(&0i64).unwrap());
+        // Needed for ut_metadata
+        handshake2.insert(
+            "metadata_size",
+            bt_bencode::to_value(dbg!(&metadata_size)).unwrap(),
+        );
+
+        let handshake_data2 = bt_bencode::to_vec(&handshake2).unwrap();
+        connections[key2].handle_message(
+            PeerMessage::Extended {
+                id: 0,
+                data: handshake_data2.into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        assert!(!connections[key2].is_upload_only);
+    });
+}
+
+#[test]
+fn upload_only_extension_message_received() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+
+        // Peer hasn't declared upload_only yet
+        assert!(!connections[key].is_upload_only);
+
+        // Simulate receiving extended handshake with upload_only extension enabled
+        let mut handshake = std::collections::BTreeMap::new();
+        // 3 explicitly does not match our implementations extension id for it
+        let m: std::collections::BTreeMap<&str, u8> = [("upload_only", 3u8)].into_iter().collect();
+        handshake.insert("m", bt_bencode::to_value(&m).unwrap());
+
+        let handshake_data = bt_bencode::to_vec(&handshake).unwrap();
+        connections[key].handle_message(
+            PeerMessage::Extended {
+                id: 0,
+                data: handshake_data.into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        // Test receiving upload_only extension message (value = 1)
+        let upload_only_msg = [1_u8].as_slice();
+        connections[key].handle_message(
+            PeerMessage::Extended {
+                id: 2, // ID for upload_only extension
+                data: upload_only_msg.into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        assert!(connections[key].is_upload_only);
+
+        // Test receiving upload_only = 0 (peer is no longer upload only)
+        let upload_only_msg = [0_u8].as_slice();
+        connections[key].handle_message(
+            PeerMessage::Extended {
+                id: 2,
+                data: upload_only_msg.into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        assert!(!connections[key].is_upload_only);
+    });
+}
+
+#[test]
+fn upload_only_extension_message_sent_on_torrent_complete() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let other_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        // Doesn't support the extension
+        let third_peer = connections.insert_with_key(|k| generate_peer(true, k));
+
+        // Set up extension support
+        let mut handshake = std::collections::BTreeMap::new();
+        let m: std::collections::BTreeMap<&str, u8> = [("upload_only", 3u8)].into_iter().collect();
+        handshake.insert("m", bt_bencode::to_value(&m).unwrap());
+        let handshake_data = bt_bencode::to_vec(&handshake).unwrap();
+        connections[key].handle_message(
+            PeerMessage::Extended {
+                id: 0,
+                data: handshake_data.into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        let mut handshake = std::collections::BTreeMap::new();
+        let m: std::collections::BTreeMap<&str, u8> = [("upload_only", 3u8)].into_iter().collect();
+        handshake.insert("m", bt_bencode::to_value(&m).unwrap());
+        let handshake_data = bt_bencode::to_vec(&handshake).unwrap();
+        connections[other_peer].handle_message(
+            PeerMessage::Extended {
+                id: 0,
+                data: handshake_data.into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        connections[key].outgoing_msgs_buffer.clear();
+
+        // Note that the peer is marked as upload only with this message
+        connections[key].handle_message(PeerMessage::HaveAll, &mut state_ref, scope);
+
+        let (_, torrent_state) = state_ref.state().unwrap();
+        let num_pieces = torrent_state.num_pieces();
+
+        // Download all pieces to complete the torrent
+        for _i in 0..num_pieces {
+            let (file_and_info, torrent_state) = state_ref.state().unwrap();
+            let index = torrent_state
+                .piece_selector
+                .next_piece(key, &mut connections[key].endgame)
+                .unwrap();
+            let mut subpieces = torrent_state.allocate_piece(index, key, &file_and_info.file_store);
+            connections[key].append_and_fill(&mut subpieces);
+
+            // Complete the piece
+            connections[key].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: 0,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                scope,
+            );
+            connections[key].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: SUBPIECE_SIZE,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                scope,
+            );
+        }
+
+        let (_, torrent_state) = state_ref.state().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
+        assert!(torrent_state.is_complete);
+
+        // Should have sent upload_only extension message with value 1
+        let has_upload_only_msg = connections[key].outgoing_msgs_buffer.iter_mut().any(|msg| {
+            if let PeerMessage::Extended { id: 3, data } = &mut msg.message {
+                data.len() == 1 && data.get_u8() == 1
+            } else {
+                false
+            }
+        });
+        dbg!(&connections[key].outgoing_msgs_buffer);
+        assert!(
+            has_upload_only_msg,
+            "Should send upload_only extension message when torrent completes"
+        );
+        let has_upload_only_msg =
+            connections[other_peer]
+                .outgoing_msgs_buffer
+                .iter_mut()
+                .any(|msg| {
+                    if let PeerMessage::Extended { id: 3, data } = &mut msg.message {
+                        data.len() == 1 && data.get_u8() == 1
+                    } else {
+                        false
+                    }
+                });
+        assert!(
+            has_upload_only_msg,
+            "Should send upload_only extension message when torrent completes"
+        );
+        let has_upload_only_msg =
+            connections[third_peer]
+                .outgoing_msgs_buffer
+                .iter_mut()
+                .any(|msg| {
+                    if let PeerMessage::Extended { id: 3, data } = &mut msg.message {
+                        data.len() == 1 && data.get_u8() == 1
+                    } else {
+                        false
+                    }
+                });
+        assert!(
+            !has_upload_only_msg,
+            "Should not send upload_only extension message to peer that doesn't support it"
+        );
+    });
+}
+
+#[test]
+fn redundant_connection_disconnect_both_upload_only() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+
+        // HaveAll automatically marks peer as upload_only
+        connections[key].handle_message(PeerMessage::HaveAll, &mut state_ref, scope);
+        assert!(connections[key].is_upload_only);
+
+        let (_, torrent_state) = state_ref.state().unwrap();
+        let num_pieces = torrent_state.num_pieces();
+
+        // Download all pieces to complete the torrent
+        for _i in 0..num_pieces {
+            let (file_and_info, torrent_state) = state_ref.state().unwrap();
+            let index = torrent_state
+                .piece_selector
+                .next_piece(key, &mut connections[key].endgame)
+                .unwrap();
+            let mut subpieces = torrent_state.allocate_piece(index, key, &file_and_info.file_store);
+            connections[key].append_and_fill(&mut subpieces);
+
+            // Complete the piece
+            connections[key].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: 0,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                scope,
+            );
+            connections[key].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: SUBPIECE_SIZE,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                scope,
+            );
+        }
+
+        let (_, torrent_state) = state_ref.state().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
+
+        // Both sides are upload only, should have pending disconnect
+        assert!(
+            connections[key].pending_disconnect.is_some(),
+            "Should disconnect when both sides are upload only"
+        );
+        assert!(
+            matches!(
+                connections[key].pending_disconnect,
+                Some(DisconnectReason::RedundantConnection)
+            ),
+            "Disconnect reason should be RedundantConnection"
+        );
+    });
+}
+
+#[test]
+fn no_disconnect_when_peer_not_upload_only() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+
+        connections[key].handle_message(PeerMessage::HaveAll, &mut state_ref, scope);
+        // simulate it's not upload_only
+        connections[key].is_upload_only = false;
+
+        let (_, torrent_state) = state_ref.state().unwrap();
+        let num_pieces = torrent_state.num_pieces();
+
+        // Download all pieces to complete the torrent
+        for _i in 0..num_pieces {
+            let (file_and_info, torrent_state) = state_ref.state().unwrap();
+            let index = torrent_state
+                .piece_selector
+                .next_piece(key, &mut connections[key].endgame)
+                .unwrap();
+            let mut subpieces = torrent_state.allocate_piece(index, key, &file_and_info.file_store);
+            connections[key].append_and_fill(&mut subpieces);
+
+            // Complete the piece
+            connections[key].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: 0,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                scope,
+            );
+            connections[key].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: SUBPIECE_SIZE,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                scope,
+            );
+        }
+
+        let (_, torrent_state) = state_ref.state().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
+
+        // Peer is not upload only, so we should NOT disconnect (they might want to download from us)
+        assert!(
+            connections[key].pending_disconnect.is_none(),
+            "Should NOT disconnect when peer is not upload only (they might download from us)"
+        );
+    });
+}
+
+#[test]
+fn disconnect_upload_only_peer_when_no_longer_interesting() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_with_key(|k| generate_peer(true, k));
+
+        // key_a is upload only (via HaveAll) and has all pieces
+        connections[key_a].handle_message(PeerMessage::HaveAll, &mut state_ref, scope);
+        assert!(connections[key_a].is_upload_only);
+
+        // key_b has all pieces but sent bitfield (not all set initially)
+        let (_, torrent_state) = state_ref.state().unwrap();
+        let num_pieces = torrent_state.num_pieces();
+        let mut field = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
+        field.set(0, false);
+        connections[key_b].handle_message(PeerMessage::Bitfield(field), &mut state_ref, scope);
+        assert!(!connections[key_b].is_upload_only);
+
+        // Now send Have for piece 0 to key_b
+        connections[key_b].handle_message(PeerMessage::Have { index: 0 }, &mut state_ref, scope);
+
+        // Download a piece from key_b to make progress
+        let (file_and_info, torrent_state) = state_ref.state().unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key_b, &mut connections[key_b].endgame)
+            .unwrap();
+        let mut subpieces = torrent_state.allocate_piece(index, key_b, &file_and_info.file_store);
+        connections[key_b].append_and_fill(&mut subpieces);
+
+        connections[key_b].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+        connections[key_b].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            scope,
+        );
+
+        let (_, torrent_state) = state_ref.state().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
+
+        // We're still interested in both peers, so no disconnect yet
+        assert!(connections[key_a].pending_disconnect.is_none());
+        assert!(connections[key_b].pending_disconnect.is_none());
+
+        // Now complete all remaining pieces
+        let (_, torrent_state) = state_ref.state().unwrap();
+        let num_pieces = torrent_state.num_pieces();
+        for _i in 0..(num_pieces - 1) {
+            let (file_and_info, torrent_state) = state_ref.state().unwrap();
+            let index = torrent_state
+                .piece_selector
+                .next_piece(key_b, &mut connections[key_b].endgame);
+
+            if index.is_none() {
+                break;
+            }
+            let index = index.unwrap();
+            let mut subpieces =
+                torrent_state.allocate_piece(index, key_b, &file_and_info.file_store);
+            connections[key_b].append_and_fill(&mut subpieces);
+
+            connections[key_b].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: 0,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                scope,
+            );
+            connections[key_b].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: SUBPIECE_SIZE,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                scope,
+            );
+        }
+
+        let (_, torrent_state) = state_ref.state().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        torrent_state.update_torrent_status(&mut connections, &mut event_tx);
+        assert!(torrent_state.is_complete);
+        assert!(!connections[key_a].is_interesting);
+        // key_a is upload only and we're no longer interested
+        // but we're also upload only now, so it should disconnect
+        assert!(
+            connections[key_a].pending_disconnect.is_some(),
+            "Should disconnect upload_only peer when both sides are upload only"
+        );
+        assert!(
+            matches!(
+                connections[key_a].pending_disconnect,
+                Some(DisconnectReason::RedundantConnection)
+            ),
+            "Disconnect reason should be RedundantConnection"
+        );
+
+        assert!(!connections[key_b].is_interesting);
+        // key_b is not upload only, so we keep the connection (they might download from us)
+        assert!(
+            connections[key_b].pending_disconnect.is_none(),
+            "Should NOT disconnect non-upload_only peer"
+        );
     });
 }
