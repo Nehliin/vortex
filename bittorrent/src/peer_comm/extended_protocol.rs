@@ -1,20 +1,64 @@
 use std::collections::BTreeMap;
 
 use bitvec::{boxed::BitBox, vec::BitVec};
-use bt_bencode::{Deserializer, Value};
-use bytes::Bytes;
+use bt_bencode::{ByteString, Deserializer, Value};
+use bytes::{Buf, Bytes};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-use crate::{StateRef, event_loop::MAX_OUTSTANDING_REQUESTS, piece_selector::SUBPIECE_SIZE};
+use crate::{
+    StateRef, event_loop::MAX_OUTSTANDING_REQUESTS, peer_comm::peer_connection::PeerConnection,
+    piece_selector::SUBPIECE_SIZE,
+};
 
 use super::{
     peer_connection::{DisconnectReason, OutgoingMsg},
     peer_protocol::PeerMessage,
 };
 
+pub const UT_METADATA: &str = "ut_metadata";
+pub const UPLOAD_ONLY: &str = "upload_only";
+
+pub fn init_extension<'state>(
+    id: u8,
+    name: &str,
+    handshake_dict: &BTreeMap<ByteString, Value>,
+    state_ref: &mut StateRef<'state>,
+    outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
+) -> Result<Option<Box<dyn ExtensionProtocol>>, DisconnectReason> {
+    match name {
+        UT_METADATA => {
+            let Some(metadata_size) = handshake_dict
+                .get("metadata_size".as_bytes())
+                .and_then(|val| val.as_u64())
+            else {
+                return Err(DisconnectReason::ProtocolError("metadata size not valid"));
+            };
+            if let Some((file_and_meta, _)) = state_ref.state() {
+                let expected_size = file_and_meta.metadata.construct_info().encode().len();
+                if metadata_size != expected_size as u64 {
+                    return Err(DisconnectReason::ProtocolError("metadata size not valid"));
+                }
+            }
+
+            let mut metadata = MetadataExtension::new(id, metadata_size as usize);
+            if !state_ref.is_initialzied() {
+                for i in 0..16.min(metadata.num_pieces()) {
+                    outgoing_msgs_buffer.push(OutgoingMsg {
+                        message: metadata.request(i as i32),
+                        ordered: false,
+                    });
+                }
+            }
+            Ok(Some(Box::new(metadata)))
+        }
+        UPLOAD_ONLY => Ok(Some(Box::new(UploadOnlyExtension::new(id)))),
+        _ => Ok(None),
+    }
+}
+
 // Supported extensions and this clients ID for them
-pub const EXTENSIONS: [(&str, u8); 1] = [("ut_metadata", 1)];
+pub const EXTENSIONS: [(&str, u8); 2] = [(UT_METADATA, 1), (UPLOAD_ONLY, 2)];
 
 /// The handshake message this peer should send to anyone supporting the
 /// extension
@@ -29,17 +73,23 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef) -> PeerMessage {
     if let Some(listener_port) = state_ref.listener_port {
         handshake.insert("p", bt_bencode::value::to_value(listener_port).unwrap());
     }
-    if let Some((file_and_meta, _)) = state_ref.state() {
+    if let Some((file_and_meta, state)) = state_ref.state() {
         let metadata_size = file_and_meta.metadata.construct_info().encode().len();
         handshake.insert(
             "metadata_size",
             bt_bencode::to_value(&metadata_size).unwrap(),
+        );
+        let upload_only = if state.is_complete { 1 } else { 0 };
+        handshake.insert(
+            UPLOAD_ONLY,
+            bt_bencode::value::to_value(&upload_only).unwrap(),
         );
     }
     handshake.insert(
         "reqq",
         bt_bencode::value::to_value(&MAX_OUTSTANDING_REQUESTS).unwrap(),
     );
+
     PeerMessage::Extended {
         id: 0,
         data: bt_bencode::to_vec(&handshake).unwrap().into(),
@@ -51,9 +101,58 @@ pub trait ExtensionProtocol {
         &mut self,
         data: Bytes,
         state: &mut StateRef<'state>,
-        outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
+        // Connection that received the message.
+        // Note you can't modify the extensions map
+        // from inside an extension handler
+        connection: &mut PeerConnection,
     ) -> Result<(), DisconnectReason>;
-    // TODO: fn tick?
+
+    fn on_torrent_complete(&mut self, _outgoing_msgs_buffer: &mut Vec<OutgoingMsg>) {}
+}
+
+/// An extension protocol supported by libtorrent
+/// to indicate that the peer is a pure seeder
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UploadOnlyExtension {
+    // The peers ID for the extension
+    pub id: u8,
+    pub enabled: bool,
+}
+
+impl UploadOnlyExtension {
+    pub fn new(id: u8) -> Self {
+        Self { id, enabled: false }
+    }
+
+    pub fn upload_only(&mut self, upload_only: bool) -> PeerMessage {
+        let enabled = if upload_only { 1 } else { 0 };
+        PeerMessage::Extended {
+            id: self.id,
+            data: vec![enabled].into(),
+        }
+    }
+}
+
+impl ExtensionProtocol for UploadOnlyExtension {
+    fn handle_message<'state>(
+        &mut self,
+        mut data: Bytes,
+        _state: &mut StateRef<'state>,
+        connection: &mut PeerConnection,
+    ) -> Result<(), DisconnectReason> {
+        let enabled = data
+            .try_get_u8()
+            .map_err(|_err| DisconnectReason::InvalidMessage)?;
+        connection.is_upload_only = enabled > 0;
+        Ok(())
+    }
+
+    fn on_torrent_complete(&mut self, outgoing_msgs_buffer: &mut Vec<OutgoingMsg>) {
+        outgoing_msgs_buffer.push(OutgoingMsg {
+            message: self.upload_only(true),
+            ordered: true,
+        });
+    }
 }
 
 const REQUEST: u8 = 0;
@@ -144,7 +243,7 @@ impl ExtensionProtocol for MetadataExtension {
         &mut self,
         data: Bytes,
         state: &mut StateRef<'state>,
-        outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
+        connection: &mut PeerConnection,
     ) -> Result<(), DisconnectReason> {
         // TODO: Consider reusing this
         let mut de = Deserializer::from_slice(&data[..]);
@@ -167,19 +266,19 @@ impl ExtensionProtocol for MetadataExtension {
                 if let Some((file_and_meta, _)) = state.state() {
                     let info_bytes = file_and_meta.metadata.construct_info().encode();
                     if start_offset >= info_bytes.len() {
-                        outgoing_msgs_buffer.push(OutgoingMsg {
+                        connection.outgoing_msgs_buffer.push(OutgoingMsg {
                             message: self.reject(message.piece),
                             ordered: false,
                         });
                     } else {
                         let metadata_piece = &info_bytes[start_offset..];
-                        outgoing_msgs_buffer.push(OutgoingMsg {
+                        connection.outgoing_msgs_buffer.push(OutgoingMsg {
                             message: self.data(message.piece, metadata_piece),
                             ordered: false,
                         });
                     }
                 } else {
-                    outgoing_msgs_buffer.push(OutgoingMsg {
+                    connection.outgoing_msgs_buffer.push(OutgoingMsg {
                         message: self.reject(message.piece),
                         ordered: false,
                     });
@@ -200,7 +299,7 @@ impl ExtensionProtocol for MetadataExtension {
 
                 self.completed.set(piece_idx, true);
                 if let Some(index) = self.inflight.first_zero() {
-                    outgoing_msgs_buffer.push(OutgoingMsg {
+                    connection.outgoing_msgs_buffer.push(OutgoingMsg {
                         message: self.request(index as i32),
                         ordered: false,
                     });

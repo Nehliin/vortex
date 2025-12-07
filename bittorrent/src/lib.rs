@@ -34,6 +34,8 @@ pub use peer_protocol::*;
 pub use peer_protocol::PeerId;
 pub use peer_protocol::generate_peer_id;
 
+use crate::peer_comm::peer_connection::DisconnectReason;
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Encountered IO issue: {0}")]
@@ -160,12 +162,36 @@ impl InitializedState {
     pub(crate) fn update_torrent_status(
         &mut self,
         connections: &mut SlotMap<ConnectionId, PeerConnection>,
+        event_tx: &mut Producer<'_, TorrentEvent, 512>,
     ) {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             match completed_piece.hash_matched {
                 Ok(hash_matched) => {
                     if hash_matched {
                         self.piece_selector.mark_complete(completed_piece.index);
+                        if !self.is_complete && self.piece_selector.completed_all() {
+                            log::info!("Torrent complete!");
+                            self.is_complete = true;
+                            if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
+                                log::error!("Torrent completion event missed");
+                            }
+                            // We are no longer interestead in any of the
+                            // peers
+                            for (_, peer) in connections.iter_mut() {
+                                peer.not_interested(false);
+                                // If the peer is upload only and
+                                // we are upload only there is no reason
+                                // to stay connected
+                                if peer.is_upload_only {
+                                    peer.pending_disconnect =
+                                        Some(DisconnectReason::RedundantConnection);
+                                }
+                                // Notify all extensions that the torrent completed
+                                for (_, extension) in peer.extensions.iter_mut() {
+                                    extension.on_torrent_complete(&mut peer.outgoing_msgs_buffer);
+                                }
+                            }
+                        }
                         for (conn_id, peer) in connections.iter_mut() {
                             if let Some(bitfield) =
                                 self.piece_selector.interesting_peer_pieces(conn_id)
@@ -176,19 +202,17 @@ impl InitializedState {
                             {
                                 // We are no longer interestead in this peer
                                 peer.not_interested(false);
+                                // if it's upload only we can close the
+                                // connection since it will never download from
+                                // us
+                                if peer.is_upload_only {
+                                    peer.pending_disconnect =
+                                        Some(DisconnectReason::RedundantConnection);
+                                }
                             }
                             peer.have(completed_piece.index as i32, false);
                         }
                         log::debug!("Piece {} completed!", completed_piece.index);
-
-                        if self.piece_selector.completed_all() {
-                            self.is_complete = true;
-                            // We are no longer interestead in any of the
-                            // peers
-                            for (_, peer) in connections.iter_mut() {
-                                peer.not_interested(false);
-                            }
-                        }
                     } else {
                         // Only need to mark this as not hashing when it fails
                         // since otherwise it will be marked as completed and this is moot
@@ -675,13 +699,10 @@ mod test_utils {
     }
 
     pub fn setup_test() -> State {
-        let files: HashMap<String, Vec<u8>> = [
-            ("f1.txt".to_owned(), vec![1_u8; 64]),
-            ("f2.txt".to_owned(), vec![2_u8; 100]),
-            ("f3.txt".to_owned(), vec![3_u8; SUBPIECE_SIZE as usize * 16]),
-        ]
-        .into_iter()
-        .collect();
+        let files: HashMap<String, Vec<u8>> =
+            [("f3.txt".to_owned(), vec![3_u8; SUBPIECE_SIZE as usize * 16])]
+                .into_iter()
+                .collect();
         let torrent_name = format!("{}", rand::random::<u16>());
         let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
         let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));

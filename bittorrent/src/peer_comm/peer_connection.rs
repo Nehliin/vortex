@@ -18,7 +18,7 @@ use crate::{
     event_loop::{ConnectionId, EventData, EventId},
     file_store::FileStore,
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
-    peer_comm::extended_protocol::{EXTENSIONS, MetadataExtension},
+    peer_comm::extended_protocol::{EXTENSIONS, UPLOAD_ONLY, init_extension},
     peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
 };
@@ -132,6 +132,9 @@ pub enum DisconnectReason {
     ProtocolError(&'static str),
     #[error("Invalid message received")]
     InvalidMessage,
+    /// The example of this is that both peers are upload only
+    #[error("Connection is no longer meaningful for any peer")]
+    RedundantConnection,
 }
 
 pub enum ConnectionState {
@@ -189,6 +192,12 @@ pub struct PeerConnection {
     pub last_seen: Instant,
     // Is this peer in endgame mode?
     pub endgame: bool,
+    // Is this peer a pure seeder?
+    // This might not always be accurate since
+    // it's not updated after 'Have' messages.
+    // But it's fine to be conservative and assume
+    // upload_only is false for pure seeders.
+    pub is_upload_only: bool,
     // Time since last received subpiece request, used to timeout
     // requests
     pub last_received_subpiece: Option<Instant>,
@@ -233,6 +242,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             peer_choking: true,
             peer_interested: false,
             endgame: false,
+            is_upload_only: false,
             last_received_subpiece: None,
             fast_ext: parsed_handshake.fast_ext,
             extended_extension: parsed_handshake.extension_protocol,
@@ -758,6 +768,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     ));
                     return;
                 }
+                self.is_upload_only = true;
                 if let Some((_, torrent_state)) = state_ref.state() {
                     if torrent_state.piece_selector.bitfield_received(self.conn_id) {
                         log::warn!(
@@ -836,6 +847,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                     let field = field.into_boxed_bitslice();
                     log::info!("[Peer: {}] Bifield received", self.peer_id);
+                    // Does the peer have all pieces?
+                    if field.all() {
+                        self.is_upload_only = true;
+                    }
                     let is_interesting = torrent_state
                         .piece_selector
                         .peer_bitfield(self.conn_id, field);
@@ -1106,7 +1121,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             }
             PeerMessage::Extended { id, data } => {
                 if id == 0 {
-                    log::debug!("Extended message handshake");
+                    log::debug!(
+                        "[Peer: {}] Extended message handshake from peer",
+                        self.peer_id
+                    );
                     // ID for an extension is the message id that should be used
                     // in further communication ex ut_metadata = 3 then the id should be 3
                     // when sending such extension messages
@@ -1124,53 +1142,54 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         };
 
                         for (key, val) in m {
-                            if key.as_slice() == b"ut_metadata".as_slice() {
-                                let Some(id) = val.as_u64().and_then(|val| u8::try_from(val).ok())
-                                else {
-                                    self.pending_disconnect = Some(
-                                        DisconnectReason::ProtocolError("metadata id not an u8"),
+                            let Some(id) = val.as_u64().and_then(|val| u8::try_from(val).ok())
+                            else {
+                                self.pending_disconnect =
+                                    Some(DisconnectReason::ProtocolError("metadata id not an u8"));
+                                return;
+                            };
+                            if self.extensions.contains_key(&id) {
+                                continue;
+                            }
+                            let Ok(extension_name) = str::from_utf8(key.as_slice()) else {
+                                self.pending_disconnect =
+                                    Some(DisconnectReason::ProtocolError("Invalid extension name"));
+                                return;
+                            };
+                            log::debug!(
+                                "[Peer: {}] Claims to support: {extension_name}",
+                                self.peer_id
+                            );
+                            match init_extension(
+                                id,
+                                extension_name,
+                                dict,
+                                state_ref,
+                                &mut self.outgoing_msgs_buffer,
+                            ) {
+                                Ok(Some(extension)) => {
+                                    let id = EXTENSIONS
+                                        .iter()
+                                        .find_map(|(str, id)| {
+                                            (str == &extension_name).then_some(id)
+                                        })
+                                        .expect("Extension ID expected to be found");
+                                    self.extensions.insert(*id, extension);
+                                }
+                                Ok(None) => {
+                                    log::debug!(
+                                        "[Peer: {}] unsupported extension: {extension_name}",
+                                        self.peer_id
                                     );
-                                    return;
-                                };
-                                if self.extensions.contains_key(&id) {
-                                    continue;
                                 }
-                                let Some(metadata_size) = dict
-                                    .get("metadata_size".as_bytes())
-                                    .and_then(|val| val.as_u64())
-                                else {
-                                    self.pending_disconnect = Some(
-                                        DisconnectReason::ProtocolError("metadata size not valid"),
+                                Err(disconnect_reason) => {
+                                    log::debug!(
+                                        "[Peer: {}] Failed to init extension: {extension_name}",
+                                        self.peer_id
                                     );
+                                    self.pending_disconnect = Some(disconnect_reason);
                                     return;
-                                };
-                                if let Some((file_and_meta, _)) = state_ref.state() {
-                                    let expected_size =
-                                        file_and_meta.metadata.construct_info().encode().len();
-                                    if metadata_size != expected_size as u64 {
-                                        self.pending_disconnect =
-                                            Some(DisconnectReason::ProtocolError(
-                                                "metadata size not valid",
-                                            ));
-                                        return;
-                                    }
                                 }
-
-                                let mut metadata =
-                                    MetadataExtension::new(id, metadata_size as usize);
-                                if !state_ref.is_initialzied() {
-                                    for i in 0..16.min(metadata.num_pieces()) {
-                                        self.outgoing_msgs_buffer.push(OutgoingMsg {
-                                            message: metadata.request(i as i32),
-                                            ordered: false,
-                                        });
-                                    }
-                                }
-                                let id = EXTENSIONS
-                                    .iter()
-                                    .find_map(|(str, id)| (str == &"ut_metadata").then_some(id))
-                                    .expect("Extension ID expected to be found");
-                                self.extensions.insert(*id, Box::new(metadata));
                             }
                         }
 
@@ -1179,13 +1198,18 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         {
                             self.max_queue_size = max_queue_size as usize;
                         }
+                        if let Some(upload_only) = dict
+                            .get(UPLOAD_ONLY.as_bytes())
+                            .and_then(|val| val.as_u64())
+                        {
+                            self.is_upload_only = upload_only > 0;
+                        }
                     }
-                } else if let Some(ext) = self.extensions.get_mut(&id) {
-                    if let Err(disconnect_reason) =
-                        ext.handle_message(data, state_ref, &mut self.outgoing_msgs_buffer)
-                    {
+                } else if let Some(mut ext) = self.extensions.remove(&id) {
+                    if let Err(disconnect_reason) = ext.handle_message(data, state_ref, self) {
                         self.pending_disconnect = Some(disconnect_reason);
                     }
+                    self.extensions.insert(id, ext);
                 } else {
                     log::error!("Unexpected extended msg");
                 }
