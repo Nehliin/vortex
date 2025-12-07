@@ -297,10 +297,10 @@ fn have_without_interest() {
 
         let (_, torrent_state) = state_ref.state().unwrap();
         // Needed to avoid hitting asserts
-        torrent_state.piece_selector.mark_complete(8);
+        torrent_state.piece_selector.mark_complete(7);
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
         let key_a = connections.insert_with_key(|k| generate_peer(true, k));
-        connections[key_a].handle_message(PeerMessage::Have { index: 8 }, &mut state_ref, scope);
+        connections[key_a].handle_message(PeerMessage::Have { index: 7 }, &mut state_ref, scope);
         // Interpret the Have as HaveNone, the bitfield might have been omitted
         let (_, torrent_state) = state_ref.state().unwrap();
         assert!(
@@ -365,7 +365,7 @@ fn slow_start() {
             PeerMessage::Piece {
                 index: 1,
                 begin: 0,
-                data: vec![1; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -374,7 +374,7 @@ fn slow_start() {
             PeerMessage::Piece {
                 index: 1,
                 begin: SUBPIECE_SIZE,
-                data: vec![2; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -417,7 +417,7 @@ fn slow_start() {
             PeerMessage::Piece {
                 index: 2,
                 begin: 0,
-                data: vec![1; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -426,7 +426,7 @@ fn slow_start() {
             PeerMessage::Piece {
                 index: 2,
                 begin: SUBPIECE_SIZE,
-                data: vec![2; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -462,7 +462,7 @@ fn slow_start() {
             PeerMessage::Piece {
                 index: 3,
                 begin: 0,
-                data: vec![1; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -471,7 +471,7 @@ fn slow_start() {
             PeerMessage::Piece {
                 index: 3,
                 begin: SUBPIECE_SIZE,
-                data: vec![2; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -522,7 +522,7 @@ fn desired_queue_size() {
             PeerMessage::Piece {
                 index,
                 begin: 0,
-                data: vec![1; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -531,7 +531,7 @@ fn desired_queue_size() {
             PeerMessage::Piece {
                 index,
                 begin: SUBPIECE_SIZE,
-                data: vec![2; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -624,7 +624,7 @@ fn peer_choke_recv_supports_fast() {
             PeerMessage::Piece {
                 index: first_piece,
                 begin: 0,
-                data: vec![1; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -633,7 +633,7 @@ fn peer_choke_recv_supports_fast() {
             PeerMessage::Piece {
                 index: first_piece,
                 begin: SUBPIECE_SIZE,
-                data: vec![2; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -733,7 +733,7 @@ fn peer_choke_recv_does_not_support_fast() {
             PeerMessage::Piece {
                 index: first_piece,
                 begin: 0,
-                data: vec![1; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -742,7 +742,7 @@ fn peer_choke_recv_does_not_support_fast() {
             PeerMessage::Piece {
                 index: first_piece,
                 begin: SUBPIECE_SIZE,
-                data: vec![2; SUBPIECE_SIZE as usize].into(),
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             scope,
@@ -1525,12 +1525,7 @@ fn reject_request_requests_new() {
         let (_, torrent_state) = state_ref.state().unwrap();
         assert_eq!(torrent_state.num_allocated(), 1);
         assert!(!torrent_state.piece_selector.is_allocated(index as usize));
-        // Last piece only have one subpiece
-        if torrent_state.pieces[8].is_some() {
-            assert_eq!(connections[key_a].inflight.len(), 2);
-        } else {
-            assert_eq!(connections[key_a].inflight.len(), 3);
-        }
+        assert_eq!(connections[key_a].inflight.len(), 3);
     });
 }
 
@@ -1622,11 +1617,7 @@ fn endgame_mode() {
 
         connections[key_b].handle_message(PeerMessage::HaveAll, &mut state_ref, scope);
 
-        // it has a annyoing content so take it out of equation
         let (file_and_info, torrent_state) = state_ref.state().unwrap();
-        torrent_state.piece_selector.mark_complete(0);
-        // same
-        torrent_state.piece_selector.mark_complete(8);
 
         // Set up so that half of the pieces have been requested and that a part of those have been
         // completed

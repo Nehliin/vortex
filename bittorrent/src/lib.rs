@@ -700,8 +700,6 @@ mod test_utils {
 
     pub fn setup_test() -> State {
         let files: HashMap<String, Vec<u8>> = [
-            ("f1.txt".to_owned(), vec![1_u8; 64]),
-            ("f2.txt".to_owned(), vec![2_u8; 100]),
             ("f3.txt".to_owned(), vec![3_u8; SUBPIECE_SIZE as usize * 16]),
         ]
         .into_iter()
