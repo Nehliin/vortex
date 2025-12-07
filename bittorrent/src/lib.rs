@@ -182,7 +182,7 @@ impl InitializedState {
                                 // If the peer is upload only and
                                 // we are upload only there is no reason
                                 // to stay connected
-                                if !peer.is_upload_only {
+                                if peer.is_upload_only {
                                     peer.pending_disconnect =
                                         Some(DisconnectReason::RedundantConnection);
                                 }

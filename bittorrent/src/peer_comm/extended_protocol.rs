@@ -128,7 +128,7 @@ impl UploadOnlyExtension {
         let enabled = if upload_only { 1 } else { 0 };
         PeerMessage::Extended {
             id: self.id,
-            data: bt_bencode::to_vec(&enabled).expect("valid bencode").into(),
+            data: vec![enabled].into(),
         }
     }
 }
