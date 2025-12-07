@@ -194,7 +194,7 @@ pub struct PeerConnection {
     // it's not updated after 'Have' messages.
     // But it's fine to be conservative and assume
     // upload_only is false for pure seeders.
-    pub upload_only: bool,
+    pub is_upload_only: bool,
     // Time since last received subpiece request, used to timeout
     // requests
     pub last_received_subpiece: Option<Instant>,
@@ -239,7 +239,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             peer_choking: true,
             peer_interested: false,
             endgame: false,
-            upload_only: false,
+            is_upload_only: false,
             last_received_subpiece: None,
             fast_ext: parsed_handshake.fast_ext,
             extended_extension: parsed_handshake.extension_protocol,
@@ -765,7 +765,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     ));
                     return;
                 }
-                self.upload_only = true;
+                self.is_upload_only = true;
                 if let Some((_, torrent_state)) = state_ref.state() {
                     if torrent_state.piece_selector.bitfield_received(self.conn_id) {
                         log::warn!(
@@ -846,7 +846,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     log::info!("[Peer: {}] Bifield received", self.peer_id);
                     // Does the peer have all pieces?
                     if field.all() {
-                        self.upload_only = true;
+                        self.is_upload_only = true;
                     }
                     let is_interesting = torrent_state
                         .piece_selector
@@ -1199,7 +1199,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             .get(UPLOAD_ONLY.as_bytes())
                             .and_then(|val| val.as_u64())
                         {
-                            self.upload_only = upload_only > 0;
+                            self.is_upload_only = upload_only > 0;
                         }
                     }
                 } else if let Some(mut ext) = self.extensions.remove(&id) {
