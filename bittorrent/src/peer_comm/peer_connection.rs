@@ -132,6 +132,9 @@ pub enum DisconnectReason {
     ProtocolError(&'static str),
     #[error("Invalid message received")]
     InvalidMessage,
+    /// The example of this is that both peers are upload only
+    #[error("Connection is no longer meaningful for any peer")]
+    RedundantConnection,
 }
 
 pub enum ConnectionState {

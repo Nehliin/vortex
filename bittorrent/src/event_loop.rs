@@ -330,8 +330,6 @@ impl<'scope, 'state: 'scope> EventLoop {
 
         let mut state_ref = state.as_ref();
 
-        // Used to avoid spamming torrent complete events
-        let mut prev_state_torrent_complete = false;
         let mut prev_state_initialized = state_ref.is_initialzied();
         // lambda to be able to catch errors an always unregistering the read ring
         let result = rayon::in_place_scope(|scope| {
@@ -446,7 +444,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 }
 
                 if let Some((_, torrent_state)) = state_ref.state() {
-                    torrent_state.update_torrent_status(&mut self.connections);
+                    torrent_state.update_torrent_status(&mut self.connections, &mut event_tx);
                 }
 
                 for (conn_id, connection) in self.connections.iter_mut() {
@@ -475,17 +473,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                 if shutting_down && self.connections.is_empty() {
                     log::info!("All connections closed, shutdown complete");
                     return Ok(());
-                }
-
-                if let Some((_, torrent_state)) = state_ref.state()
-                    && torrent_state.is_complete
-                    && !prev_state_torrent_complete
-                {
-                    log::info!("Torrent complete!");
-                    if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
-                        log::error!("Torrent completion event missed");
-                    }
-                    prev_state_torrent_complete = true;
                 }
             }
         });
