@@ -765,6 +765,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     ));
                     return;
                 }
+                self.upload_only = true;
                 if let Some((_, torrent_state)) = state_ref.state() {
                     if torrent_state.piece_selector.bitfield_received(self.conn_id) {
                         log::warn!(
@@ -843,6 +844,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                     let field = field.into_boxed_bitslice();
                     log::info!("[Peer: {}] Bifield received", self.peer_id);
+                    // Does the peer have all pieces?
+                    if field.all() {
+                        self.upload_only = true;
+                    }
                     let is_interesting = torrent_state
                         .piece_selector
                         .peer_bitfield(self.conn_id, field);
