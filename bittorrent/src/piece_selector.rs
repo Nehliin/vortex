@@ -62,8 +62,12 @@ impl PieceSelector {
         let allocated_pieces = completed_pieces.clone();
         let hashing_pieces = completed_pieces.clone();
         let piece_length = torrent_info.piece_length;
-        let last_piece_length = torrent_info.length % piece_length;
-
+        let mut last_piece_length = torrent_info.length % piece_length;
+        // if it's perfectly divisible the last piece size is the normal
+        // piece_length
+        if last_piece_length == 0 {
+            last_piece_length = piece_length;
+        }
         Self {
             completed_pieces,
             allocated_pieces,
@@ -306,6 +310,7 @@ pub struct Piece {
 
 impl Piece {
     pub fn new(index: i32, lenght: u32, piece_view: WritablePieceFileView) -> Self {
+        assert!(lenght > 0, "Piece lenght must be non zero");
         let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
             SUBPIECE_SIZE
         } else {
@@ -327,7 +332,6 @@ impl Piece {
     /// to download
     pub fn allocate_remaining_subpieces(&mut self) -> VecDeque<Subpiece> {
         let mut deque = VecDeque::with_capacity(self.completed_subpieces.len());
-        // TODO: This panicked?
         let last_subpiece_index = self.completed_subpieces.len() - 1;
         // Do we need to adjust the piece size of the last subpiece?
         let mut last_is_last_index = false;
