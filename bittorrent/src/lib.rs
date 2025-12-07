@@ -699,11 +699,10 @@ mod test_utils {
     }
 
     pub fn setup_test() -> State {
-        let files: HashMap<String, Vec<u8>> = [
-            ("f3.txt".to_owned(), vec![3_u8; SUBPIECE_SIZE as usize * 16]),
-        ]
-        .into_iter()
-        .collect();
+        let files: HashMap<String, Vec<u8>> =
+            [("f3.txt".to_owned(), vec![3_u8; SUBPIECE_SIZE as usize * 16])]
+                .into_iter()
+                .collect();
         let torrent_name = format!("{}", rand::random::<u16>());
         let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
         let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
