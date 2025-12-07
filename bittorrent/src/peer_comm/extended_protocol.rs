@@ -52,7 +52,7 @@ pub fn init_extension<'state>(
             }
             Ok(Some(Box::new(metadata)))
         }
-        UPLOAD_ONLY => Ok(Some(Box::new(UploadOnly::new(id)))),
+        UPLOAD_ONLY => Ok(Some(Box::new(UploadOnlyExtension::new(id)))),
         _ => Ok(None),
     }
 }
@@ -79,11 +79,7 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef) -> PeerMessage {
             "metadata_size",
             bt_bencode::to_value(&metadata_size).unwrap(),
         );
-        let upload_only = if state.piece_selector.completed_all() {
-            1
-        } else {
-            0
-        };
+        let upload_only = if state.is_complete { 1 } else { 0 };
         handshake.insert(
             UPLOAD_ONLY,
             bt_bencode::value::to_value(&upload_only).unwrap(),
@@ -110,25 +106,34 @@ pub trait ExtensionProtocol {
         // from inside an extension handler
         connection: &mut PeerConnection,
     ) -> Result<(), DisconnectReason>;
-    // TODO: fn tick?
+
+    fn on_torrent_complete(&mut self, _outgoing_msgs_buffer: &mut Vec<OutgoingMsg>) {}
 }
 
-// An extension protocol supported by libtorrent
+/// An extension protocol supported by libtorrent
+/// to indicate that the peer is a pure seeder
 #[derive(Debug, Deserialize, Serialize)]
-pub struct UploadOnly {
+pub struct UploadOnlyExtension {
     // The peers ID for the extension
     pub id: u8,
     pub enabled: bool,
 }
 
-// TODO: send upload only
-impl UploadOnly {
+impl UploadOnlyExtension {
     pub fn new(id: u8) -> Self {
         Self { id, enabled: false }
     }
+
+    pub fn upload_only(&mut self, upload_only: bool) -> PeerMessage {
+        let enabled = if upload_only { 1 } else { 0 };
+        PeerMessage::Extended {
+            id: self.id,
+            data: bt_bencode::to_vec(&enabled).expect("valid bencode").into(),
+        }
+    }
 }
 
-impl ExtensionProtocol for UploadOnly {
+impl ExtensionProtocol for UploadOnlyExtension {
     fn handle_message<'state>(
         &mut self,
         mut data: Bytes,
@@ -138,8 +143,15 @@ impl ExtensionProtocol for UploadOnly {
         let enabled = data
             .try_get_u8()
             .map_err(|_err| DisconnectReason::InvalidMessage)?;
-        connection.upload_only = enabled > 0;
+        connection.is_upload_only = enabled > 0;
         Ok(())
+    }
+
+    fn on_torrent_complete(&mut self, outgoing_msgs_buffer: &mut Vec<OutgoingMsg>) {
+        outgoing_msgs_buffer.push(OutgoingMsg {
+            message: self.upload_only(true),
+            ordered: true,
+        });
     }
 }
 
