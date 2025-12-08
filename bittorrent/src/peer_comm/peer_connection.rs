@@ -1174,6 +1174,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                             (str == &extension_name).then_some(id)
                                         })
                                         .expect("Extension ID expected to be found");
+                                    log::debug!(
+                                        "[Peer: {}] Initialized extension: {extension_name}",
+                                        self.peer_id
+                                    );
                                     self.extensions.insert(*id, extension);
                                 }
                                 Ok(None) => {
