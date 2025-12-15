@@ -5,6 +5,7 @@ use std::{
     net::{SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
+    time::{Duration, Instant},
 };
 
 use ahash::HashSetExt;
@@ -112,6 +113,7 @@ pub enum TorrentEvent {
 const MAX_UNCHOKED: u32 = 8;
 const UNCHOKE_INTERVAL: u32 = 15;
 const OPTIMISTIC_UNCHOKE_INTERVAL: u32 = 30;
+const SEEDING_PIECE_QUOTA: u32 = 20;
 
 pub struct InitializedState {
     piece_selector: PieceSelector,
@@ -287,17 +289,25 @@ impl InitializedState {
         self.num_unchoked < self.max_unchoked
     }
 
-    /// Determine the most suited peers to be unchoked based on throughput.
-    /// Some unchoke slots are left for optimistic unchokes
+    /// Determine the most suited peers to be unchoked based on the selected unchoking strategy.
+    /// Some unchoke slots are left for optimistic unchokes. The strategy currently is only
+    /// affected if the torrent is completed or not.
     pub fn recalculate_unchokes(
         &mut self,
         connections: &mut SlotMap<ConnectionId, PeerConnection>,
     ) {
+        struct ComparisonData {
+            is_choking: bool,
+            uploaded_since_unchoked: u64,
+            downloaded_in_last_round: u64,
+            uploaded_in_last_round: u64,
+            last_unchoked: Option<Instant>,
+        }
         log::info!("Recalculating unchokes");
         let mut peers = Vec::with_capacity(connections.len());
         for (id, peer) in connections.iter_mut() {
             if !peer.peer_interested || peer.pending_disconnect.is_some() {
-                peer.network_stats.downloaded_in_last_round = 0;
+                peer.network_stats.reset_round();
                 if !peer.is_choking {
                     if peer.optimistically_unchoked {
                         peer.optimistically_unchoked = false;
@@ -309,18 +319,56 @@ impl InitializedState {
 
                 continue;
             }
-            peers.push((id, peer.network_stats.downloaded_in_last_round));
+            peers.push((
+                id,
+                ComparisonData {
+                    is_choking: peer.is_choking,
+                    uploaded_since_unchoked: peer.network_stats.upload_since_unchoked,
+                    downloaded_in_last_round: peer.network_stats.downloaded_in_last_round,
+                    uploaded_in_last_round: peer.network_stats.uploaded_in_last_round,
+                    last_unchoked: peer.last_unchoked,
+                },
+            ));
         }
-        peers.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
+        if !self.is_complete {
+            // Sort based of downloaded_in_last_round
+            peers.sort_unstable_by(|(_, a), (_, b)| {
+                a.downloaded_in_last_round
+                    .cmp(&b.downloaded_in_last_round)
+                    .reverse()
+            });
+        } else {
+            let piece_length = self.piece_selector.avg_piece_length();
+            let quota_bytes = (piece_length * SEEDING_PIECE_QUOTA) as u64;
+            // The torrent is completed. Do round robin sorting like in libtorrent
+            peers.sort_unstable_by(|(_, a), (_, b)| {
+                let a_quota_complete = !a.is_choking
+                    && a.uploaded_since_unchoked > quota_bytes
+                    && a.last_unchoked
+                        .is_some_and(|time| time.elapsed() > Duration::from_mins(1));
+                let b_quota_complete = !b.is_choking
+                    && b.uploaded_since_unchoked > quota_bytes
+                    && b.last_unchoked
+                        .is_some_and(|time| time.elapsed() > Duration::from_mins(1));
+                if a_quota_complete != b_quota_complete {
+                    a_quota_complete.cmp(&b_quota_complete)
+                } else if a.uploaded_in_last_round != b.uploaded_in_last_round {
+                    a.uploaded_in_last_round
+                        .cmp(&b.uploaded_in_last_round)
+                        .reverse()
+                } else {
+                    a.last_unchoked
+                        .map_or(Duration::MAX, |time| time.elapsed())
+                        .cmp(&b.last_unchoked.map_or(Duration::MAX, |time| time.elapsed()))
+                        .reverse()
+                }
+            });
+        }
         let optimistic_unchoke_slots = std::cmp::max(1, self.max_unchoked / 5);
         let mut remaining_unchoke_slots = self.max_unchoked - optimistic_unchoke_slots;
         for (id, _) in peers {
             let peer = &mut connections[id];
-            log::trace!(
-                "Peer: {id:?}, last_round: {}",
-                peer.network_stats.downloaded_in_last_round
-            );
-            peer.network_stats.downloaded_in_last_round = 0;
+            peer.network_stats.reset_round();
             if remaining_unchoke_slots > 0 {
                 if peer.is_choking {
                     log::debug!(

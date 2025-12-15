@@ -3487,3 +3487,256 @@ fn disconnect_upload_only_peer_when_no_longer_interesting() {
         );
     });
 }
+
+#[test]
+fn seeding_round_robin_rotation_after_quota() {
+    let mut download_state = setup_seeding_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        // Verify we're in seeding mode
+        assert!(torrent_state.is_complete);
+
+        torrent_state.max_unchoked = 3;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create 3 interested peers
+        let peer_a = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_a].peer_interested = true;
+
+        let peer_b = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_b].peer_interested = true;
+
+        let peer_c = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_c].peer_interested = true;
+
+        // Unchoke peer A manually and set it up as having completed its quota
+        connections[peer_a].is_choking = false;
+        connections[peer_a].last_unchoked = Some(Instant::now() - Duration::from_secs(90)); // 1.5 minutes ago
+        torrent_state.num_unchoked = 1;
+
+        // Calculate quota: piece_length * SEEDING_PIECE_QUOTA
+        // piece_length = SUBPIECE_SIZE * 2 = 32768
+        // quota = 32768 * 20 = 655360 bytes
+        let piece_length = torrent_state.piece_selector.avg_piece_length();
+        let quota_bytes = (piece_length * 20) as u64; // SEEDING_PIECE_QUOTA = 20
+
+        // Set peer A as having uploaded more than quota
+        connections[peer_a].network_stats.upload_since_unchoked = quota_bytes + 100_000;
+        connections[peer_a].network_stats.uploaded_in_last_round = 50_000;
+
+        // Peers B and C have never been unchoked
+        assert!(connections[peer_b].is_choking);
+        assert!(connections[peer_c].is_choking);
+        assert_eq!(connections[peer_b].last_unchoked, None);
+        assert_eq!(connections[peer_c].last_unchoked, None);
+
+        // Recalculate unchokes
+        torrent_state.recalculate_unchokes(&mut connections);
+
+        // Peer A should now be choked (completed quota)
+        assert!(
+            connections[peer_a].is_choking,
+            "Peer A should be choked after completing quota"
+        );
+
+        // At least one of peers B or C should be unchoked
+        let b_unchoked = !connections[peer_b].is_choking;
+        let c_unchoked = !connections[peer_c].is_choking;
+        assert!(
+            b_unchoked && c_unchoked,
+            "Both of peers B or C should be unchoked"
+        );
+
+        // Verify num_unchoked is consistent
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked as usize, 2);
+    });
+}
+
+#[test]
+fn seeding_quota_not_met_keeps_unchoked() {
+    let mut download_state = setup_seeding_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        // Verify we're in seeding mode
+        assert!(torrent_state.is_complete);
+
+        torrent_state.max_unchoked = 3;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create 3 interested peers
+        let peer_a = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_a].peer_interested = true;
+
+        let peer_b = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_b].peer_interested = true;
+
+        let peer_c = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_c].peer_interested = true;
+
+        // Unchoke peer A manually
+        connections[peer_a].is_choking = false;
+        connections[peer_a].last_unchoked = Some(Instant::now() - Duration::from_secs(90)); // 1.5 minutes ago
+        torrent_state.num_unchoked = 1;
+
+        // Calculate quota
+        let piece_length = torrent_state.piece_selector.avg_piece_length();
+        let quota_bytes = (piece_length * 20) as u64; // SEEDING_PIECE_QUOTA = 20
+
+        // Set peer A as having uploaded LESS than quota (only half)
+        connections[peer_a].network_stats.upload_since_unchoked = quota_bytes / 2;
+        connections[peer_a].network_stats.uploaded_in_last_round = 50_000;
+
+        // Recalculate unchokes
+        torrent_state.recalculate_unchokes(&mut connections);
+
+        // Peer A should remain unchoked (quota not met)
+        assert!(
+            !connections[peer_a].is_choking,
+            "Peer A should remain unchoked since quota not met"
+        );
+
+        // Verify num_unchoked is consistent
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+    });
+}
+
+#[test]
+fn seeding_time_threshold_not_met_keeps_unchoked() {
+    let mut download_state = setup_seeding_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        // Verify we're in seeding mode
+        assert!(torrent_state.is_complete);
+
+        torrent_state.max_unchoked = 3;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Create 3 interested peers
+        let peer_a = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_a].peer_interested = true;
+
+        let peer_b = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_b].peer_interested = true;
+
+        let peer_c = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_c].peer_interested = true;
+
+        // Unchoke peer A manually but only 30 seconds ago (< 1 minute)
+        connections[peer_a].is_choking = false;
+        connections[peer_a].last_unchoked = Some(Instant::now() - Duration::from_secs(30));
+        torrent_state.num_unchoked = 1;
+
+        // Calculate quota
+        let piece_length = torrent_state.piece_selector.avg_piece_length();
+        let quota_bytes = (piece_length * 20) as u64; // SEEDING_PIECE_QUOTA = 20
+
+        // Set peer A as having uploaded MORE than quota, but not enough time has passed
+        connections[peer_a].network_stats.upload_since_unchoked = quota_bytes + 100_000;
+        connections[peer_a].network_stats.uploaded_in_last_round = 50_000;
+
+        // Recalculate unchokes
+        torrent_state.recalculate_unchokes(&mut connections);
+
+        // Peer A should remain unchoked (time threshold not met)
+        assert!(
+            !connections[peer_a].is_choking,
+            "Peer A should remain unchoked since time threshold (1 minute) not met"
+        );
+
+        // Verify num_unchoked is consistent
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+    });
+}
+
+#[test]
+fn seeding_quota_complete_peers_deprioritized() {
+    let mut download_state = setup_seeding_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (_, torrent_state) = state_ref.state().unwrap();
+
+        // Verify we're in seeding mode
+        assert!(torrent_state.is_complete);
+
+        // Set max_unchoked to 2 so we have limited slots
+        torrent_state.max_unchoked = 3;
+
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+
+        // Calculate quota
+        let piece_length = torrent_state.piece_selector.avg_piece_length();
+        let quota_bytes = (piece_length * 20) as u64; // SEEDING_PIECE_QUOTA = 20
+
+        // Create peer A and B - both unchoked and have completed their quota
+        let peer_a = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_a].peer_interested = true;
+        connections[peer_a].is_choking = false;
+        connections[peer_a].last_unchoked = Some(Instant::now() - Duration::from_secs(90));
+        connections[peer_a].network_stats.upload_since_unchoked = quota_bytes + 100_000;
+        connections[peer_a].network_stats.uploaded_in_last_round = 50_000;
+
+        let peer_b = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_b].peer_interested = true;
+        connections[peer_b].is_choking = false;
+        connections[peer_b].last_unchoked = Some(Instant::now() - Duration::from_secs(120));
+        connections[peer_b].network_stats.upload_since_unchoked = quota_bytes + 80_000;
+        connections[peer_b].network_stats.uploaded_in_last_round = 30_000;
+
+        torrent_state.num_unchoked = 2;
+
+        // Create peer C and D - never been unchoked
+        let peer_c = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_c].peer_interested = true;
+
+        let peer_d = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[peer_d].peer_interested = true;
+
+        // Verify initial state: 2 unchoked (A and B, both quota complete)
+        assert_eq!(torrent_state.num_unchoked, 2);
+
+        // Recalculate unchokes with max_unchoked = 3
+        // With optimistic unchoke slots (3/5 = 0, max(1, 0) = 1), we have 2 regular slots
+        torrent_state.recalculate_unchokes(&mut connections);
+
+        // Peers A and B (quota complete) should be choked
+        // Peers C and/or D (never unchoked) should be unchoked
+        let a_choked = connections[peer_a].is_choking;
+        let b_choked = connections[peer_b].is_choking;
+        let c_unchoked = !connections[peer_c].is_choking;
+        let d_unchoked = !connections[peer_d].is_choking;
+
+        // At least one of the quota-complete peers should be choked
+        assert!(
+            a_choked && b_choked,
+            "Both quota-complete peer (A and B) should be choked"
+        );
+
+        // At least one of the never-unchoked peers should be unchoked
+        assert!(
+            c_unchoked && d_unchoked,
+            "Both never-unchoked peer (C and D) should be unchoked"
+        );
+
+        // Verify num_unchoked is consistent
+        let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
+        assert_eq!(torrent_state.num_unchoked as usize, actual_unchoked);
+        assert_eq!(torrent_state.num_unchoked as usize, 2);
+    });
+}

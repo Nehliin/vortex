@@ -156,9 +156,10 @@ impl RoutingTable {
                     }
                     return result;
                 } else if bucket.covers(&self.own_id) {
-                    result[0] = bucket_id;
+                    //result[0] = bucket_id;
                     let new_bucket = bucket.split();
-                    result[1] = self.buckets.insert(new_bucket);
+                    // result[1] was assigned here previously?
+                    self.buckets.insert(new_bucket);
                     return self.insert_node(node);
                 }
             }

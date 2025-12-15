@@ -285,6 +285,11 @@ impl PieceSelector {
     }
 
     #[inline]
+    pub fn avg_piece_length(&self) -> u32 {
+        self.piece_length
+    }
+
+    #[inline]
     pub fn avg_num_subpieces(&self) -> u32 {
         self.piece_length / SUBPIECE_SIZE as u32
     }

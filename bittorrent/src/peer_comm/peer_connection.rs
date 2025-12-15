@@ -142,7 +142,7 @@ pub enum ConnectionState {
     Disconnecting,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct NetworkStats {
     /// Download throughput in the current tick
     pub download_throughput: u64,
@@ -151,10 +151,23 @@ pub struct NetworkStats {
     /// Total piece data downloaded since last
     /// unchoke distribution round
     pub downloaded_in_last_round: u64,
+    /// Total piece data uploaded since last
+    /// unchoke distribution round
+    pub uploaded_in_last_round: u64,
     /// Upload throughput in the current tick
     pub upload_throughput: u64,
     /// Upload throughput in the previous tick
     pub prev_upload_throughput: u64,
+    /// Total upload since this peer was last unchoked
+    /// only relevant for unchoke algorithm atm
+    pub upload_since_unchoked: u64,
+}
+
+impl NetworkStats {
+    pub fn reset_round(&mut self) {
+        self.downloaded_in_last_round = 0;
+        self.uploaded_in_last_round = 0;
+    }
 }
 
 pub struct PeerConnection {
@@ -167,6 +180,8 @@ pub struct PeerConnection {
     /// Last time this peer was optimistically unchoked or None if
     /// it hasn't happen yet
     pub last_optimistically_unchoked: Option<Instant>,
+    /// Last time the peer was unchoked for any reason
+    pub last_unchoked: Option<Instant>,
     /// This side is choking the peer
     pub is_choking: bool,
     /// This side is interested what the peer has to offer
@@ -235,6 +250,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             conn_id,
             peer_id: parsed_handshake.peer_id,
             optimistically_unchoked: false,
+            last_unchoked: None,
             last_optimistically_unchoked: None,
             is_choking: true,
             is_interesting: false,
@@ -325,6 +341,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             log::info!("[Peer: {}] is unchoked", self.peer_id);
             torrent_state.num_unchoked += 1;
         }
+        // Reset when unchoked, regardless of previous state.
+        // (Shouldn't really happen when already unchoked though)
+        // This is so we don't end up prioritising this peer again
+        // for the next unchoke.
+        self.network_stats.upload_since_unchoked = 0;
+        self.last_unchoked = Some(Instant::now());
         self.is_choking = false;
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Unchoke,
@@ -353,6 +375,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
 
     fn send_piece(&mut self, index: i32, offset: i32, data: Bytes, ordered: bool) {
         self.network_stats.upload_throughput += data.len() as u64;
+        if !self.is_choking {
+            self.network_stats.upload_since_unchoked += data.len() as u64;
+            self.network_stats.uploaded_in_last_round += data.len() as u64;
+        }
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Piece {
                 index,
@@ -1174,6 +1200,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                             (str == &extension_name).then_some(id)
                                         })
                                         .expect("Extension ID expected to be found");
+                                    log::debug!(
+                                        "[Peer: {}] Initialized extension: {extension_name}",
+                                        self.peer_id
+                                    );
                                     self.extensions.insert(*id, extension);
                                 }
                                 Ok(None) => {
