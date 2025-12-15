@@ -368,10 +368,6 @@ impl InitializedState {
         let mut remaining_unchoke_slots = self.max_unchoked - optimistic_unchoke_slots;
         for (id, _) in peers {
             let peer = &mut connections[id];
-            log::trace!(
-                "Peer: {id:?}, last_round: {}",
-                peer.network_stats.downloaded_in_last_round
-            );
             peer.network_stats.reset_round();
             if remaining_unchoke_slots > 0 {
                 if peer.is_choking {
