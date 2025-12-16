@@ -20,15 +20,19 @@ use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    Command, Error, OPTIMISTIC_UNCHOKE_INTERVAL, PeerMetrics, State, StateRef, TorrentEvent,
-    UNCHOKE_INTERVAL,
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
-    peer_comm::{extended_protocol::extension_handshake_msg, peer_connection::ConnectionState},
-    peer_connection::{DisconnectReason, OutgoingMsg, PeerConnection},
-    peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
+    peer_comm::{
+        extended_protocol::extension_handshake_msg,
+        peer_connection::{ConnectionState, DisconnectReason, OutgoingMsg, PeerConnection},
+        peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
+    },
     piece_selector::{self, SUBPIECE_SIZE},
+    torrent::{
+        Command, Error, OPTIMISTIC_UNCHOKE_INTERVAL, PeerMetrics, State, StateRef, TorrentEvent,
+        UNCHOKE_INTERVAL,
+    },
 };
 
 const MAX_CONNECTIONS: usize = 100;
@@ -672,7 +676,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 );
                 // Trigger a write handshake here so we end up in the same code path
                 // as outgoing connections. It will simplify things greatly
-                self.write_handshake(sq, state.info_hash, socket, addr);
+                self.write_handshake(sq, *state.info_hash(), socket, addr);
             }
             EventType::Connect { socket, addr } => {
                 log::info!(
@@ -687,7 +691,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 let old = self.events.remove(io_event.event_data_idx).unwrap();
                 debug_assert!(matches!(old.typ, EventType::Dummy));
 
-                self.write_handshake(sq, state.info_hash, socket, addr);
+                self.write_handshake(sq, *state.info_hash(), socket, addr);
             }
             EventType::Write { socket, addr } => {
                 let fd = socket.as_raw_fd();
@@ -752,7 +756,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                     .unwrap();
                 let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
-                let parsed_handshake = parse_handshake(state.info_hash, handshake_data).unwrap();
+                let parsed_handshake = parse_handshake(*state.info_hash(), handshake_data).unwrap();
                 // Remove from pending connections if this was an outgoing connection
                 // For incoming connections (from Accept), this will be false and that's ok
                 self.pending_connections
@@ -1079,9 +1083,9 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Command;
     use crate::peer_protocol::generate_peer_id;
     use crate::test_utils::setup_test;
+    use crate::torrent::Command;
     use heapless::spsc::Queue;
     use io_uring::IoUring;
     use metrics::Key;

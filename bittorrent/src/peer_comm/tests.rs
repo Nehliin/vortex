@@ -7,7 +7,6 @@ use serde::Deserialize;
 use slotmap::SlotMap;
 
 use crate::{
-    TorrentEvent,
     event_loop::{ConnectionId, EventData, EventId, MAX_OUTSTANDING_REQUESTS, tick},
     io_utils::{BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
@@ -17,6 +16,7 @@ use crate::{
         generate_peer, setup_seeding_test, setup_test, setup_uninitialized_test,
         setup_uninitialized_test_with_metadata_size,
     },
+    torrent::TorrentEvent,
 };
 
 use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};

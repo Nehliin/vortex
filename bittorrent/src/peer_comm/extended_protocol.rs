@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
 use crate::{
-    StateRef, event_loop::MAX_OUTSTANDING_REQUESTS, peer_comm::peer_connection::PeerConnection,
-    piece_selector::SUBPIECE_SIZE,
+    event_loop::MAX_OUTSTANDING_REQUESTS, peer_comm::peer_connection::PeerConnection,
+    piece_selector::SUBPIECE_SIZE, torrent::StateRef,
 };
 
 use super::{
