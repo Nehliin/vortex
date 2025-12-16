@@ -4,7 +4,7 @@ use std::{
 };
 
 use metrics_exporter_prometheus::PrometheusBuilder;
-use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
+use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, PeerId};
 
 use crate::common::TempDir;
 mod common;
@@ -31,7 +31,7 @@ fn basic_seeded_download() {
     let metadata =
         lava_torrent::torrent::v1::Torrent::read_from_file("../assets/test-file-1.torrent")
             .unwrap();
-    let our_id = generate_peer_id();
+    let our_id = PeerId::generate();
     let mut torrent = Torrent::new(
         our_id,
         State::from_metadata_and_root(metadata, tmp_dir.path().clone()).unwrap(),

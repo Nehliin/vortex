@@ -9,7 +9,7 @@ mod torrent;
 
 use peer_comm::*;
 
-pub use peer_protocol::generate_peer_id;
+pub use peer_protocol::PeerId;
 pub use torrent::{Command, PeerMetrics, State, Torrent, TorrentEvent};
 
 #[cfg(feature = "fuzzing")]
@@ -24,7 +24,7 @@ mod test_utils {
         file_store::FileStore,
         peer_connection::PeerConnection,
         peer_protocol::ParsedHandshake,
-        peer_protocol::generate_peer_id,
+        peer_protocol::PeerId,
         piece_selector::SUBPIECE_SIZE,
         torrent::{InitializedState, State},
     };
@@ -42,7 +42,7 @@ mod test_utils {
             peer_addr,
             conn_id,
             ParsedHandshake {
-                peer_id: generate_peer_id(),
+                peer_id: PeerId::generate(),
                 fast_ext,
                 extension_protocol: fast_ext, // Set extension protocol to same as fast_ext for testing
             },

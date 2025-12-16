@@ -1083,7 +1083,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer_protocol::generate_peer_id;
+    use crate::peer_protocol::PeerId;
     use crate::test_utils::setup_test;
     use crate::torrent::Command;
     use heapless::spsc::Queue;
@@ -1128,7 +1128,7 @@ mod tests {
             s.spawn(move || {
                 let mut download_state = setup_test();
                 metrics::with_local_recorder(&debbuging, || {
-                    let our_id = generate_peer_id();
+                    let our_id = PeerId::generate();
                     let mut event_loop =
                         EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key());
                     let ring = IoUring::builder()
@@ -1196,7 +1196,7 @@ mod tests {
         let (event_tx, mut event_rx) = event_q.split();
 
         let (info_hash_tx, info_hash_rx) = std::sync::mpsc::channel();
-        let our_id = generate_peer_id();
+        let our_id = PeerId::generate();
 
         std::thread::scope(|s| {
             let event_loop_thread = s.spawn(move || {
@@ -1250,7 +1250,7 @@ mod tests {
 
                 // Send a valid handshake
                 let mut handshake = vec![0u8; HANDSHAKE_SIZE];
-                let peer_id = generate_peer_id();
+                let peer_id = PeerId::generate();
                 write_handshake(peer_id, info_hash, &mut handshake);
                 stream.write_all(&handshake).unwrap();
 

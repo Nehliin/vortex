@@ -27,7 +27,7 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Clear, Dataset, Gauge, Row, Table, Widget},
 };
 use throbber_widgets_tui::ThrobberState;
-use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
+use vortex_bittorrent::{Command, PeerId, State, Torrent, TorrentEvent, generate_peer_id};
 
 use tikv_jemallocator::Jemalloc;
 
@@ -181,7 +181,7 @@ fn main() -> io::Result<()> {
     let command_tx = Arc::new(Mutex::new(command_tx));
 
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
-    let id = generate_peer_id();
+    let id = PeerId::generate();
     let metadata = state.as_ref().state().map(|state| state.0.metadata.clone());
     let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
