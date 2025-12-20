@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::piece_selector::{CompletedPiece, Piece, PieceSelector, Subpiece};
+use crate::piece_selector::{CompletedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece};
 use crate::{
     event_loop::{ConnectionId, EventLoop},
     peer_comm::peer_protocol::PeerId,
@@ -22,7 +22,6 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIter
 use slotmap::SlotMap;
 use thiserror::Error;
 
-
 use crate::peer_connection::DisconnectReason;
 
 #[derive(Error, Debug)]
@@ -31,6 +30,39 @@ pub enum Error {
     Io(#[from] io::Error),
     #[error("Peer provider disconnected")]
     PeerProviderDisconnect,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Config {
+    pub max_connections: usize,
+    pub max_outstanding_requests: u64,
+    pub max_unchoked: u32,
+    pub unchoke_interval: u32,
+    pub optimistic_unchoke_interval: u32,
+    pub seeding_piece_quota: u32,
+    pub cq_size: u32,
+    pub sq_size: u32,
+    pub completion_event_want: usize,
+    pub buffer_size: usize,
+    pub buffer_pool_size: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            max_connections: 100,
+            max_outstanding_requests: 512,
+            max_unchoked: 8,
+            unchoke_interval: 15,
+            optimistic_unchoke_interval: 30,
+            seeding_piece_quota: 20,
+            cq_size: 4096,
+            sq_size: 4096,
+            completion_event_want: 8,
+            buffer_size: (SUBPIECE_SIZE * 2) as usize,
+            buffer_pool_size: 256,
+        }
+    }
 }
 
 pub struct Torrent {
@@ -59,7 +91,7 @@ impl Torrent {
             .build(4096)
             .unwrap();
         let events = SlotMap::with_capacity_and_key(4096);
-        let mut event_loop = EventLoop::new(self.our_id, events);
+        let mut event_loop = EventLoop::new(self.our_id, events, &self.state.config);
         event_loop.run(ring, &mut self.state, event_tx, command_rc, listener)
     }
 }
@@ -98,17 +130,12 @@ pub enum TorrentEvent {
     },
 }
 
-pub const MAX_UNCHOKED: u32 = 8;
-pub const UNCHOKE_INTERVAL: u32 = 15;
-pub const OPTIMISTIC_UNCHOKE_INTERVAL: u32 = 30;
-pub const SEEDING_PIECE_QUOTA: u32 = 20;
-
 pub struct InitializedState {
     pub piece_selector: PieceSelector,
     pub num_unchoked: u32,
-    pub max_unchoked: u32,
-    pub unchoke_time_scaler: u32,
-    pub optimistic_unchoke_time_scaler: u32,
+    pub config: Config,
+    pub ticks_to_recalc_unchoke: u32,
+    pub ticks_to_recalc_optimistic_unchoke: u32,
     pub completed_piece_rc: Receiver<CompletedPiece>,
     pub completed_piece_tx: Sender<CompletedPiece>,
     pub pieces: Vec<Option<Piece>>,
@@ -116,7 +143,7 @@ pub struct InitializedState {
 }
 
 impl InitializedState {
-    pub fn new(torrent: &lava_torrent::torrent::v1::Torrent) -> Self {
+    pub fn new(torrent: &lava_torrent::torrent::v1::Torrent, config: Config) -> Self {
         let mut pieces = Vec::with_capacity(torrent.pieces.len());
         for _ in 0..torrent.pieces.len() {
             pieces.push(None);
@@ -125,9 +152,9 @@ impl InitializedState {
         Self {
             piece_selector: PieceSelector::new(torrent),
             num_unchoked: 0,
-            max_unchoked: MAX_UNCHOKED,
-            unchoke_time_scaler: UNCHOKE_INTERVAL,
-            optimistic_unchoke_time_scaler: OPTIMISTIC_UNCHOKE_INTERVAL,
+            config,
+            ticks_to_recalc_unchoke: config.unchoke_interval,
+            ticks_to_recalc_optimistic_unchoke: config.optimistic_unchoke_interval,
             completed_piece_rc: rc,
             completed_piece_tx: tx,
             pieces,
@@ -274,7 +301,7 @@ impl InitializedState {
     }
 
     pub fn can_preemtively_unchoke(&self) -> bool {
-        self.num_unchoked < self.max_unchoked
+        self.num_unchoked < self.config.max_unchoked
     }
 
     /// Determine the most suited peers to be unchoked based on the selected unchoking strategy.
@@ -300,7 +327,7 @@ impl InitializedState {
                     if peer.optimistically_unchoked {
                         peer.optimistically_unchoked = false;
                         // reset so another peer can be optimistically unchoked
-                        self.optimistic_unchoke_time_scaler = 0;
+                        self.ticks_to_recalc_optimistic_unchoke = 0;
                     }
                     peer.choke(self, true);
                 }
@@ -327,7 +354,7 @@ impl InitializedState {
             });
         } else {
             let piece_length = self.piece_selector.avg_piece_length();
-            let quota_bytes = (piece_length * SEEDING_PIECE_QUOTA) as u64;
+            let quota_bytes = (piece_length * self.config.seeding_piece_quota) as u64;
             // The torrent is completed. Do round robin sorting like in libtorrent
             peers.sort_unstable_by(|(_, a), (_, b)| {
                 let a_quota_complete = !a.is_choking
@@ -352,8 +379,8 @@ impl InitializedState {
                 }
             });
         }
-        let optimistic_unchoke_slots = std::cmp::max(1, self.max_unchoked / 5);
-        let mut remaining_unchoke_slots = self.max_unchoked - optimistic_unchoke_slots;
+        let optimistic_unchoke_slots = std::cmp::max(1, self.config.max_unchoked / 5);
+        let mut remaining_unchoke_slots = self.config.max_unchoked - optimistic_unchoke_slots;
         for (id, _) in peers {
             let peer = &mut connections[id];
             peer.network_stats.reset_round();
@@ -375,7 +402,7 @@ impl InitializedState {
                     // to a normal unchoke slot
                     peer.optimistically_unchoked = false;
                     // reset so another peer can be optimistically unchoked
-                    self.optimistic_unchoke_time_scaler = 0;
+                    self.ticks_to_recalc_optimistic_unchoke = 0;
                 }
             } else if !peer.is_choking && !peer.optimistically_unchoked {
                 log::debug!(
@@ -394,9 +421,9 @@ impl InitializedState {
         connections: &mut SlotMap<ConnectionId, PeerConnection>,
     ) {
         log::info!("Recalculating optimistic unchokes");
-        let num_opt_unchoked = std::cmp::max(1, self.max_unchoked / 5) as usize;
+        let num_opt_unchoked = std::cmp::max(1, self.config.max_unchoked / 5) as usize;
         let mut previously_opt_unchoked = ahash::HashSet::with_capacity(num_opt_unchoked);
-        let mut candidates = Vec::with_capacity(self.max_unchoked as usize);
+        let mut candidates = Vec::with_capacity(self.config.max_unchoked as usize);
         for (id, peer) in connections.iter_mut() {
             if peer.optimistically_unchoked {
                 previously_opt_unchoked.insert(id);
@@ -443,6 +470,7 @@ pub struct State {
     root: PathBuf,
     torrent_state: Option<InitializedState>,
     file: OnceCell<FileAndMetadata>,
+    pub(crate) config: Config,
 }
 
 impl State {
@@ -450,13 +478,14 @@ impl State {
         self.info_hash
     }
 
-    pub fn unstarted(info_hash: [u8; 20], root: PathBuf) -> Self {
+    pub fn unstarted(info_hash: [u8; 20], root: PathBuf, config: Config) -> Self {
         Self {
             info_hash,
             root,
             listener_port: None,
             torrent_state: None,
             file: OnceCell::new(),
+            config,
         }
     }
 
@@ -465,9 +494,10 @@ impl State {
     pub fn from_metadata_and_root(
         metadata: lava_torrent::torrent::v1::Torrent,
         root: PathBuf,
+        config: Config,
     ) -> io::Result<Self> {
         let file_store = FileStore::new(&root, &metadata)?;
-        let mut initialized_state = InitializedState::new(&metadata);
+        let mut initialized_state = InitializedState::new(&metadata, config);
         let completed_pieces: Box<[bool]> = metadata
             .pieces
             .as_slice()
@@ -512,6 +542,7 @@ impl State {
                 file_store,
                 metadata: Box::new(metadata),
             }),
+            config,
         })
     }
 
@@ -521,6 +552,7 @@ impl State {
         file_store: FileStore,
         metadata: lava_torrent::torrent::v1::Torrent,
         state: InitializedState,
+        config: Config,
     ) -> Self {
         Self {
             info_hash,
@@ -531,6 +563,7 @@ impl State {
                 file_store,
                 metadata: Box::new(metadata),
             }),
+            config,
         }
     }
 
@@ -541,6 +574,7 @@ impl State {
             listener_port: &self.listener_port,
             torrent: &mut self.torrent_state,
             full: &self.file,
+            config: &self.config,
         }
     }
 }
@@ -551,6 +585,7 @@ pub struct StateRef<'state> {
     pub listener_port: &'state Option<u16>,
     torrent: &'state mut Option<InitializedState>,
     full: &'state OnceCell<FileAndMetadata>,
+    pub config: &'state Config,
 }
 
 impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
@@ -579,7 +614,7 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
         if self.is_initialzied() {
             return Err(io::Error::other("State initialized twice"));
         }
-        *self.torrent = Some(InitializedState::new(&metadata));
+        *self.torrent = Some(InitializedState::new(&metadata, *self.config));
         self.full
             .set(FileAndMetadata {
                 file_store: FileStore::new(self.root, &metadata)?,

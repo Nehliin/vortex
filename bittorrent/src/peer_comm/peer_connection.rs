@@ -308,7 +308,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             if self.optimistically_unchoked {
                 // Reset time scaler so another peer can be optimistically unchoked
                 self.optimistically_unchoked = false;
-                torrent_state.optimistic_unchoke_time_scaler = 0;
+                torrent_state.ticks_to_recalc_optimistic_unchoke = 0;
             }
         }
     }

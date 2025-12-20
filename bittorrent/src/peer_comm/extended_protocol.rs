@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
 use crate::{
-    event_loop::MAX_OUTSTANDING_REQUESTS, peer_comm::peer_connection::PeerConnection,
-    piece_selector::SUBPIECE_SIZE, torrent::StateRef,
+    peer_comm::peer_connection::PeerConnection,
+    piece_selector::SUBPIECE_SIZE,
+    torrent::{Config, StateRef},
 };
 
 use super::{
@@ -62,7 +63,7 @@ pub const EXTENSIONS: [(&str, u8); 2] = [(UT_METADATA, 1), (UPLOAD_ONLY, 2)];
 
 /// The handshake message this peer should send to anyone supporting the
 /// extension
-pub fn extension_handshake_msg(state_ref: &mut StateRef) -> PeerMessage {
+pub fn extension_handshake_msg(state_ref: &mut StateRef, config: &Config) -> PeerMessage {
     let mut handshake = BTreeMap::new();
     let extensions: BTreeMap<_, _> = BTreeMap::from(EXTENSIONS);
     handshake.insert("m", bt_bencode::value::to_value(&extensions).unwrap());
@@ -87,7 +88,7 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef) -> PeerMessage {
     }
     handshake.insert(
         "reqq",
-        bt_bencode::value::to_value(&MAX_OUTSTANDING_REQUESTS).unwrap(),
+        bt_bencode::value::to_value(&config.max_outstanding_requests).unwrap(),
     );
 
     PeerMessage::Extended {

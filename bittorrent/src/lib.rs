@@ -23,10 +23,9 @@ mod test_utils {
     use crate::{
         file_store::FileStore,
         peer_connection::PeerConnection,
-        peer_protocol::ParsedHandshake,
-        peer_protocol::PeerId,
+        peer_protocol::{ParsedHandshake, PeerId},
         piece_selector::SUBPIECE_SIZE,
-        torrent::{InitializedState, State},
+        torrent::{Config, InitializedState, State},
     };
     use lava_torrent::torrent::v1::{Torrent, TorrentBuilder};
     use socket2::{Domain, Protocol, Socket, Type};
@@ -179,7 +178,7 @@ mod test_utils {
         );
         let download_tmp_dir_path = root.clone();
         let file_store = FileStore::new(&download_tmp_dir_path, &torrent_info).unwrap();
-        let state = InitializedState::new(&torrent_info);
+        let state = InitializedState::new(&torrent_info, Config::default());
         State::inprogress(
             torrent_info.info_hash_bytes().try_into().unwrap(),
             root,

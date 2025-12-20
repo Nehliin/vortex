@@ -28,15 +28,10 @@ use crate::{
         peer_connection::{ConnectionState, DisconnectReason, OutgoingMsg, PeerConnection},
         peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
     },
-    piece_selector::{self, SUBPIECE_SIZE},
-    torrent::{
-        Command, Error, OPTIMISTIC_UNCHOKE_INTERVAL, PeerMetrics, State, StateRef, TorrentEvent,
-        UNCHOKE_INTERVAL,
-    },
+    piece_selector::{self},
+    torrent::{Command, Config, Error, PeerMetrics, State, StateRef, TorrentEvent},
 };
 
-const MAX_CONNECTIONS: usize = 100;
-pub const MAX_OUTSTANDING_REQUESTS: u64 = 512;
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
 const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
 
@@ -300,13 +295,13 @@ pub struct EventLoop {
 }
 
 impl<'scope, 'state: 'scope> EventLoop {
-    pub fn new(our_id: PeerId, events: SlotMap<EventId, EventData>) -> Self {
+    pub fn new(our_id: PeerId, events: SlotMap<EventId, EventData>, config: &Config) -> Self {
         Self {
             events,
-            write_pool: BufferPool::new(256, (SUBPIECE_SIZE * 2) as _),
-            read_ring: BufferRing::new(1, 256, (SUBPIECE_SIZE * 2) as _).unwrap(),
-            connections: SlotMap::with_capacity_and_key(MAX_CONNECTIONS),
-            pending_connections: HashSet::with_capacity(MAX_CONNECTIONS),
+            write_pool: BufferPool::new(config.buffer_pool_size, config.buffer_size),
+            read_ring: BufferRing::new(1, config.buffer_pool_size, config.buffer_size).unwrap(),
+            connections: SlotMap::with_capacity_and_key(config.max_connections),
+            pending_connections: HashSet::with_capacity(config.max_connections),
             our_id,
         }
     }
@@ -344,7 +339,7 @@ impl<'scope, 'state: 'scope> EventLoop {
 
             loop {
                 let args = types::SubmitArgs::new().timespec(CQE_WAIT_TIME);
-                match submitter.submit_with_args(8, &args) {
+                match submitter.submit_with_args(state_ref.config.completion_event_want, &args) {
                     Ok(_) => (),
                     Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
                         log::warn!("Ring busy")
@@ -551,7 +546,8 @@ impl<'scope, 'state: 'scope> EventLoop {
                         {
                             continue;
                         }
-                        if self.pending_connections.len() + self.connections.len() < MAX_CONNECTIONS
+                        if self.pending_connections.len() + self.connections.len()
+                            < state_ref.config.max_connections
                         {
                             self.pending_connections.insert(addr.clone());
                             self.connect_to_peer(addr, sq);
@@ -795,7 +791,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 conn_parse_and_handle_msgs(connection, state, scope);
                 if connection.extended_extension {
                     connection.outgoing_msgs_buffer.push(OutgoingMsg {
-                        message: extension_handshake_msg(state),
+                        message: extension_handshake_msg(state, &state.config),
                         ordered: true,
                     });
                 }
@@ -956,18 +952,20 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
     if let Some((_, torrent_state)) = torrent_state.state() {
-        torrent_state.unchoke_time_scaler = torrent_state.unchoke_time_scaler.saturating_sub(1);
-        torrent_state.optimistic_unchoke_time_scaler = torrent_state
-            .optimistic_unchoke_time_scaler
+        torrent_state.ticks_to_recalc_unchoke =
+            torrent_state.ticks_to_recalc_unchoke.saturating_sub(1);
+        torrent_state.ticks_to_recalc_optimistic_unchoke = torrent_state
+            .ticks_to_recalc_optimistic_unchoke
             .saturating_sub(1);
 
-        if torrent_state.unchoke_time_scaler == 0 && !connections.is_empty() {
-            torrent_state.unchoke_time_scaler = UNCHOKE_INTERVAL;
+        if torrent_state.ticks_to_recalc_unchoke == 0 && !connections.is_empty() {
+            torrent_state.ticks_to_recalc_unchoke = torrent_state.config.unchoke_interval;
             torrent_state.recalculate_unchokes(connections);
         }
 
-        if torrent_state.optimistic_unchoke_time_scaler == 0 && !connections.is_empty() {
-            torrent_state.optimistic_unchoke_time_scaler = OPTIMISTIC_UNCHOKE_INTERVAL;
+        if torrent_state.ticks_to_recalc_optimistic_unchoke == 0 && !connections.is_empty() {
+            torrent_state.ticks_to_recalc_optimistic_unchoke =
+                torrent_state.config.optimistic_unchoke_interval;
             torrent_state.recalculate_optimistic_unchokes(connections);
         }
     }
@@ -1129,8 +1127,11 @@ mod tests {
                 let mut download_state = setup_test();
                 metrics::with_local_recorder(&debbuging, || {
                     let our_id = PeerId::generate();
-                    let mut event_loop =
-                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key());
+                    let mut event_loop = EventLoop::new(
+                        our_id,
+                        SlotMap::<EventId, EventData>::with_key(),
+                        &Config::default(),
+                    );
                     let ring = IoUring::builder()
                         .setup_single_issuer()
                         .setup_clamp()
@@ -1205,8 +1206,11 @@ mod tests {
                 info_hash_tx.send(info_hash).unwrap();
 
                 metrics::with_local_recorder(&debbuging, || {
-                    let mut event_loop =
-                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key());
+                    let mut event_loop = EventLoop::new(
+                        our_id,
+                        SlotMap::<EventId, EventData>::with_key(),
+                        &Config::default(),
+                    );
                     let ring = IoUring::builder()
                         .setup_single_issuer()
                         .setup_clamp()
