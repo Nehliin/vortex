@@ -2684,7 +2684,7 @@ fn unchoke_promotes_optimistic_unchoke_to_regular() {
         assert!(!connections[opt_unchoked_peer].optimistically_unchoked);
 
         // The optimistic unchoke time scaler should be reset
-        assert_eq!(torrent_state.optimistic_unchoke_time_scaler, 0);
+        assert_eq!(torrent_state.ticks_to_recalc_optimistic_unchoke, 0);
 
         // Verify num_unchoked matches actual unchoked count
         let actual_unchoked = connections.values().filter(|p| !p.is_choking).count();
@@ -2965,7 +2965,7 @@ fn optimistically_unchoked_disconnect_resets_timer() {
             connections[key].is_choking = false;
             connections[key].optimistically_unchoked = true;
             torrent_state.num_unchoked += 1;
-            assert!(torrent_state.optimistic_unchoke_time_scaler > 0);
+            assert!(torrent_state.ticks_to_recalc_optimistic_unchoke > 0);
         }
 
         let mut sq = BackloggedSubmissionQueue::new(MockSubmissionQueue);
@@ -2975,7 +2975,7 @@ fn optimistically_unchoked_disconnect_resets_timer() {
 
         {
             let (_, torrent_state) = state_ref.state().unwrap();
-            assert_eq!(torrent_state.optimistic_unchoke_time_scaler, 0);
+            assert_eq!(torrent_state.ticks_to_recalc_optimistic_unchoke, 0);
             assert_eq!(torrent_state.num_unchoked, 0);
         }
     });
