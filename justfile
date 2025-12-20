@@ -26,7 +26,3 @@ clean:
 setup-grafana:
   podman-compose up --force-recreate -d
 
-
-test-locally: setup-transmission setup-grafana
-    cargo test --test basic
-

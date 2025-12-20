@@ -27,7 +27,7 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Clear, Dataset, Gauge, Row, Table, Widget},
 };
 use throbber_widgets_tui::ThrobberState;
-use vortex_bittorrent::{Command, PeerId, State, Torrent, TorrentEvent, generate_peer_id};
+use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
 
 use tikv_jemallocator::Jemalloc;
 
@@ -135,6 +135,7 @@ fn main() -> io::Result<()> {
 
     let cli = Cli::parse();
 
+    let config = Config::default();
     let root = cli.download_folder.clone();
 
     let mut state = match cli.torrent_info {
@@ -146,10 +147,16 @@ fn main() -> io::Result<()> {
                 root.join(info_hash.to_lowercase()),
             ) {
                 // Metadata has been saved from previous run
-                Ok(metadata) => State::from_metadata_and_root(metadata, cli.download_folder)?,
+                Ok(metadata) => {
+                    State::from_metadata_and_root(metadata, cli.download_folder, config)?
+                }
                 Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
                     if io_err.kind() == ErrorKind::NotFound {
-                        State::unstarted(decode_info_hash_hex(&info_hash), cli.download_folder)
+                        State::unstarted(
+                            decode_info_hash_hex(&info_hash),
+                            cli.download_folder,
+                            config,
+                        )
                     } else {
                         panic!("Failed looking for stored metadata {io_err}");
                     }
@@ -163,7 +170,7 @@ fn main() -> io::Result<()> {
         } => {
             let parsed_metadata =
                 lava_torrent::torrent::v1::Torrent::read_from_file(metadata).unwrap();
-            State::from_metadata_and_root(parsed_metadata, cli.download_folder)?
+            State::from_metadata_and_root(parsed_metadata, cli.download_folder, config)?
         }
         _ => unreachable!(),
     };
