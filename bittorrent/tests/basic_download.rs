@@ -4,7 +4,7 @@ use std::{
 };
 
 use metrics_exporter_prometheus::PrometheusBuilder;
-use vortex_bittorrent::{Command, Config, State, Torrent, TorrentEvent, PeerId};
+use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
 
 use crate::common::TempDir;
 mod common;

@@ -46,15 +46,22 @@ fn basic_seeding() {
 
     // Set up seeder state with completed files
     let seeder_id = PeerId::generate();
-    let seeder_state = State::from_metadata_and_root(metadata.clone(), seeder_dir.path().clone(), Config::default())
-        .expect("Failed to create seeder state");
+    let seeder_state = State::from_metadata_and_root(
+        metadata.clone(),
+        seeder_dir.path().clone(),
+        Config::default(),
+    )
+    .expect("Failed to create seeder state");
     let mut seeder_torrent = Torrent::new(seeder_id, seeder_state);
 
     // Set up downloader state (empty)
     let downloader_id = PeerId::generate();
-    let downloader_state =
-        State::from_metadata_and_root(metadata.clone(), downloader_dir.path().clone(), Config::default())
-            .expect("Failed to create downloader state");
+    let downloader_state = State::from_metadata_and_root(
+        metadata.clone(),
+        downloader_dir.path().clone(),
+        Config::default(),
+    )
+    .expect("Failed to create downloader state");
     let mut downloader_torrent = Torrent::new(downloader_id, downloader_state);
     let mut downloader_command_q = heapless::spsc::Queue::new();
     let (downloader_command_tx, downloader_command_rc) = downloader_command_q.split();

@@ -69,20 +69,32 @@ fn chained_seeding() {
 
     // Set up seeder state with completed files
     let seeder_id = PeerId::generate();
-    let seeder_state = State::from_metadata_and_root(metadata.clone(), seeder_dir.path().clone(), Config::default())
-        .expect("Failed to create seeder state");
+    let seeder_state = State::from_metadata_and_root(
+        metadata.clone(),
+        seeder_dir.path().clone(),
+        Config::default(),
+    )
+    .expect("Failed to create seeder state");
     let mut seeder_torrent = Torrent::new(seeder_id, seeder_state);
 
     // Set up middle peer state (empty)
     let middle_id = PeerId::generate();
-    let middle_state = State::from_metadata_and_root(metadata.clone(), middle_dir.path().clone(), Config::default())
-        .expect("Failed to create middle state");
+    let middle_state = State::from_metadata_and_root(
+        metadata.clone(),
+        middle_dir.path().clone(),
+        Config::default(),
+    )
+    .expect("Failed to create middle state");
     let mut middle_torrent = Torrent::new(middle_id, middle_state);
 
     // Set up leecher state (empty)
     let leecher_id = PeerId::generate();
-    let leecher_state = State::from_metadata_and_root(metadata.clone(), leecher_dir.path().clone(), Config::default())
-        .expect("Failed to create leecher state");
+    let leecher_state = State::from_metadata_and_root(
+        metadata.clone(),
+        leecher_dir.path().clone(),
+        Config::default(),
+    )
+    .expect("Failed to create leecher state");
     let mut leecher_torrent = Torrent::new(leecher_id, leecher_state);
 
     // Create command queues
