@@ -10,7 +10,7 @@ mod torrent;
 use peer_comm::*;
 
 pub use peer_protocol::PeerId;
-pub use torrent::{Command, PeerMetrics, State, Torrent, TorrentEvent};
+pub use torrent::{Command, Config, PeerMetrics, State, Torrent, TorrentEvent};
 
 #[cfg(feature = "fuzzing")]
 pub use peer_protocol::*;
@@ -185,6 +185,7 @@ mod test_utils {
             file_store,
             torrent_info,
             state,
+            Config::default(),
         )
     }
 
@@ -216,7 +217,7 @@ mod test_utils {
             large_metadata,
         );
         let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
-        let uninitialized_state = State::unstarted(info_hash, root);
+        let uninitialized_state = State::unstarted(info_hash, root, Config::default());
 
         (uninitialized_state, torrent_info)
     }
@@ -248,6 +249,6 @@ mod test_utils {
         });
 
         // Use from_metadata_and_root to create a state with already completed pieces
-        State::from_metadata_and_root(torrent_info, root).unwrap()
+        State::from_metadata_and_root(torrent_info, root, Config::default()).unwrap()
     }
 }

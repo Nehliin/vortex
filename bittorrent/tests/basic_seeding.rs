@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use vortex_bittorrent::{Command, PeerId, State, Torrent, TorrentEvent};
+use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
 
 use common::{
     TempDir, calculate_file_hashes, create_test_torrent, init_test_environment,
@@ -46,14 +46,14 @@ fn basic_seeding() {
 
     // Set up seeder state with completed files
     let seeder_id = PeerId::generate();
-    let seeder_state = State::from_metadata_and_root(metadata.clone(), seeder_dir.path().clone())
+    let seeder_state = State::from_metadata_and_root(metadata.clone(), seeder_dir.path().clone(), Config::default())
         .expect("Failed to create seeder state");
     let mut seeder_torrent = Torrent::new(seeder_id, seeder_state);
 
     // Set up downloader state (empty)
     let downloader_id = PeerId::generate();
     let downloader_state =
-        State::from_metadata_and_root(metadata.clone(), downloader_dir.path().clone())
+        State::from_metadata_and_root(metadata.clone(), downloader_dir.path().clone(), Config::default())
             .expect("Failed to create downloader state");
     let mut downloader_torrent = Torrent::new(downloader_id, downloader_state);
     let mut downloader_command_q = heapless::spsc::Queue::new();

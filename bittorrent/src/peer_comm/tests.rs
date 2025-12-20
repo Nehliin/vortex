@@ -7,7 +7,7 @@ use serde::Deserialize;
 use slotmap::SlotMap;
 
 use crate::{
-    event_loop::{ConnectionId, EventData, EventId, MAX_OUTSTANDING_REQUESTS, tick},
+    event_loop::{ConnectionId, EventData, EventId, tick},
     io_utils::{BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
     peer_connection::OutgoingMsg,
@@ -16,7 +16,7 @@ use crate::{
         generate_peer, setup_seeding_test, setup_test, setup_uninitialized_test,
         setup_uninitialized_test_with_metadata_size,
     },
-    torrent::TorrentEvent,
+    torrent::{self, TorrentEvent},
 };
 
 use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};
@@ -2147,7 +2147,7 @@ fn extension_handshake_generates_correct_message() {
     download_state.listener_port = Some(1234);
 
     let mut state_ref = download_state.as_ref();
-    let handshake = extension_handshake_msg(&mut state_ref);
+    let handshake = extension_handshake_msg(&mut state_ref, &torrent::Config::default());
 
     if let PeerMessage::Extended { id, data } = handshake {
         assert_eq!(id, 0); // Handshake uses ID 0
@@ -2173,7 +2173,7 @@ fn extension_handshake_generates_correct_message() {
         assert_eq!(dict.get("p".as_bytes()).unwrap().as_u64().unwrap(), 1234);
         assert_eq!(
             dict.get("reqq".as_bytes()).unwrap().as_u64().unwrap(),
-            MAX_OUTSTANDING_REQUESTS
+            state_ref.config.max_outstanding_requests
         );
         assert_eq!(
             dict.get("metadata_size".as_bytes())
@@ -2481,7 +2481,7 @@ fn unchoke_selection_based_on_download_throughput() {
         let (_, torrent_state) = state_ref.state().unwrap();
 
         // Set max_unchoked to 10 so we have room for regular and optimistic unchokes
-        torrent_state.max_unchoked = 10;
+        torrent_state.config.max_unchoked = 10;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -2548,7 +2548,7 @@ fn unchoke_chokes_non_interested_peers() {
         let mut state_ref = download_state.as_ref();
         let (_, torrent_state) = state_ref.state().unwrap();
 
-        torrent_state.max_unchoked = 5;
+        torrent_state.config.max_unchoked = 5;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -2604,7 +2604,7 @@ fn unchoke_chokes_pending_disconnect_peers() {
         let mut state_ref = download_state.as_ref();
         let (_, torrent_state) = state_ref.state().unwrap();
 
-        torrent_state.max_unchoked = 5;
+        torrent_state.config.max_unchoked = 5;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -2651,7 +2651,7 @@ fn unchoke_promotes_optimistic_unchoke_to_regular() {
         let mut state_ref = download_state.as_ref();
         let (_, torrent_state) = state_ref.state().unwrap();
 
-        torrent_state.max_unchoked = 5;
+        torrent_state.config.max_unchoked = 5;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -2703,7 +2703,7 @@ fn optimistic_unchoke_selection() {
         let mut state_ref = download_state.as_ref();
         let (_, torrent_state) = state_ref.state().unwrap();
 
-        torrent_state.max_unchoked = 10;
+        torrent_state.config.max_unchoked = 10;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -2770,7 +2770,7 @@ fn optimistic_unchoke_rotates_out_previous() {
         let mut state_ref = download_state.as_ref();
         let (_, torrent_state) = state_ref.state().unwrap();
 
-        torrent_state.max_unchoked = 5;
+        torrent_state.config.max_unchoked = 5;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -2829,7 +2829,7 @@ fn optimistic_unchoke_ignores_non_interested_peers() {
         let mut state_ref = download_state.as_ref();
         let (_, torrent_state) = state_ref.state().unwrap();
 
-        torrent_state.max_unchoked = 5;
+        torrent_state.config.max_unchoked = 5;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -2870,7 +2870,7 @@ fn optimistic_unchoke_ignores_pending_disconnect_peers() {
         let mut state_ref = download_state.as_ref();
         let (_, torrent_state) = state_ref.state().unwrap();
 
-        torrent_state.max_unchoked = 5;
+        torrent_state.config.max_unchoked = 5;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -2910,7 +2910,7 @@ fn unchoke_reserves_slots_for_optimistic() {
         let mut state_ref = download_state.as_ref();
         let (_, torrent_state) = state_ref.state().unwrap();
 
-        torrent_state.max_unchoked = 10;
+        torrent_state.config.max_unchoked = 10;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -2958,7 +2958,7 @@ fn optimistically_unchoked_disconnect_resets_timer() {
         {
             let (_, torrent_state) = state_ref.state().unwrap();
 
-            torrent_state.max_unchoked = 5;
+            torrent_state.config.max_unchoked = 5;
 
             // A single peer that is optimistically unchoked
             connections[key].peer_interested = true;
@@ -3499,7 +3499,7 @@ fn seeding_round_robin_rotation_after_quota() {
         // Verify we're in seeding mode
         assert!(torrent_state.is_complete);
 
-        torrent_state.max_unchoked = 3;
+        torrent_state.config.max_unchoked = 3;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -3569,7 +3569,7 @@ fn seeding_quota_not_met_keeps_unchoked() {
         // Verify we're in seeding mode
         assert!(torrent_state.is_complete);
 
-        torrent_state.max_unchoked = 3;
+        torrent_state.config.max_unchoked = 3;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -3622,7 +3622,7 @@ fn seeding_time_threshold_not_met_keeps_unchoked() {
         // Verify we're in seeding mode
         assert!(torrent_state.is_complete);
 
-        torrent_state.max_unchoked = 3;
+        torrent_state.config.max_unchoked = 3;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
@@ -3676,7 +3676,7 @@ fn seeding_quota_complete_peers_deprioritized() {
         assert!(torrent_state.is_complete);
 
         // Set max_unchoked to 2 so we have limited slots
-        torrent_state.max_unchoked = 3;
+        torrent_state.config.max_unchoked = 3;
 
         let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
 
