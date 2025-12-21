@@ -209,10 +209,7 @@ fn chained_seeding() {
                                 peer_metrics,
                                 ..
                             } => {
-                                log::debug!(
-                                    "Middle peer progress: {}",
-                                    pieces_completed,
-                                );
+                                log::debug!("Middle peer progress: {}", pieces_completed,);
                                 for metrics in peer_metrics {
                                     if metrics.upload_throughput > 0 {
                                         log::info!(
@@ -289,13 +286,9 @@ fn chained_seeding() {
                                 return;
                             }
                             TorrentEvent::TorrentMetrics {
-                                pieces_completed,
-                                ..
+                                pieces_completed, ..
                             } => {
-                                log::debug!(
-                                    "Leecher progress: {} pieces",
-                                    pieces_completed,
-                                );
+                                log::debug!("Leecher progress: {} pieces", pieces_completed,);
                             }
                             TorrentEvent::MetadataComplete(_) => {
                                 log::info!("Leecher: Metadata complete");

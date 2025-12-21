@@ -959,13 +959,15 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             .saturating_sub(1);
 
         if torrent_state.ticks_to_recalc_unchoke == 0 && !connections.is_empty() {
-            torrent_state.ticks_to_recalc_unchoke = torrent_state.config.num_ticks_before_unchoke_recalc;
+            torrent_state.ticks_to_recalc_unchoke =
+                torrent_state.config.num_ticks_before_unchoke_recalc;
             torrent_state.recalculate_unchokes(connections);
         }
 
         if torrent_state.ticks_to_recalc_optimistic_unchoke == 0 && !connections.is_empty() {
-            torrent_state.ticks_to_recalc_optimistic_unchoke =
-                torrent_state.config.num_ticks_before_optimistic_unchoke_recalc;
+            torrent_state.ticks_to_recalc_optimistic_unchoke = torrent_state
+                .config
+                .num_ticks_before_optimistic_unchoke_recalc;
             torrent_state.recalculate_optimistic_unchokes(connections);
         }
     }
