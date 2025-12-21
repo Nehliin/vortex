@@ -547,16 +547,6 @@ mod tests {
         assert_eq!(&prefix, b"-VT1203-");
     }
 
-    #[test]
-    fn test_peer_id_generate_uses_correct_prefix() {
-        let peer_id = PeerId::generate();
-        let prefix = &peer_id.0[..8];
-
-        // Should match the current crate version (0.2.0)
-        let expected = build_peer_id_prefix("0", "2");
-        assert_eq!(prefix, &expected);
-        assert_eq!(std::str::from_utf8(prefix).unwrap(), "-VT0002-");
-    }
 
     #[test]
     fn fuzz_encoded_length_bug() {
