@@ -24,6 +24,8 @@ use thiserror::Error;
 
 use crate::peer_connection::DisconnectReason;
 
+use crate::TorrentMetadata;
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Encountered IO issue: {0}")]
@@ -180,7 +182,7 @@ pub enum TorrentEvent {
     /// The metadata has finished downloading from the connected peers.
     /// Note you will NOT receive this event if the metadata already is
     /// completed when starting the torrent.
-    MetadataComplete(Box<lava_torrent::torrent::v1::Torrent>),
+    MetadataComplete(Box<TorrentMetadata>),
     /// The listener for incoming connection has finished set up
     /// on the provided port.
     ListenerStarted { port: u16 },
@@ -528,7 +530,7 @@ impl InitializedState {
 
 pub struct FileAndMetadata {
     pub file_store: FileStore,
-    pub metadata: Box<lava_torrent::torrent::v1::Torrent>,
+    pub metadata: Box<TorrentMetadata>,
 }
 
 /// Current state of the torrent
@@ -576,7 +578,7 @@ impl State {
     /// NOTE: This will go through all files in `root` and hash their pieces (in parallel) to determine torrent progress
     /// which may be slow on large torrents.
     pub fn from_metadata_and_root(
-        metadata: lava_torrent::torrent::v1::Torrent,
+        metadata: TorrentMetadata,
         root: PathBuf,
         config: Config,
     ) -> io::Result<Self> {
@@ -695,7 +697,7 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
         self.full.get().is_some()
     }
 
-    pub fn init(&'e_iter mut self, metadata: lava_torrent::torrent::v1::Torrent) -> io::Result<()> {
+    pub fn init(&'e_iter mut self, metadata: TorrentMetadata) -> io::Result<()> {
         if self.is_initialzied() {
             return Err(io::Error::other("State initialized twice"));
         }

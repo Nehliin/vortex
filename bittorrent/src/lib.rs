@@ -9,6 +9,7 @@ mod torrent;
 
 use peer_comm::*;
 
+pub use lava_torrent::torrent::v1::Torrent as TorrentMetadata;
 pub use peer_protocol::PeerId;
 pub use torrent::{Command, Config, PeerMetrics, State, Torrent, TorrentEvent};
 
