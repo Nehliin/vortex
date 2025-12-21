@@ -90,7 +90,7 @@ pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], mut buffer: &mu
 pub struct PeerId([u8; 20]);
 
 impl PeerId {
-    /// Generates a new random peer id following the BEP 20 
+    /// Generates a new random peer id following the BEP 20
     /// specification.
     pub fn generate() -> Self {
         // Based on http://www.bittorrent.org/beps/bep_0020.html
