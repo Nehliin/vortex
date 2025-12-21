@@ -125,8 +125,8 @@ fn basic_seeding() {
                         }
                     }
 
-                    // Keep seeding for a bit after we see upload activity
-                    if seeder_shutting_down.load(Ordering::Acquire) {
+                    // Check that we have handled the metrics event before quitting
+                    if seeder_shutting_down.load(Ordering::Acquire) && saw_upload {
                         break;
                     }
                 }
