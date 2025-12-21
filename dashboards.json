@@ -24,8 +24,9 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "eek7csbvj1l34d"
+        "uid": "der4co44rndogd"
       },
+      "description": "total number of wait time hits",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -86,7 +87,7 @@
         "x": 0,
         "y": 0
       },
-      "id": 8,
+      "id": 10,
       "options": {
         "legend": {
           "calcs": [],
@@ -100,49 +101,27 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.1",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "peer_handshake_attempt",
-          "legendFormat": "attempts",
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "cqe_wait_time_hit",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "legendFormat": "total cqe_wait_time_hit",
           "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "eek7csbvj1l34d"
-          },
-          "editorMode": "code",
-          "expr": "peer_handshake_timeout",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "eek7csbvj1l34d"
-          },
-          "editorMode": "code",
-          "expr": "peer_handshake_success",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "success",
-          "range": true,
-          "refId": "C"
+          "refId": "A",
+          "useBackend": false
         }
       ],
-      "title": "Handshake success ratio",
+      "title": "CQE wait time hit",
       "type": "timeseries"
     },
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "eek7csbvj1l34d"
+        "uid": "der4co44rndogd"
       },
       "fieldConfig": {
         "defaults": {
@@ -237,7 +216,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.1",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
           "editorMode": "code",
@@ -290,7 +269,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "eek7csbvj1l34d"
+        "uid": "der4co44rndogd"
       },
       "fieldConfig": {
         "defaults": {
@@ -344,7 +323,32 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "__systemRef": "hideSeriesFrom",
+            "matcher": {
+              "id": "byNames",
+              "options": {
+                "mode": "exclude",
+                "names": [
+                  "{__name__=\"graceful_disconnect\", instance=\"host.containers.internal:9000\", job=\"vortex\"}"
+                ],
+                "prefix": "All except:",
+                "readOnly": true
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -352,7 +356,7 @@
         "x": 0,
         "y": 8
       },
-      "id": 5,
+      "id": 9,
       "options": {
         "legend": {
           "calcs": [],
@@ -366,15 +370,15 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.1",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
           "disableTextWrap": false,
-          "editorMode": "code",
-          "expr": "pieces_completed",
+          "editorMode": "builder",
+          "expr": "graceful_disconnect",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
-          "legendFormat": "completed",
+          "legendFormat": "__auto",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -382,41 +386,28 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "eek7csbvj1l34d"
+            "uid": "der4co44rndogd"
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "pieces_allocated",
+          "expr": "disconnects",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "allocated",
+          "legendFormat": "__auto",
           "range": true,
           "refId": "B",
           "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "eek7csbvj1l34d"
-          },
-          "editorMode": "code",
-          "expr": "irate(pieces_completed[1s])",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "completed_rate",
-          "range": true,
-          "refId": "C"
         }
       ],
-      "title": "Pieces",
+      "title": "Graceful disconnects",
       "type": "timeseries"
     },
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "eek7csbvj1l34d"
+        "uid": "der4co44rndogd"
       },
       "fieldConfig": {
         "defaults": {
@@ -492,7 +483,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.1",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
           "disableTextWrap": false,
@@ -512,7 +503,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "eek7csbvj1l34d"
+        "uid": "der4co44rndogd"
       },
       "fieldConfig": {
         "defaults": {
@@ -537,9 +528,6 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineStyle": {
-              "fill": "solid"
-            },
             "lineWidth": 1,
             "pointSize": 5,
             "scaleDistribution": {
@@ -569,26 +557,7 @@
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "dash": [
-                    10,
-                    10
-                  ],
-                  "fill": "dash"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -596,7 +565,7 @@
         "x": 0,
         "y": 16
       },
-      "id": 4,
+      "id": 8,
       "options": {
         "legend": {
           "calcs": [],
@@ -610,44 +579,49 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.1",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "peer_inflight",
-          "fullMetaSearch": false,
-          "includeNullMetadata": true,
-          "legendFormat": "inflight {{peer_id}}",
+          "editorMode": "code",
+          "expr": "peer_handshake_attempt",
+          "legendFormat": "attempts",
           "range": true,
-          "refId": "A",
-          "useBackend": false
+          "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "eek7csbvj1l34d"
           },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "peer_target_inflight",
-          "fullMetaSearch": false,
+          "editorMode": "code",
+          "expr": "peer_handshake_timeout",
           "hide": false,
-          "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "target inflight {{peer_id}}",
+          "legendFormat": "__auto",
           "range": true,
-          "refId": "B",
-          "useBackend": false
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "editorMode": "code",
+          "expr": "peer_handshake_success",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "success",
+          "range": true,
+          "refId": "C"
         }
       ],
-      "title": "Peer inflight",
+      "title": "Handshake success ratio",
       "type": "timeseries"
     },
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "eek7csbvj1l34d"
+        "uid": "der4co44rndogd"
       },
       "fieldConfig": {
         "defaults": {
@@ -727,7 +701,7 @@
               "options": {
                 "mode": "exclude",
                 "names": [
-                  "endgame"
+                  "num_connections"
                 ],
                 "prefix": "All except:",
                 "readOnly": true
@@ -766,7 +740,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.1",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
           "disableTextWrap": false,
@@ -859,7 +833,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "eek7csbvj1l34d"
+        "uid": "der4co44rndogd"
       },
       "fieldConfig": {
         "defaults": {
@@ -921,7 +895,7 @@
         "x": 0,
         "y": 24
       },
-      "id": 2,
+      "id": 5,
       "options": {
         "legend": {
           "calcs": [],
@@ -935,27 +909,57 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.1",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "peer_queued",
+          "editorMode": "code",
+          "expr": "pieces_completed",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{peer_id}}",
+          "legendFormat": "completed",
           "range": true,
           "refId": "A",
           "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "pieces_allocated",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "allocated",
+          "range": true,
+          "refId": "B",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "editorMode": "code",
+          "expr": "irate(pieces_completed[1s])",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "completed_rate",
+          "range": true,
+          "refId": "C"
         }
       ],
-      "title": "Queue size",
+      "title": "Pieces",
       "type": "timeseries"
     },
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "eek7csbvj1l34d"
+        "uid": "der4co44rndogd"
       },
       "fieldConfig": {
         "defaults": {
@@ -1032,7 +1036,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.1",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
           "datasource": {
@@ -1053,6 +1057,237 @@
       ],
       "title": "Throughput",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "der4co44rndogd"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "peer_inflight",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "legendFormat": "inflight {{peer_id}}",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "peer_target_inflight",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "target inflight {{peer_id}}",
+          "range": true,
+          "refId": "B",
+          "useBackend": false
+        }
+      ],
+      "title": "Peer inflight",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "der4co44rndogd"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "peer_queued",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "legendFormat": "{{peer_id}}",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Queue size",
+      "type": "timeseries"
     }
   ],
   "preload": false,
@@ -1063,12 +1298,12 @@
     "list": []
   },
   "time": {
-    "from": "now-5m",
+    "from": "now-15m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Throughput",
   "uid": "eebvxemmfqh34d",
-  "version": 31
+  "version": 5
 }

@@ -238,8 +238,7 @@ fn chained_seeding() {
                         }
                     }
 
-                    // Check that we have handled the metrics event before quitting
-                    if middle_shutting_down.load(Ordering::Acquire) && saw_upload {
+                    if middle_shutting_down.load(Ordering::Acquire) {
                         break;
                     }
                 }
@@ -274,6 +273,8 @@ fn chained_seeding() {
                                     "Leecher: Download complete in: {:.2}s",
                                     elapsed.as_secs_f64()
                                 );
+                                // Give time for the other peers to receive the event (sent on tick)
+                                std::thread::sleep(Duration::from_secs(1));
                                 // Stop all peers
                                 let _ = leecher_command_tx.lock().unwrap().enqueue(Command::Stop);
                                 let _ = middle_command_tx_clone2

@@ -29,7 +29,9 @@ use crate::{
         peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
     },
     piece_selector::{self},
-    torrent::{Command, Config, Error, PeerMetrics, State, StateRef, TorrentEvent},
+    torrent::{
+        CQE_WAIT_TIME_NS, Command, Config, Error, PeerMetrics, State, StateRef, TorrentEvent,
+    },
 };
 
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
@@ -281,7 +283,7 @@ impl From<Entry> for RawIoEvent {
     }
 }
 
-const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(250_000_000);
+const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(CQE_WAIT_TIME_NS);
 
 pub struct EventLoop {
     events: SlotMap<EventId, EventData>,
@@ -345,6 +347,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                         log::warn!("Ring busy")
                     }
                     Err(ref err) if err.raw_os_error() == Some(libc::ETIME) => {
+                        #[cfg(feature = "metrics")]
+                        {
+                            let counter = metrics::counter!("cqe_wait_time_hit");
+                            counter.increment(1);
+                        }
                         log::trace!("CQE_WAIT_TIME was reached before target events")
                     }
                     Err(err) => {
@@ -900,6 +907,7 @@ fn report_tick_metrics(
     state: &mut StateRef<'_>,
     peer_metrics: Vec<PeerMetrics>,
     _pending_connections: &HashSet<SockAddr>,
+    num_connections: usize,
     event_tx: &mut Producer<TorrentEvent, 512>,
 ) {
     let mut pieces_completed = 0;
@@ -925,7 +933,7 @@ fn report_tick_metrics(
     #[cfg(feature = "metrics")]
     {
         let gauge = metrics::gauge!("num_connections");
-        gauge.set(peer_metrics.len() as u32);
+        gauge.set(num_connections as u32);
         let gauge = metrics::gauge!("num_pending_connections");
         gauge.set(_pending_connections.len() as u32);
     }
@@ -1005,7 +1013,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             if !connection.peer_choking {
                 // slow start win size increase is handled in update_stats
                 if !connection.slow_start {
-                    // From the libtorrent impl, request queue time = 3
+                    // mimics libtorrent impl
                     let new_queue_capacity = 3 * connection.network_stats.download_throughput
                         / piece_selector::SUBPIECE_SIZE as u64;
                     connection.update_target_inflight(new_queue_capacity as usize);
@@ -1076,7 +1084,13 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             peer_metrics.push(metrics);
         }
     }
-    report_tick_metrics(torrent_state, peer_metrics, pending_connections, event_tx);
+    report_tick_metrics(
+        torrent_state,
+        peer_metrics,
+        pending_connections,
+        connections.len(),
+        event_tx,
+    );
 }
 
 #[cfg(test)]
