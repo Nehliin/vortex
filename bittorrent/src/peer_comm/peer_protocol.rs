@@ -547,7 +547,6 @@ mod tests {
         assert_eq!(&prefix, b"-VT1203-");
     }
 
-
     #[test]
     fn fuzz_encoded_length_bug() {
         let messages = [
