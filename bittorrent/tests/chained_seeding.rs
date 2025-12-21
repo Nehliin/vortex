@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     net::TcpListener,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -97,19 +97,14 @@ fn chained_seeding() {
     .expect("Failed to create leecher state");
     let mut leecher_torrent = Torrent::new(leecher_id, leecher_state);
 
-    // Create command queues
-    let mut seeder_command_q = heapless::spsc::Queue::new();
-    let (mut seeder_command_tx, seeder_command_rc) = seeder_command_q.split();
+    // Create command channels
+    let (seeder_command_tx, seeder_command_rc) = std::sync::mpsc::sync_channel(64);
 
-    let mut middle_command_q = heapless::spsc::Queue::new();
-    let (middle_command_tx, middle_command_rc) = middle_command_q.split();
-    let middle_command_tx = Arc::new(Mutex::new(middle_command_tx));
+    let (middle_command_tx, middle_command_rc) = std::sync::mpsc::sync_channel(64);
     let middle_command_tx_clone1 = middle_command_tx.clone();
     let middle_command_tx_clone2 = middle_command_tx.clone();
 
-    let mut leecher_command_q = heapless::spsc::Queue::new();
-    let (leecher_command_tx, leecher_command_rc) = leecher_command_q.split();
-    let leecher_command_tx = Arc::new(Mutex::new(leecher_command_tx));
+    let (leecher_command_tx, leecher_command_rc) = std::sync::mpsc::sync_channel(64);
     let leecher_command_tx_clone = leecher_command_tx.clone();
 
     let test_time = Instant::now();
@@ -157,9 +152,7 @@ fn chained_seeding() {
                                 log::info!("Seeder listener started on port {}", port);
                                 // Connect middle peer to seeder
                                 middle_command_tx_clone1
-                                    .lock()
-                                    .unwrap()
-                                    .enqueue(Command::ConnectToPeers(vec![
+                                    .send(Command::ConnectToPeers(vec![
                                         format!("127.0.0.1:{}", port).parse().unwrap(),
                                     ]))
                                     .unwrap();
@@ -225,9 +218,7 @@ fn chained_seeding() {
                                 log::info!("Middle peer listener started on port {}", port);
                                 // Connect leecher to middle peer ONLY (not to seeder)
                                 leecher_command_tx_clone
-                                    .lock()
-                                    .unwrap()
-                                    .enqueue(Command::ConnectToPeers(vec![
+                                    .send(Command::ConnectToPeers(vec![
                                         format!("127.0.0.1:{}", port).parse().unwrap(),
                                     ]))
                                     .unwrap();
@@ -276,12 +267,9 @@ fn chained_seeding() {
                                 // Give time for the other peers to receive the event (sent on tick)
                                 std::thread::sleep(Duration::from_secs(1));
                                 // Stop all peers
-                                let _ = leecher_command_tx.lock().unwrap().enqueue(Command::Stop);
-                                let _ = middle_command_tx_clone2
-                                    .lock()
-                                    .unwrap()
-                                    .enqueue(Command::Stop);
-                                let _ = seeder_command_tx.enqueue(Command::Stop);
+                                let _ = leecher_command_tx.send(Command::Stop);
+                                let _ = middle_command_tx_clone2.send(Command::Stop);
+                                let _ = seeder_command_tx.send(Command::Stop);
                                 middle_shutting_down_clone.store(true, Ordering::Release);
                                 seeder_shutting_down_clone.store(true, Ordering::Release);
                                 return;

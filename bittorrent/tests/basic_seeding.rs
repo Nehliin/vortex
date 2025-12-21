@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     net::TcpListener,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -63,14 +63,10 @@ fn basic_seeding() {
     )
     .expect("Failed to create downloader state");
     let mut downloader_torrent = Torrent::new(downloader_id, downloader_state);
-    let mut downloader_command_q = heapless::spsc::Queue::new();
-    let (downloader_command_tx, downloader_command_rc) = downloader_command_q.split();
-    // just to use it from both threads
-    let downloader_command_tx = Arc::new(Mutex::new(downloader_command_tx));
+    let (downloader_command_tx, downloader_command_rc) = std::sync::mpsc::sync_channel(64);
     let downloader_command_tx_clone = downloader_command_tx.clone();
 
-    let mut seeder_command_q = heapless::spsc::Queue::new();
-    let (mut seeder_command_tx, seeder_command_rc) = seeder_command_q.split();
+    let (seeder_command_tx, seeder_command_rc) = std::sync::mpsc::sync_channel(64);
 
     let test_time = Instant::now();
 
@@ -114,9 +110,7 @@ fn basic_seeding() {
                             TorrentEvent::ListenerStarted { port } => {
                                 log::info!("Seeder listener started on port {}", port);
                                 downloader_command_tx_clone
-                                    .lock()
-                                    .unwrap()
-                                    .enqueue(Command::ConnectToPeers(vec![
+                                    .send(Command::ConnectToPeers(vec![
                                         format!("127.0.0.1:{}", port).parse().unwrap(),
                                     ]))
                                     .unwrap();
@@ -163,10 +157,8 @@ fn basic_seeding() {
                                 log::info!("Download complete in: {:.2}s", elapsed.as_secs_f64());
                                 // Give time for the other peers to receive the event (sent on tick)
                                 std::thread::sleep(Duration::from_secs(1));
-                                let _ =
-                                    downloader_command_tx.lock().unwrap().enqueue(Command::Stop);
-                                let _ = seeder_command_tx.enqueue(Command::Stop);
-
+                                let _ = downloader_command_tx.send(Command::Stop);
+                                let _ = seeder_command_tx.send(Command::Stop);
                                 seeder_shutting_down_clone.store(true, Ordering::Release);
                                 return;
                             }
