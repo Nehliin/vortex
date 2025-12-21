@@ -80,7 +80,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            max_connections: 100,
+            max_connections: 128,
             max_reported_outstanding_requests: 512,
             max_unchoked: 8,
             num_ticks_before_unchoke_recalc: 15,
@@ -88,7 +88,7 @@ impl Default for Config {
             seeding_piece_quota: 20,
             cq_size: 4096,
             sq_size: 4096,
-            completion_event_want: 8,
+            completion_event_want: 32,
             buffer_size: (SUBPIECE_SIZE * 2) as usize,
             buffer_pool_size: 256,
         }
