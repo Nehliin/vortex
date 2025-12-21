@@ -58,7 +58,7 @@ fn basic_seeded_download() {
             torrent.start(event_tx, command_rc, listener).unwrap();
         });
         'outer: loop {
-            if download_time.elapsed() >= Duration::from_secs(60) {
+            if download_time.elapsed() >= Duration::from_secs(40) {
                 // Should never take this long
                 panic!("Download is too slow");
             }
