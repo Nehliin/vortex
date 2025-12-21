@@ -34,7 +34,7 @@ fn basic_seeded_download() {
     let our_id = PeerId::generate();
     let mut torrent = Torrent::new(
         our_id,
-        State::from_metadata_and_root(metadata, tmp_dir.path().clone()).unwrap(),
+        State::from_metadata_and_root(metadata, tmp_dir.path().clone(), Config::default()).unwrap(),
     );
 
     let download_time = Instant::now();
