@@ -91,16 +91,39 @@ impl Default for Config {
     }
 }
 
+/// A single torrent containing the current torrent state
+/// and our peer id. This object is responsible for starting
+/// the I/O event loop.
 pub struct Torrent {
     our_id: PeerId,
     state: State,
 }
 
 impl Torrent {
+    /// Create a new torrent from the given state. Use the given peer id
+    /// when communicating with other peers.
     pub fn new(our_id: PeerId, state: State) -> Self {
         Self { our_id, state }
     }
 
+    /// Returns if the torrent is completed or not.
+    /// This is mostly useful to check status BEFORE
+    /// starting the torrent. Use [ `TorrentEvent::TorrentComplete` ]
+    /// to detect if a torrent have been completed download if you start
+    /// an incomplete torrent.
+    pub fn is_complete(&self) -> bool {
+        self.state
+            .torrent_state
+            .as_ref()
+            .is_some_and(|state| state.is_complete)
+    }
+
+    /// Start the I/O event loop and the torrent itself. This will start
+    /// a new io_uring instance and allocate new buffer pools
+    /// will be allocated and registered to the io uring instance.
+    /// This is expected to run in a separate thread and interaction with
+    /// the event loop happens via the spsc command queue. Torrent events will be sent to the
+    /// consumer of the `event_tx` spsc channel.
     pub fn start(
         &mut self,
         event_tx: Producer<TorrentEvent, 512>,
@@ -132,26 +155,45 @@ pub enum Command {
     Stop,
 }
 
+/// Metrics for a given peer
 #[derive(Debug)]
 pub struct PeerMetrics {
+    /// The numer of bytes per second we are currently downloading from the peer
     pub download_throughput: u64,
+    /// The number of bytes per second we are currently uploading to the peer
     pub upload_throughput: u64,
+    /// If this peer is in "endgame" mode. Aka we are downloading pieces from it
+    /// that may be allocated by other peers.
     pub endgame: bool,
+    /// If we suspect this peer is snubbing us
     pub snubbed: bool,
 }
 
-/// Events from the inprogress torrent
+/// Events from the torrent
 #[derive(Debug)]
 pub enum TorrentEvent {
+    /// The torrent finished downloading. Note you will NOT receive
+    /// this event if the torrent already is completed when you are
+    /// starting the torrent. Use [ `Torrent::is_complete` ] to check if it's already completed
+    /// before starting the torrent.
     TorrentComplete,
+    /// The metadata has finished downloading from the connected peers.
+    /// Note you will NOT receive this event if the metadata already is
+    /// completed when starting the torrent.
     MetadataComplete(Box<lava_torrent::torrent::v1::Torrent>),
-    ListenerStarted {
-        port: u16,
-    },
+    /// The listener for incoming connection has finished set up
+    /// on the provided port.
+    ListenerStarted { port: u16 },
+    /// Over all metrics for the torrent, sent every tick.
     TorrentMetrics {
+        /// How many pieces have currently been completed
         pieces_completed: usize,
+        /// How many pieces have been allocated by peers for
+        /// download
         pieces_allocated: usize,
+        /// Peer metrics for all currently connected peers
         peer_metrics: Vec<PeerMetrics>,
+        /// The currently number of unchoked peers
         num_unchoked: usize,
     },
 }
@@ -516,7 +558,6 @@ impl State {
     }
 
     /// This requires validating all the files on disk which may be slow
-    /// TODO: Use custom file format to avoid having to do hash checking of all files
     pub fn from_metadata_and_root(
         metadata: lava_torrent::torrent::v1::Torrent,
         root: PathBuf,
