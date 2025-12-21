@@ -84,6 +84,48 @@ pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], mut buffer: &mu
     buffer.put_slice(&our_peer_id.0 as &[u8]);
 }
 
+/// Constructs the peer ID prefix at compile time from version strings.
+/// Format: `-VT{major:02}{minor:02}-` (e.g., `-VT0002-` for version 0.2.0)
+const fn build_peer_id_prefix(major: &'static str, minor: &'static str) -> [u8; 8] {
+    let major_bytes = major.as_bytes();
+    let minor_bytes = minor.as_bytes();
+
+    let mut prefix = [b'-', b'V', b'T', b'0', b'0', b'0', b'0', b'-'];
+
+    // Parse major version (supports 0-99)
+    match major_bytes.len() {
+        1 => {
+            prefix[4] = major_bytes[0];
+        }
+        2 => {
+            prefix[3] = major_bytes[0];
+            prefix[4] = major_bytes[1];
+        }
+        _ => panic!("Major version must be between 0-99"),
+    }
+
+    // Parse minor version (supports 0-99)
+    match minor_bytes.len() {
+        1 => {
+            prefix[6] = minor_bytes[0];
+        }
+        2 => {
+            prefix[5] = minor_bytes[0];
+            prefix[6] = minor_bytes[1];
+        }
+        _ => panic!("Minor version must be between 0-99"),
+    }
+
+    prefix
+}
+
+/// Constructs the peer ID prefix
+const fn build_peer_id_prefix_from_cargo() -> [u8; 8] {
+    const MAJOR: &str = env!("CARGO_PKG_VERSION_MAJOR");
+    const MINOR: &str = env!("CARGO_PKG_VERSION_MINOR");
+    build_peer_id_prefix(MAJOR, MINOR)
+}
+
 /// Peer id
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(transparent)]
@@ -94,7 +136,7 @@ impl PeerId {
     /// specification.
     pub fn generate() -> Self {
         // Based on http://www.bittorrent.org/beps/bep_0020.html
-        const PREFIX: [u8; 8] = *b"-VT0020-";
+        const PREFIX: [u8; 8] = build_peer_id_prefix_from_cargo();
         let generatated = rand::random::<[u8; 12]>();
         let mut result: [u8; 20] = [0; 20];
         result[0..8].copy_from_slice(&PREFIX);
@@ -460,6 +502,61 @@ pub fn parse_message(mut data: Bytes) -> io::Result<PeerMessage> {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn test_peer_id_prefix_current_version() {
+        // Test with current version 0.2
+        let prefix = build_peer_id_prefix("0", "2");
+        assert_eq!(&prefix, b"-VT0002-");
+        assert_eq!(std::str::from_utf8(&prefix).unwrap(), "-VT0002-");
+    }
+
+    #[test]
+    fn test_peer_id_prefix_single_digits() {
+        let prefix = build_peer_id_prefix("0", "1");
+        assert_eq!(&prefix, b"-VT0001-");
+
+        let prefix = build_peer_id_prefix("1", "5");
+        assert_eq!(&prefix, b"-VT0105-");
+
+        let prefix = build_peer_id_prefix("0", "0");
+        assert_eq!(&prefix, b"-VT0000-");
+
+        let prefix = build_peer_id_prefix("9", "9");
+        assert_eq!(&prefix, b"-VT0909-");
+    }
+
+    #[test]
+    fn test_peer_id_prefix_double_digits() {
+        let prefix = build_peer_id_prefix("10", "20");
+        assert_eq!(&prefix, b"-VT1020-");
+
+        let prefix = build_peer_id_prefix("12", "34");
+        assert_eq!(&prefix, b"-VT1234-");
+
+        let prefix = build_peer_id_prefix("99", "99");
+        assert_eq!(&prefix, b"-VT9999-");
+    }
+
+    #[test]
+    fn test_peer_id_prefix_mixed_digits() {
+        let prefix = build_peer_id_prefix("1", "23");
+        assert_eq!(&prefix, b"-VT0123-");
+
+        let prefix = build_peer_id_prefix("12", "3");
+        assert_eq!(&prefix, b"-VT1203-");
+    }
+
+    #[test]
+    fn test_peer_id_generate_uses_correct_prefix() {
+        let peer_id = PeerId::generate();
+        let prefix = &peer_id.0[..8];
+
+        // Should match the current crate version (0.2.0)
+        let expected = build_peer_id_prefix("0", "2");
+        assert_eq!(prefix, &expected);
+        assert_eq!(std::str::from_utf8(prefix).unwrap(), "-VT0002-");
+    }
 
     #[test]
     fn fuzz_encoded_length_bug() {
