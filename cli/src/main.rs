@@ -3,20 +3,16 @@ use std::{
     io::{self, ErrorKind},
     net::TcpListener,
     path::PathBuf,
-    sync::Arc,
+    sync::mpsc::SyncSender,
     time::{Duration, Instant},
 };
 
 use clap::{Args, Parser};
 use crossbeam_channel::{Receiver, Sender, bounded, select, tick};
-use heapless::{
-    HistoryBuffer,
-    spsc::{Consumer, Producer},
-};
+use heapless::{HistoryBuffer, spsc::Consumer};
 use human_bytes::human_bytes;
 use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;
-use parking_lot::Mutex;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -43,11 +39,7 @@ pub fn decode_info_hash_hex(s: &str) -> [u8; 20] {
         .unwrap()
 }
 
-fn dht_thread(
-    info_hash_id: Id,
-    cmd_tx: Arc<Mutex<Producer<Command, 64>>>,
-    shutdown_signal_rc: Receiver<()>,
-) {
+fn dht_thread(info_hash_id: Id, cmd_tx: SyncSender<Command>, shutdown_signal_rc: Receiver<()>) {
     let mut builder = Dht::builder();
     let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
     if dht_boostrap_nodes.exists() {
@@ -67,10 +59,9 @@ fn dht_thread(
 
     let query = || {
         let all_peers = dht_client.get_peers(info_hash_id);
-        let mut cmd_tx = cmd_tx.lock();
         for peers in all_peers {
             log::info!("Got {} peers", peers.len());
-            cmd_tx.enqueue(Command::ConnectToPeers(peers)).unwrap();
+            cmd_tx.send(Command::ConnectToPeers(peers)).unwrap();
         }
     };
 
@@ -177,15 +168,10 @@ fn main() -> io::Result<()> {
 
     let info_hash_id = Id::from_bytes(state.info_hash()).unwrap();
 
-    let mut command_q = heapless::spsc::Queue::new();
     let mut event_q = heapless::spsc::Queue::new();
 
-    let (command_tx, command_rc) = command_q.split();
+    let (command_tx, command_rc) = std::sync::mpsc::sync_channel(256);
     let (event_tx, event_rc) = event_q.split();
-    // Keeping the mutex out here makes the hotter path
-    // inside bittorrent faster since the spsc queue reciever is
-    // simpler (and better suited to an event loop) compared to a mpmc channel.
-    let command_tx = Arc::new(Mutex::new(command_tx));
 
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     let id = PeerId::generate();
@@ -209,7 +195,7 @@ fn main() -> io::Result<()> {
 }
 
 struct VortexApp<'queue> {
-    cmd_tx: Arc<Mutex<Producer<'queue, Command, 64>>>,
+    cmd_tx: SyncSender<Command>,
     event_rc: Consumer<'queue, TorrentEvent, 512>,
     should_exit: bool,
     start_time: Instant,
@@ -228,7 +214,7 @@ struct VortexApp<'queue> {
 
 impl<'queue> VortexApp<'queue> {
     fn new(
-        cmd_tx: Arc<Mutex<Producer<'queue, Command, 64>>>,
+        cmd_tx: SyncSender<Command>,
         event_rc: Consumer<'queue, TorrentEvent, 512>,
         shutdown_signal_tx: Sender<()>,
         metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
@@ -262,7 +248,7 @@ impl<'queue> VortexApp<'queue> {
     }
 
     fn shutdown(&mut self) {
-        let _ = self.cmd_tx.lock().enqueue(Command::Stop);
+        let _ = self.cmd_tx.send(Command::Stop);
         let _ = self.shutdown_signal_tx.send(());
         self.should_exit = true;
     }

@@ -2,12 +2,13 @@ use std::{
     io,
     net::TcpListener,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd},
+    sync::mpsc::Receiver,
     time::{Duration, Instant},
 };
 
 use ahash::HashSet;
 use ahash::HashSetExt;
-use heapless::spsc::{Consumer, Producer};
+use heapless::spsc::Producer;
 use io_uring::{
     IoUring,
     cqueue::Entry,
@@ -313,7 +314,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         mut ring: IoUring,
         state: &'state mut State,
         mut event_tx: Producer<TorrentEvent, 512>,
-        mut command_rc: Consumer<Command, 64>,
+        mut command_rc: Receiver<Command>,
         listener: TcpListener,
     ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
@@ -531,7 +532,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
         shutting_down: &mut bool,
-        command_rc: &mut Consumer<Command, 64>,
+        command_rc: &mut Receiver<Command>,
         state_ref: &mut StateRef<'state>,
     ) {
         let existing_connections: HashSet<SockAddr> = self
@@ -539,7 +540,7 @@ impl<'scope, 'state: 'scope> EventLoop {
             .iter()
             .map(|(_, peer)| SockAddr::from(peer.peer_addr))
             .collect();
-        while let Some(command) = command_rc.dequeue() {
+        for command in command_rc.try_iter() {
             match command {
                 Command::ConnectToPeers(addrs) => {
                     // Don't connect to new peers if we are shutting down
@@ -1126,8 +1127,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let addr = SocketAddrV4::new([127, 0, 0, 1].into(), addr.port());
 
-        let mut command_q = heapless::spsc::Queue::new();
-        let (mut command_tx, command_rc) = command_q.split();
+        let (command_tx, command_rc) = std::sync::mpsc::sync_channel(64);
         let mut event_q = Queue::<TorrentEvent, 512>::new();
         let (event_tx, _event_rx) = event_q.split();
         // Spawn a thread to accept the connection but not respond
@@ -1160,10 +1160,10 @@ mod tests {
                 })
             });
             command_tx
-                .enqueue(Command::ConnectToPeers(vec![addr]))
+                .send(Command::ConnectToPeers(vec![addr]))
                 .unwrap();
             std::thread::sleep(Duration::from_secs(HANDSHAKE_SHOULD_TIMEOUT));
-            command_tx.enqueue(Command::Stop).unwrap();
+            command_tx.send(Command::Stop).unwrap();
             simulated_peer_thread.join().unwrap();
 
             let snapshot = snapshotter.snapshot();
@@ -1204,8 +1204,7 @@ mod tests {
         let debbuging = DebuggingRecorder::new();
         let snapshotter = debbuging.snapshotter();
 
-        let mut command_q = heapless::spsc::Queue::new();
-        let (mut command_tx, command_rc) = command_q.split();
+        let (command_tx, command_rc) = std::sync::mpsc::sync_channel(64);
         let mut event_q = Queue::<TorrentEvent, 512>::new();
         let (event_tx, mut event_rx) = event_q.split();
 
@@ -1287,7 +1286,7 @@ mod tests {
 
             // Give some time for the handshake to complete
             std::thread::sleep(Duration::from_secs(1));
-            command_tx.enqueue(Command::Stop).unwrap();
+            command_tx.send(Command::Stop).unwrap();
             simulated_peer_thread.join().unwrap();
             event_loop_thread.join().unwrap();
 
