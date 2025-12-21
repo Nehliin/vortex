@@ -791,7 +791,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 conn_parse_and_handle_msgs(connection, state, scope);
                 if connection.extended_extension {
                     connection.outgoing_msgs_buffer.push(OutgoingMsg {
-                        message: extension_handshake_msg(state, &state.config),
+                        message: extension_handshake_msg(state, state.config),
                         ordered: true,
                     });
                 }
@@ -1126,19 +1126,17 @@ mod tests {
             s.spawn(move || {
                 let mut download_state = setup_test();
                 metrics::with_local_recorder(&debbuging, || {
+                    let config = Config::default();
                     let our_id = PeerId::generate();
-                    let mut event_loop = EventLoop::new(
-                        our_id,
-                        SlotMap::<EventId, EventData>::with_key(),
-                        &Config::default(),
-                    );
+                    let mut event_loop =
+                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key(), &config);
                     let ring = IoUring::builder()
                         .setup_single_issuer()
                         .setup_clamp()
-                        .setup_cqsize(4096)
+                        .setup_cqsize(config.cq_size)
                         .setup_defer_taskrun()
                         .setup_coop_taskrun()
-                        .build(4096)
+                        .build(config.sq_size)
                         .unwrap();
                     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                     let result =
@@ -1206,18 +1204,16 @@ mod tests {
                 info_hash_tx.send(info_hash).unwrap();
 
                 metrics::with_local_recorder(&debbuging, || {
-                    let mut event_loop = EventLoop::new(
-                        our_id,
-                        SlotMap::<EventId, EventData>::with_key(),
-                        &Config::default(),
-                    );
+                    let config = Config::default();
+                    let mut event_loop =
+                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key(), &config);
                     let ring = IoUring::builder()
                         .setup_single_issuer()
                         .setup_clamp()
-                        .setup_cqsize(4096)
+                        .setup_cqsize(config.cq_size)
                         .setup_defer_taskrun()
                         .setup_coop_taskrun()
-                        .build(4096)
+                        .build(config.sq_size)
                         .unwrap();
 
                     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

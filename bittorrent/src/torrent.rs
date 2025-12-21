@@ -85,12 +85,12 @@ impl Torrent {
         let ring: IoUring = IoUring::builder()
             .setup_single_issuer()
             .setup_clamp()
-            .setup_cqsize(4096)
+            .setup_cqsize(self.state.config.cq_size)
             .setup_defer_taskrun()
             .setup_coop_taskrun()
-            .build(4096)
+            .build(self.state.config.sq_size)
             .unwrap();
-        let events = SlotMap::with_capacity_and_key(4096);
+        let events = SlotMap::with_capacity_and_key(self.state.config.cq_size as usize);
         let mut event_loop = EventLoop::new(self.our_id, events, &self.state.config);
         event_loop.run(ring, &mut self.state, event_tx, command_rc, listener)
     }
