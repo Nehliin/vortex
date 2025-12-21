@@ -40,14 +40,13 @@ fn basic_seeded_download() {
     assert!(!torrent.is_complete());
 
     let download_time = Instant::now();
-    let mut command_q = heapless::spsc::Queue::new();
+    let (command_tx, command_rc) = std::sync::mpsc::sync_channel(64);
     let mut event_q = heapless::spsc::Queue::new();
 
-    let (mut command_tx, command_rc) = command_q.split();
     let (event_tx, mut event_rc) = event_q.split();
 
     command_tx
-        .enqueue(Command::ConnectToPeers(vec![
+        .send(Command::ConnectToPeers(vec![
             "127.0.0.1:51413".parse().unwrap(),
         ]))
         .unwrap();
@@ -74,7 +73,7 @@ fn basic_seeded_download() {
                         output_path.push("test-file-1/test-file-1");
                         let actual = std::fs::read(output_path).unwrap();
                         assert_eq!(actual, expected);
-                        let _ = command_tx.enqueue(Command::Stop);
+                        let _ = command_tx.send(Command::Stop);
                         break 'outer;
                     }
                     TorrentEvent::MetadataComplete(_torrent) => {

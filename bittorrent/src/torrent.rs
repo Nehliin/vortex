@@ -16,7 +16,7 @@ use crate::{
 use crate::{file_store::FileStore, peer_connection::PeerConnection};
 use ahash::HashSetExt;
 use bitvec::{boxed::BitBox, order::Msb0, vec::BitVec};
-use heapless::spsc::{Consumer, Producer};
+use heapless::spsc::Producer;
 use io_uring::IoUring;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use slotmap::SlotMap;
@@ -126,12 +126,12 @@ impl Torrent {
     /// a new io_uring instance and new buffer pools
     /// will be allocated and registered to the io uring instance.
     /// This is expected to run in a separate thread and interaction with
-    /// the event loop happens via the spsc command queue. Torrent events will be sent to the
+    /// the event loop happens via the mpsc command queue. Torrent events will be sent to the
     /// consumer of the `event_tx` spsc channel.
     pub fn start(
         &mut self,
         event_tx: Producer<TorrentEvent, 512>,
-        command_rc: Consumer<Command, 64>,
+        command_rc: Receiver<Command>,
         listener: TcpListener,
     ) -> Result<(), Error> {
         // check ulimit

@@ -2591,7 +2591,6 @@ dependencies = [
  "log",
  "mainline",
  "metrics-exporter-prometheus",
- "parking_lot",
  "ratatui",
  "throbber-widgets-tui",
  "tikv-jemallocator",
