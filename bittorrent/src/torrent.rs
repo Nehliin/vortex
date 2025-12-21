@@ -1,0 +1,652 @@
+use std::{
+    cell::OnceCell,
+    collections::VecDeque,
+    io::{self},
+    net::{SocketAddrV4, TcpListener},
+    path::{Path, PathBuf},
+    sync::mpsc::{Receiver, Sender},
+    time::{Duration, Instant},
+};
+
+use crate::piece_selector::{CompletedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece};
+use crate::{
+    event_loop::{ConnectionId, EventLoop},
+    peer_comm::peer_protocol::PeerId,
+};
+use crate::{file_store::FileStore, peer_connection::PeerConnection};
+use ahash::HashSetExt;
+use bitvec::{boxed::BitBox, order::Msb0, vec::BitVec};
+use heapless::spsc::{Consumer, Producer};
+use io_uring::IoUring;
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use slotmap::SlotMap;
+use thiserror::Error;
+
+use crate::peer_connection::DisconnectReason;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Encountered IO issue: {0}")]
+    Io(#[from] io::Error),
+    #[error("Peer provider disconnected")]
+    PeerProviderDisconnect,
+}
+
+/// Configuration settings for a given torrent
+#[derive(Debug, Clone, Copy)]
+pub struct Config {
+    /// The max number of total connections that can be open at a time for the torrent
+    pub max_connections: usize,
+    /// The max number of outstanding requests this vortex should report to other peers via the
+    /// `reqq` extension. This currently does not impact the behavoir of vortex but it should impact
+    /// the amount of load connected peers send to us. Vortex does respect connected peers reported
+    /// `reqq` value.
+    pub max_reported_outstanding_requests: u64,
+    /// The maximal amount of allowed unchoked peers at any given time
+    pub max_unchoked: u32,
+    /// Controls how frequently "which peers should be unchoked" is calculated.
+    /// After this number of ticks, vortex will look over all peers and redistribute
+    /// which ones are unchoked and not.
+    pub num_ticks_before_unchoke_recalc: u32,
+    /// Controls the longest possible interval "which peers should be optimistically unchoked" is calculated.
+    /// After this number of ticks, vortex will look over all peers and redistribute
+    /// which ones are optimistically unchoked and not. Note that this may happen more frequently
+    /// than this number suggests due to the normal unchoke distribution "promoting" optimistically
+    /// unchoked peers to normally unchoked peers. In that case this recaluclation will happen
+    /// immedieately afterwards.
+    pub num_ticks_before_optimistic_unchoke_recalc: u32,
+    /// This determines the minimal target of pieces we want to upload to a peer before
+    /// moving on to another peer when the "round-robin" unchoking strategy is used. The
+    /// "round-robin" strategy is currently only used when seeding.
+    pub seeding_piece_quota: u32,
+    /// Controls the size of the io_uring completion queue
+    pub cq_size: u32,
+    /// Controls the size of the io_uring submission queue
+    pub sq_size: u32,
+    /// The event loop will wait for at least these amont of completion events
+    /// before it starts processing them. If the target isn't reached it will wait for
+    /// at most 250ms before processing the ones currently in the completion queue.
+    pub completion_event_want: usize,
+    /// The size of the Write/Read buffers used for IO operations. Defaults to SUBPIECE_SIZE * 2
+    pub buffer_size: usize,
+    /// The size of the Read/Write buffer pools
+    pub buffer_pool_size: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            max_connections: 100,
+            max_reported_outstanding_requests: 512,
+            max_unchoked: 8,
+            num_ticks_before_unchoke_recalc: 15,
+            num_ticks_before_optimistic_unchoke_recalc: 30,
+            seeding_piece_quota: 20,
+            cq_size: 4096,
+            sq_size: 4096,
+            completion_event_want: 8,
+            buffer_size: (SUBPIECE_SIZE * 2) as usize,
+            buffer_pool_size: 256,
+        }
+    }
+}
+
+pub struct Torrent {
+    our_id: PeerId,
+    state: State,
+}
+
+impl Torrent {
+    pub fn new(our_id: PeerId, state: State) -> Self {
+        Self { our_id, state }
+    }
+
+    pub fn start(
+        &mut self,
+        event_tx: Producer<TorrentEvent, 512>,
+        command_rc: Consumer<Command, 64>,
+        listener: TcpListener,
+    ) -> Result<(), Error> {
+        // check ulimit
+        let ring: IoUring = IoUring::builder()
+            .setup_single_issuer()
+            .setup_clamp()
+            .setup_cqsize(self.state.config.cq_size)
+            .setup_defer_taskrun()
+            .setup_coop_taskrun()
+            .build(self.state.config.sq_size)
+            .unwrap();
+        let events = SlotMap::with_capacity_and_key(self.state.config.cq_size as usize);
+        let mut event_loop = EventLoop::new(self.our_id, events, &self.state.config);
+        event_loop.run(ring, &mut self.state, event_tx, command_rc, listener)
+    }
+}
+
+/// Commands that can be sent to the torrent event loop through the command channel
+#[derive(Debug)]
+pub enum Command {
+    /// Connect to peers at the given address.
+    /// Already connected peers will be filtered out
+    ConnectToPeers(Vec<SocketAddrV4>),
+    /// Stop the event loop gracefully
+    Stop,
+}
+
+#[derive(Debug)]
+pub struct PeerMetrics {
+    pub download_throughput: u64,
+    pub upload_throughput: u64,
+    pub endgame: bool,
+    pub snubbed: bool,
+}
+
+/// Events from the inprogress torrent
+#[derive(Debug)]
+pub enum TorrentEvent {
+    TorrentComplete,
+    MetadataComplete(Box<lava_torrent::torrent::v1::Torrent>),
+    ListenerStarted {
+        port: u16,
+    },
+    TorrentMetrics {
+        pieces_completed: usize,
+        pieces_allocated: usize,
+        peer_metrics: Vec<PeerMetrics>,
+        num_unchoked: usize,
+    },
+}
+
+pub struct InitializedState {
+    pub piece_selector: PieceSelector,
+    pub num_unchoked: u32,
+    pub config: Config,
+    pub ticks_to_recalc_unchoke: u32,
+    pub ticks_to_recalc_optimistic_unchoke: u32,
+    pub completed_piece_rc: Receiver<CompletedPiece>,
+    pub completed_piece_tx: Sender<CompletedPiece>,
+    pub pieces: Vec<Option<Piece>>,
+    pub is_complete: bool,
+}
+
+impl InitializedState {
+    pub fn new(torrent: &lava_torrent::torrent::v1::Torrent, config: Config) -> Self {
+        let mut pieces = Vec::with_capacity(torrent.pieces.len());
+        for _ in 0..torrent.pieces.len() {
+            pieces.push(None);
+        }
+        let (tx, rc) = std::sync::mpsc::channel();
+        Self {
+            piece_selector: PieceSelector::new(torrent),
+            num_unchoked: 0,
+            config,
+            ticks_to_recalc_unchoke: config.num_ticks_before_unchoke_recalc,
+            ticks_to_recalc_optimistic_unchoke: config.num_ticks_before_optimistic_unchoke_recalc,
+            completed_piece_rc: rc,
+            completed_piece_tx: tx,
+            pieces,
+            is_complete: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn num_allocated(&self) -> usize {
+        self.pieces
+            .iter()
+            .filter(|piece| piece.as_ref().is_some_and(|piece| piece.ref_count > 0))
+            .count()
+    }
+
+    #[inline]
+    pub fn num_pieces(&self) -> usize {
+        self.pieces.len()
+    }
+
+    // TODO: Put this in the event loop directly instead when that is easier to test
+    pub(crate) fn update_torrent_status(
+        &mut self,
+        connections: &mut SlotMap<ConnectionId, PeerConnection>,
+        event_tx: &mut Producer<'_, TorrentEvent, 512>,
+    ) {
+        while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
+            match completed_piece.hash_matched {
+                Ok(hash_matched) => {
+                    if hash_matched {
+                        self.piece_selector.mark_complete(completed_piece.index);
+                        if !self.is_complete && self.piece_selector.completed_all() {
+                            log::info!("Torrent complete!");
+                            self.is_complete = true;
+                            if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
+                                log::error!("Torrent completion event missed");
+                            }
+                            // We are no longer interestead in any of the
+                            // peers
+                            for (_, peer) in connections.iter_mut() {
+                                peer.not_interested(false);
+                                // If the peer is upload only and
+                                // we are upload only there is no reason
+                                // to stay connected
+                                if peer.is_upload_only {
+                                    peer.pending_disconnect =
+                                        Some(DisconnectReason::RedundantConnection);
+                                }
+                                // Notify all extensions that the torrent completed
+                                for (_, extension) in peer.extensions.iter_mut() {
+                                    extension.on_torrent_complete(&mut peer.outgoing_msgs_buffer);
+                                }
+                            }
+                        }
+                        for (conn_id, peer) in connections.iter_mut() {
+                            if let Some(bitfield) =
+                                self.piece_selector.interesting_peer_pieces(conn_id)
+                                && !bitfield.any()
+                                && peer.is_interesting
+                                && peer.queued.is_empty()
+                                && peer.inflight.is_empty()
+                            {
+                                // We are no longer interestead in this peer
+                                peer.not_interested(false);
+                                // if it's upload only we can close the
+                                // connection since it will never download from
+                                // us
+                                if peer.is_upload_only {
+                                    peer.pending_disconnect =
+                                        Some(DisconnectReason::RedundantConnection);
+                                }
+                            }
+                            peer.have(completed_piece.index as i32, false);
+                        }
+                        log::debug!("Piece {} completed!", completed_piece.index);
+                    } else {
+                        // Only need to mark this as not hashing when it fails
+                        // since otherwise it will be marked as completed and this is moot
+                        self.piece_selector.mark_not_hashing(completed_piece.index);
+                        // TODO: disconnect, there also might be a minimal chance of a race
+                        // condition here where the connection id is replaced (by disconnect +
+                        // new connection so that the wrong peer is marked) but this should be
+                        // EXTREMELY rare
+                        log::error!("Piece hash didn't match expected hash!");
+                        self.piece_selector.mark_not_allocated(
+                            completed_piece.index as i32,
+                            completed_piece.conn_id,
+                        );
+                    }
+                }
+                Err(err) => {
+                    log::error!(
+                        "Failed to sync and hash piece: {} Error: {err}",
+                        completed_piece.index
+                    );
+                }
+            }
+        }
+    }
+
+    // Allocates a piece and increments the piece ref count
+    pub fn allocate_piece(
+        &mut self,
+        index: i32,
+        conn_id: ConnectionId,
+        file_store: &FileStore,
+    ) -> VecDeque<Subpiece> {
+        log::debug!("Allocating piece: conn_id: {conn_id:?}, index: {index}");
+        self.piece_selector.mark_allocated(index, conn_id);
+        match &mut self.pieces[index as usize] {
+            Some(allocated_piece) => allocated_piece.allocate_remaining_subpieces(),
+            None => {
+                let length = self.piece_selector.piece_len(index);
+                // SAFETY: There only exist a single piece per index in the torrent_state
+                // piece vector which guarantees that there can never be two concurrent writable
+                // piece views for the same index
+                let piece_view = unsafe { file_store.writable_piece_view(index).unwrap() };
+                let mut piece = Piece::new(index, length, piece_view);
+                let subpieces = piece.allocate_remaining_subpieces();
+                self.pieces[index as usize] = Some(piece);
+                subpieces
+            }
+        }
+    }
+
+    // Deallocate a piece
+    pub fn deallocate_piece(&mut self, index: i32, conn_id: ConnectionId) {
+        log::debug!("Deallocating piece: conn_id: {conn_id:?}, index: {index}");
+        // Mark the piece as interesting again so it can be picked again
+        // if necessary
+        self.piece_selector
+            .update_peer_piece_intrest(conn_id, index as usize);
+        // The piece might have been mid hashing when a timeout is received
+        // (two separate peer) which causes to be completed whilst another peer
+        // tried to download it. It's fine (TODO: confirm)
+        if let Some(piece) = self.pieces[index as usize].as_mut() {
+            // Will we reach 0 in the ref count?
+            if piece.ref_count == 1 {
+                log::debug!("marked as not allocated: conn_id: {conn_id:?}, index: {index}");
+                self.piece_selector.mark_not_allocated(index, conn_id);
+            }
+            piece.ref_count = piece.ref_count.saturating_sub(1)
+        }
+    }
+
+    pub fn can_preemtively_unchoke(&self) -> bool {
+        self.num_unchoked < self.config.max_unchoked
+    }
+
+    /// Determine the most suited peers to be unchoked based on the selected unchoking strategy.
+    /// Some unchoke slots are left for optimistic unchokes. The strategy currently is only
+    /// affected if the torrent is completed or not.
+    pub fn recalculate_unchokes(
+        &mut self,
+        connections: &mut SlotMap<ConnectionId, PeerConnection>,
+    ) {
+        struct ComparisonData {
+            is_choking: bool,
+            uploaded_since_unchoked: u64,
+            downloaded_in_last_round: u64,
+            uploaded_in_last_round: u64,
+            last_unchoked: Option<Instant>,
+        }
+        log::info!("Recalculating unchokes");
+        let mut peers = Vec::with_capacity(connections.len());
+        for (id, peer) in connections.iter_mut() {
+            if !peer.peer_interested || peer.pending_disconnect.is_some() {
+                peer.network_stats.reset_round();
+                if !peer.is_choking {
+                    if peer.optimistically_unchoked {
+                        peer.optimistically_unchoked = false;
+                        // reset so another peer can be optimistically unchoked
+                        self.ticks_to_recalc_optimistic_unchoke = 0;
+                    }
+                    peer.choke(self, true);
+                }
+
+                continue;
+            }
+            peers.push((
+                id,
+                ComparisonData {
+                    is_choking: peer.is_choking,
+                    uploaded_since_unchoked: peer.network_stats.upload_since_unchoked,
+                    downloaded_in_last_round: peer.network_stats.downloaded_in_last_round,
+                    uploaded_in_last_round: peer.network_stats.uploaded_in_last_round,
+                    last_unchoked: peer.last_unchoked,
+                },
+            ));
+        }
+        if !self.is_complete {
+            // Sort based of downloaded_in_last_round
+            peers.sort_unstable_by(|(_, a), (_, b)| {
+                a.downloaded_in_last_round
+                    .cmp(&b.downloaded_in_last_round)
+                    .reverse()
+            });
+        } else {
+            let piece_length = self.piece_selector.avg_piece_length();
+            let quota_bytes = (piece_length * self.config.seeding_piece_quota) as u64;
+            // The torrent is completed. Do round robin sorting like in libtorrent
+            peers.sort_unstable_by(|(_, a), (_, b)| {
+                let a_quota_complete = !a.is_choking
+                    && a.uploaded_since_unchoked > quota_bytes
+                    && a.last_unchoked
+                        .is_some_and(|time| time.elapsed() > Duration::from_mins(1));
+                let b_quota_complete = !b.is_choking
+                    && b.uploaded_since_unchoked > quota_bytes
+                    && b.last_unchoked
+                        .is_some_and(|time| time.elapsed() > Duration::from_mins(1));
+                if a_quota_complete != b_quota_complete {
+                    a_quota_complete.cmp(&b_quota_complete)
+                } else if a.uploaded_in_last_round != b.uploaded_in_last_round {
+                    a.uploaded_in_last_round
+                        .cmp(&b.uploaded_in_last_round)
+                        .reverse()
+                } else {
+                    a.last_unchoked
+                        .map_or(Duration::MAX, |time| time.elapsed())
+                        .cmp(&b.last_unchoked.map_or(Duration::MAX, |time| time.elapsed()))
+                        .reverse()
+                }
+            });
+        }
+        let optimistic_unchoke_slots = std::cmp::max(1, self.config.max_unchoked / 5);
+        let mut remaining_unchoke_slots = self.config.max_unchoked - optimistic_unchoke_slots;
+        for (id, _) in peers {
+            let peer = &mut connections[id];
+            peer.network_stats.reset_round();
+            if remaining_unchoke_slots > 0 {
+                if peer.is_choking {
+                    log::debug!(
+                        "Peer[{}] now unchoked after recalculating throughputs",
+                        peer.peer_id
+                    );
+                    peer.unchoke(self, true);
+                }
+                remaining_unchoke_slots -= 1;
+                if peer.optimistically_unchoked {
+                    log::trace!(
+                        "Peer[{}] previously optimistically unchoked, promoted to normal unchoke",
+                        peer.peer_id
+                    );
+                    // no longer optimistic, the peer is "promoted"
+                    // to a normal unchoke slot
+                    peer.optimistically_unchoked = false;
+                    // reset so another peer can be optimistically unchoked
+                    self.ticks_to_recalc_optimistic_unchoke = 0;
+                }
+            } else if !peer.is_choking && !peer.optimistically_unchoked {
+                log::debug!(
+                    "Peer[{}] no longer unchoked after recalculating throughputs",
+                    peer.peer_id
+                );
+                peer.choke(self, true);
+            }
+        }
+    }
+
+    // Give some lucky winners unchokes to test if they will have better throughput than the
+    // currently unchoked peers
+    pub fn recalculate_optimistic_unchokes(
+        &mut self,
+        connections: &mut SlotMap<ConnectionId, PeerConnection>,
+    ) {
+        log::info!("Recalculating optimistic unchokes");
+        let num_opt_unchoked = std::cmp::max(1, self.config.max_unchoked / 5) as usize;
+        let mut previously_opt_unchoked = ahash::HashSet::with_capacity(num_opt_unchoked);
+        let mut candidates = Vec::with_capacity(self.config.max_unchoked as usize);
+        for (id, peer) in connections.iter_mut() {
+            if peer.optimistically_unchoked {
+                previously_opt_unchoked.insert(id);
+            }
+            if peer.pending_disconnect.is_none()
+                && peer.peer_interested
+                && (peer.is_choking || peer.optimistically_unchoked)
+            {
+                candidates.push((
+                    id,
+                    peer.last_optimistically_unchoked
+                        .map_or(u64::MAX, |time| time.elapsed().as_secs()),
+                ));
+            }
+        }
+        // Sort in the order of peers that have waited the longest
+        candidates.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
+        for (id, _) in candidates.iter().take(num_opt_unchoked) {
+            let peer = &mut connections[*id];
+            if peer.optimistically_unchoked {
+                log::debug!("Peer[{}] optmistically unchoked again", peer.peer_id);
+                previously_opt_unchoked.remove(id);
+            } else {
+                peer.optimistically_unchoke(self, true);
+            }
+        }
+
+        for id in previously_opt_unchoked {
+            let peer = &mut connections[id];
+            peer.choke(self, true);
+        }
+    }
+}
+
+pub struct FileAndMetadata {
+    pub file_store: FileStore,
+    pub metadata: Box<lava_torrent::torrent::v1::Torrent>,
+}
+
+pub struct State {
+    pub(crate) info_hash: [u8; 20],
+    pub(crate) listener_port: Option<u16>,
+    // TODO: Consider checking this is accessible at construction
+    root: PathBuf,
+    torrent_state: Option<InitializedState>,
+    file: OnceCell<FileAndMetadata>,
+    pub(crate) config: Config,
+}
+
+impl State {
+    pub fn info_hash(&self) -> [u8; 20] {
+        self.info_hash
+    }
+
+    pub fn unstarted(info_hash: [u8; 20], root: PathBuf, config: Config) -> Self {
+        Self {
+            info_hash,
+            root,
+            listener_port: None,
+            torrent_state: None,
+            file: OnceCell::new(),
+            config,
+        }
+    }
+
+    /// This requires validating all the files on disk which may be slow
+    /// TODO: Use custom file format to avoid having to do hash checking of all files
+    pub fn from_metadata_and_root(
+        metadata: lava_torrent::torrent::v1::Torrent,
+        root: PathBuf,
+        config: Config,
+    ) -> io::Result<Self> {
+        let file_store = FileStore::new(&root, &metadata)?;
+        let mut initialized_state = InitializedState::new(&metadata, config);
+        let completed_pieces: Box<[bool]> = metadata
+            .pieces
+            .as_slice()
+            .par_iter()
+            .enumerate()
+            .map(|(idx, hash)| {
+                // SAFETY: The filestore we are reading from is created above and thus there
+                // should not exist any existing writable_piece_views. NOTE: this isn't 100%
+                // guraranteed since someone else could be mmapping the file but it's not much
+                // we can do about that
+                match unsafe { file_store.readable_piece_view(idx as i32) } {
+                    Ok(readable_view) => {
+                        // Since we do not sync it should never panic
+                        readable_view.check_hash(hash, &file_store, false).unwrap()
+                    }
+                    Err(err) => {
+                        if err.kind() != io::ErrorKind::NotFound {
+                            panic!("Unexpected error reading file {err}");
+                        }
+                        false
+                    }
+                }
+            })
+            .collect();
+        let completed_pieces: BitVec<u8, Msb0> = completed_pieces.into_iter().collect();
+        let completed_pieces: BitBox<u8, Msb0> = completed_pieces.into_boxed_bitslice();
+        log::trace!("Completed pieces: {completed_pieces}");
+        initialized_state
+            .piece_selector
+            .set_completed_bitfield(completed_pieces);
+        initialized_state.is_complete = initialized_state.piece_selector.completed_all();
+
+        Ok(Self {
+            info_hash: metadata
+                .info_hash_bytes()
+                .try_into()
+                .expect("Invalid info hash"),
+            root,
+            listener_port: None,
+            torrent_state: Some(initialized_state),
+            file: OnceCell::from(FileAndMetadata {
+                file_store,
+                metadata: Box::new(metadata),
+            }),
+            config,
+        })
+    }
+
+    pub fn inprogress(
+        info_hash: [u8; 20],
+        root: PathBuf,
+        file_store: FileStore,
+        metadata: lava_torrent::torrent::v1::Torrent,
+        state: InitializedState,
+        config: Config,
+    ) -> Self {
+        Self {
+            info_hash,
+            root,
+            listener_port: None,
+            torrent_state: Some(state),
+            file: OnceCell::from(FileAndMetadata {
+                file_store,
+                metadata: Box::new(metadata),
+            }),
+            config,
+        }
+    }
+
+    pub fn as_ref(&mut self) -> StateRef<'_> {
+        StateRef {
+            info_hash: self.info_hash,
+            root: &self.root,
+            listener_port: &self.listener_port,
+            torrent: &mut self.torrent_state,
+            full: &self.file,
+            config: &self.config,
+        }
+    }
+}
+
+pub struct StateRef<'state> {
+    info_hash: [u8; 20],
+    root: &'state Path,
+    pub listener_port: &'state Option<u16>,
+    torrent: &'state mut Option<InitializedState>,
+    full: &'state OnceCell<FileAndMetadata>,
+    pub config: &'state Config,
+}
+
+impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
+    pub fn info_hash(&self) -> &[u8; 20] {
+        &self.info_hash
+    }
+
+    pub fn state(
+        &'e_iter mut self,
+    ) -> Option<(&'state FileAndMetadata, &'e_iter mut InitializedState)> {
+        if let Some(f) = self.full.get() {
+            // SAFETY: If full has been initialized the torrent must have been initialized
+            // as well
+            unsafe { Some((f, self.torrent.as_mut().unwrap_unchecked())) }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn is_initialzied(&self) -> bool {
+        self.full.get().is_some()
+    }
+
+    pub fn init(&'e_iter mut self, metadata: lava_torrent::torrent::v1::Torrent) -> io::Result<()> {
+        if self.is_initialzied() {
+            return Err(io::Error::other("State initialized twice"));
+        }
+        *self.torrent = Some(InitializedState::new(&metadata, *self.config));
+        self.full
+            .set(FileAndMetadata {
+                file_store: FileStore::new(self.root, &metadata)?,
+                metadata: Box::new(metadata),
+            })
+            .map_err(|_e| io::Error::other("State initialized twice"))?;
+        Ok(())
+    }
+}

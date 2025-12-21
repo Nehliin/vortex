@@ -14,13 +14,13 @@ use slotmap::SlotMap;
 use socket2::Socket;
 
 use crate::{
-    Error, InitializedState, PeerMetrics, StateRef,
     event_loop::{ConnectionId, EventData, EventId},
     file_store::FileStore,
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::extended_protocol::{EXTENSIONS, UPLOAD_ONLY, init_extension},
-    peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
+    peer_comm::peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
+    torrent::{InitializedState, PeerMetrics, StateRef},
 };
 
 use super::{extended_protocol::ExtensionProtocol, peer_protocol::ParsedHandshake};
@@ -124,7 +124,7 @@ pub struct OutgoingMsg {
     pub ordered: bool,
 }
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum DisconnectReason {
     #[error("Peer was idle for too long")]
     Idle,
@@ -308,7 +308,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             if self.optimistically_unchoked {
                 // Reset time scaler so another peer can be optimistically unchoked
                 self.optimistically_unchoked = false;
-                torrent_state.optimistic_unchoke_time_scaler = 0;
+                torrent_state.ticks_to_recalc_optimistic_unchoke = 0;
             }
         }
     }

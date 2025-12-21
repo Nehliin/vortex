@@ -70,16 +70,6 @@ impl<'a> arbitrary::Arbitrary<'a> for PeerMessage {
     }
 }
 
-pub fn generate_peer_id() -> PeerId {
-    // Based on http://www.bittorrent.org/beps/bep_0020.html
-    const PREFIX: [u8; 8] = *b"-VT0020-";
-    let generatated = rand::random::<[u8; 12]>();
-    let mut result: [u8; 20] = [0; 20];
-    result[0..8].copy_from_slice(&PREFIX);
-    result[8..].copy_from_slice(&generatated);
-    PeerId(result)
-}
-
 pub const HANDSHAKE_SIZE: usize = 68;
 
 pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], mut buffer: &mut [u8]) {
@@ -97,6 +87,18 @@ pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], mut buffer: &mu
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(transparent)]
 pub struct PeerId([u8; 20]);
+
+impl PeerId {
+    pub fn generate() -> Self {
+        // Based on http://www.bittorrent.org/beps/bep_0020.html
+        const PREFIX: [u8; 8] = *b"-VT0020-";
+        let generatated = rand::random::<[u8; 12]>();
+        let mut result: [u8; 20] = [0; 20];
+        result[0..8].copy_from_slice(&PREFIX);
+        result[8..].copy_from_slice(&generatated);
+        PeerId(result)
+    }
+}
 
 impl Display for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

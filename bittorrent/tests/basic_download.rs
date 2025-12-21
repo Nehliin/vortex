@@ -4,7 +4,7 @@ use std::{
 };
 
 use metrics_exporter_prometheus::PrometheusBuilder;
-use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
+use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
 
 use crate::common::TempDir;
 mod common;
@@ -31,10 +31,10 @@ fn basic_seeded_download() {
     let metadata =
         lava_torrent::torrent::v1::Torrent::read_from_file("../assets/test-file-1.torrent")
             .unwrap();
-    let our_id = generate_peer_id();
+    let our_id = PeerId::generate();
     let mut torrent = Torrent::new(
         our_id,
-        State::from_metadata_and_root(metadata, tmp_dir.path().clone()).unwrap(),
+        State::from_metadata_and_root(metadata, tmp_dir.path().clone(), Config::default()).unwrap(),
     );
 
     let download_time = Instant::now();
@@ -58,7 +58,7 @@ fn basic_seeded_download() {
             torrent.start(event_tx, command_rc, listener).unwrap();
         });
         'outer: loop {
-            if download_time.elapsed() >= Duration::from_secs(60) {
+            if download_time.elapsed() >= Duration::from_secs(40) {
                 // Should never take this long
                 panic!("Download is too slow");
             }

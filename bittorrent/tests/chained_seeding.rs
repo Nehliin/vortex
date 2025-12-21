@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use vortex_bittorrent::{Command, State, Torrent, TorrentEvent, generate_peer_id};
+use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
 
 use common::{
     TempDir, calculate_file_hashes, create_test_torrent, init_test_environment,
@@ -68,21 +68,33 @@ fn chained_seeding() {
     }));
 
     // Set up seeder state with completed files
-    let seeder_id = generate_peer_id();
-    let seeder_state = State::from_metadata_and_root(metadata.clone(), seeder_dir.path().clone())
-        .expect("Failed to create seeder state");
+    let seeder_id = PeerId::generate();
+    let seeder_state = State::from_metadata_and_root(
+        metadata.clone(),
+        seeder_dir.path().clone(),
+        Config::default(),
+    )
+    .expect("Failed to create seeder state");
     let mut seeder_torrent = Torrent::new(seeder_id, seeder_state);
 
     // Set up middle peer state (empty)
-    let middle_id = generate_peer_id();
-    let middle_state = State::from_metadata_and_root(metadata.clone(), middle_dir.path().clone())
-        .expect("Failed to create middle state");
+    let middle_id = PeerId::generate();
+    let middle_state = State::from_metadata_and_root(
+        metadata.clone(),
+        middle_dir.path().clone(),
+        Config::default(),
+    )
+    .expect("Failed to create middle state");
     let mut middle_torrent = Torrent::new(middle_id, middle_state);
 
     // Set up leecher state (empty)
-    let leecher_id = generate_peer_id();
-    let leecher_state = State::from_metadata_and_root(metadata.clone(), leecher_dir.path().clone())
-        .expect("Failed to create leecher state");
+    let leecher_id = PeerId::generate();
+    let leecher_state = State::from_metadata_and_root(
+        metadata.clone(),
+        leecher_dir.path().clone(),
+        Config::default(),
+    )
+    .expect("Failed to create leecher state");
     let mut leecher_torrent = Torrent::new(leecher_id, leecher_state);
 
     // Create command queues
@@ -194,15 +206,10 @@ fn chained_seeding() {
                             }
                             TorrentEvent::TorrentMetrics {
                                 pieces_completed,
-                                pieces_allocated,
                                 peer_metrics,
                                 ..
                             } => {
-                                log::debug!(
-                                    "Middle peer progress: {}/{} pieces",
-                                    pieces_completed,
-                                    pieces_allocated
-                                );
+                                log::debug!("Middle peer progress: {}", pieces_completed,);
                                 for metrics in peer_metrics {
                                     if metrics.upload_throughput > 0 {
                                         log::info!(
@@ -279,15 +286,9 @@ fn chained_seeding() {
                                 return;
                             }
                             TorrentEvent::TorrentMetrics {
-                                pieces_completed,
-                                pieces_allocated,
-                                ..
+                                pieces_completed, ..
                             } => {
-                                log::debug!(
-                                    "Leecher progress: {}/{} pieces",
-                                    pieces_completed,
-                                    pieces_allocated
-                                );
+                                log::debug!("Leecher progress: {} pieces", pieces_completed,);
                             }
                             TorrentEvent::MetadataComplete(_) => {
                                 log::info!("Leecher: Metadata complete");

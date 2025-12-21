@@ -20,19 +20,18 @@ use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    Command, Error, OPTIMISTIC_UNCHOKE_INTERVAL, PeerMetrics, State, StateRef, TorrentEvent,
-    UNCHOKE_INTERVAL,
     buf_pool::BufferPool,
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
-    peer_comm::{extended_protocol::extension_handshake_msg, peer_connection::ConnectionState},
-    peer_connection::{DisconnectReason, OutgoingMsg, PeerConnection},
-    peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
-    piece_selector::{self, SUBPIECE_SIZE},
+    peer_comm::{
+        extended_protocol::extension_handshake_msg,
+        peer_connection::{ConnectionState, DisconnectReason, OutgoingMsg, PeerConnection},
+        peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
+    },
+    piece_selector::{self},
+    torrent::{Command, Config, Error, PeerMetrics, State, StateRef, TorrentEvent},
 };
 
-const MAX_CONNECTIONS: usize = 100;
-pub const MAX_OUTSTANDING_REQUESTS: u64 = 512;
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
 const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
 
@@ -296,13 +295,13 @@ pub struct EventLoop {
 }
 
 impl<'scope, 'state: 'scope> EventLoop {
-    pub fn new(our_id: PeerId, events: SlotMap<EventId, EventData>) -> Self {
+    pub fn new(our_id: PeerId, events: SlotMap<EventId, EventData>, config: &Config) -> Self {
         Self {
             events,
-            write_pool: BufferPool::new(256, (SUBPIECE_SIZE * 2) as _),
-            read_ring: BufferRing::new(1, 256, (SUBPIECE_SIZE * 2) as _).unwrap(),
-            connections: SlotMap::with_capacity_and_key(MAX_CONNECTIONS),
-            pending_connections: HashSet::with_capacity(MAX_CONNECTIONS),
+            write_pool: BufferPool::new(config.buffer_pool_size, config.buffer_size),
+            read_ring: BufferRing::new(1, config.buffer_pool_size, config.buffer_size).unwrap(),
+            connections: SlotMap::with_capacity_and_key(config.max_connections),
+            pending_connections: HashSet::with_capacity(config.max_connections),
             our_id,
         }
     }
@@ -340,7 +339,7 @@ impl<'scope, 'state: 'scope> EventLoop {
 
             loop {
                 let args = types::SubmitArgs::new().timespec(CQE_WAIT_TIME);
-                match submitter.submit_with_args(8, &args) {
+                match submitter.submit_with_args(state_ref.config.completion_event_want, &args) {
                     Ok(_) => (),
                     Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {
                         log::warn!("Ring busy")
@@ -547,7 +546,8 @@ impl<'scope, 'state: 'scope> EventLoop {
                         {
                             continue;
                         }
-                        if self.pending_connections.len() + self.connections.len() < MAX_CONNECTIONS
+                        if self.pending_connections.len() + self.connections.len()
+                            < state_ref.config.max_connections
                         {
                             self.pending_connections.insert(addr.clone());
                             self.connect_to_peer(addr, sq);
@@ -672,7 +672,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 );
                 // Trigger a write handshake here so we end up in the same code path
                 // as outgoing connections. It will simplify things greatly
-                self.write_handshake(sq, state.info_hash, socket, addr);
+                self.write_handshake(sq, *state.info_hash(), socket, addr);
             }
             EventType::Connect { socket, addr } => {
                 log::info!(
@@ -687,7 +687,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 let old = self.events.remove(io_event.event_data_idx).unwrap();
                 debug_assert!(matches!(old.typ, EventType::Dummy));
 
-                self.write_handshake(sq, state.info_hash, socket, addr);
+                self.write_handshake(sq, *state.info_hash(), socket, addr);
             }
             EventType::Write { socket, addr } => {
                 let fd = socket.as_raw_fd();
@@ -752,7 +752,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                     .unwrap();
                 let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
-                let parsed_handshake = parse_handshake(state.info_hash, handshake_data).unwrap();
+                let parsed_handshake = parse_handshake(*state.info_hash(), handshake_data).unwrap();
                 // Remove from pending connections if this was an outgoing connection
                 // For incoming connections (from Accept), this will be false and that's ok
                 self.pending_connections
@@ -791,7 +791,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 conn_parse_and_handle_msgs(connection, state, scope);
                 if connection.extended_extension {
                     connection.outgoing_msgs_buffer.push(OutgoingMsg {
-                        message: extension_handshake_msg(state),
+                        message: extension_handshake_msg(state, state.config),
                         ordered: true,
                     });
                 }
@@ -952,18 +952,22 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
     if let Some((_, torrent_state)) = torrent_state.state() {
-        torrent_state.unchoke_time_scaler = torrent_state.unchoke_time_scaler.saturating_sub(1);
-        torrent_state.optimistic_unchoke_time_scaler = torrent_state
-            .optimistic_unchoke_time_scaler
+        torrent_state.ticks_to_recalc_unchoke =
+            torrent_state.ticks_to_recalc_unchoke.saturating_sub(1);
+        torrent_state.ticks_to_recalc_optimistic_unchoke = torrent_state
+            .ticks_to_recalc_optimistic_unchoke
             .saturating_sub(1);
 
-        if torrent_state.unchoke_time_scaler == 0 && !connections.is_empty() {
-            torrent_state.unchoke_time_scaler = UNCHOKE_INTERVAL;
+        if torrent_state.ticks_to_recalc_unchoke == 0 && !connections.is_empty() {
+            torrent_state.ticks_to_recalc_unchoke =
+                torrent_state.config.num_ticks_before_unchoke_recalc;
             torrent_state.recalculate_unchokes(connections);
         }
 
-        if torrent_state.optimistic_unchoke_time_scaler == 0 && !connections.is_empty() {
-            torrent_state.optimistic_unchoke_time_scaler = OPTIMISTIC_UNCHOKE_INTERVAL;
+        if torrent_state.ticks_to_recalc_optimistic_unchoke == 0 && !connections.is_empty() {
+            torrent_state.ticks_to_recalc_optimistic_unchoke = torrent_state
+                .config
+                .num_ticks_before_optimistic_unchoke_recalc;
             torrent_state.recalculate_optimistic_unchokes(connections);
         }
     }
@@ -1079,9 +1083,9 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Command;
-    use crate::peer_protocol::generate_peer_id;
+    use crate::peer_protocol::PeerId;
     use crate::test_utils::setup_test;
+    use crate::torrent::Command;
     use heapless::spsc::Queue;
     use io_uring::IoUring;
     use metrics::Key;
@@ -1124,16 +1128,17 @@ mod tests {
             s.spawn(move || {
                 let mut download_state = setup_test();
                 metrics::with_local_recorder(&debbuging, || {
-                    let our_id = generate_peer_id();
+                    let config = Config::default();
+                    let our_id = PeerId::generate();
                     let mut event_loop =
-                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key());
+                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key(), &config);
                     let ring = IoUring::builder()
                         .setup_single_issuer()
                         .setup_clamp()
-                        .setup_cqsize(4096)
+                        .setup_cqsize(config.cq_size)
                         .setup_defer_taskrun()
                         .setup_coop_taskrun()
-                        .build(4096)
+                        .build(config.sq_size)
                         .unwrap();
                     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                     let result =
@@ -1192,7 +1197,7 @@ mod tests {
         let (event_tx, mut event_rx) = event_q.split();
 
         let (info_hash_tx, info_hash_rx) = std::sync::mpsc::channel();
-        let our_id = generate_peer_id();
+        let our_id = PeerId::generate();
 
         std::thread::scope(|s| {
             let event_loop_thread = s.spawn(move || {
@@ -1201,15 +1206,16 @@ mod tests {
                 info_hash_tx.send(info_hash).unwrap();
 
                 metrics::with_local_recorder(&debbuging, || {
+                    let config = Config::default();
                     let mut event_loop =
-                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key());
+                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key(), &config);
                     let ring = IoUring::builder()
                         .setup_single_issuer()
                         .setup_clamp()
-                        .setup_cqsize(4096)
+                        .setup_cqsize(config.cq_size)
                         .setup_defer_taskrun()
                         .setup_coop_taskrun()
-                        .build(4096)
+                        .build(config.sq_size)
                         .unwrap();
 
                     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1246,7 +1252,7 @@ mod tests {
 
                 // Send a valid handshake
                 let mut handshake = vec![0u8; HANDSHAKE_SIZE];
-                let peer_id = generate_peer_id();
+                let peer_id = PeerId::generate();
                 write_handshake(peer_id, info_hash, &mut handshake);
                 stream.write_all(&handshake).unwrap();
 
