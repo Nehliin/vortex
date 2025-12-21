@@ -218,7 +218,8 @@ fn chained_seeding() {
                         }
                     }
 
-                    if middle_shutting_down.load(Ordering::Acquire) {
+                    // Check that we have handled the metrics event before quitting
+                    if middle_shutting_down.load(Ordering::Acquire) && saw_upload {
                         break;
                     }
                 }
