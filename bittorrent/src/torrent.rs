@@ -32,18 +32,44 @@ pub enum Error {
     PeerProviderDisconnect,
 }
 
+/// Configuration settings for a given torrent
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
+    /// The max number of total connections that can be open at a time for the torrent
     pub max_connections: usize,
-    pub max_outstanding_requests: u64,
+    /// The max number of outstanding requests this vortex should report to other peers via the
+    /// `reqq` extension. This currently does not impact the behavoir of vortex but it should impact
+    /// the amount of load connected peers send to us. Vortex does respect connected peers reported
+    /// `reqq` value.
+    pub max_reported_outstanding_requests: u64,
+    /// The maximal amount of allowed unchoked peers at any given time
     pub max_unchoked: u32,
-    pub unchoke_interval: u32,
-    pub optimistic_unchoke_interval: u32,
+    /// Controls how frequently "which peers should be unchoked" is calculated.
+    /// After this number of ticks, vortex will look over all peers and redistribute
+    /// which ones are unchoked and not.
+    pub num_ticks_before_unchoke_recalc: u32,
+    /// Controls the longest possible interval "which peers should be optimistically unchoked" is calculated.
+    /// After this number of ticks, vortex will look over all peers and redistribute
+    /// which ones are optimistically unchoked and not. Note that this may happen more frequently
+    /// than this number suggests due to the normal unchoke distribution "promoting" optimistically
+    /// unchoked peers to normally unchoked peers. In that case this recaluclation will happen
+    /// immedieately afterwards.
+    pub num_ticks_before_optimistic_unchoke_recalc: u32,
+    /// This determines the minimal target of pieces we want to upload to a peer before
+    /// moving on to another peer when the "round-robin" unchoking strategy is used. The
+    /// "round-robin" strategy is currently only used when seeding.
     pub seeding_piece_quota: u32,
+    /// Controls the size of the io_uring completion queue
     pub cq_size: u32,
+    /// Controls the size of the io_uring submission queue
     pub sq_size: u32,
+    /// The event loop will wait for at least these amont of completion events
+    /// before it starts processing them. If the target isn't reached it will wait for
+    /// at most 250ms before processing the ones currently in the completion queue.
     pub completion_event_want: usize,
+    /// The size of the Write/Read buffers used for IO operations. Defaults to SUBPIECE_SIZE * 2
     pub buffer_size: usize,
+    /// The size of the Read/Write buffer pools
     pub buffer_pool_size: usize,
 }
 
@@ -51,10 +77,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             max_connections: 100,
-            max_outstanding_requests: 512,
+            max_reported_outstanding_requests: 512,
             max_unchoked: 8,
-            unchoke_interval: 15,
-            optimistic_unchoke_interval: 30,
+            num_ticks_before_unchoke_recalc: 15,
+            num_ticks_before_optimistic_unchoke_recalc: 30,
             seeding_piece_quota: 20,
             cq_size: 4096,
             sq_size: 4096,
@@ -96,11 +122,11 @@ impl Torrent {
     }
 }
 
-/// Commands that can be sent to the event loop through the command channel
+/// Commands that can be sent to the torrent event loop through the command channel
 #[derive(Debug)]
 pub enum Command {
-    /// Connect to peers at the given address
-    /// already connected peers will be filtered out
+    /// Connect to peers at the given address.
+    /// Already connected peers will be filtered out
     ConnectToPeers(Vec<SocketAddrV4>),
     /// Stop the event loop gracefully
     Stop,
@@ -153,8 +179,8 @@ impl InitializedState {
             piece_selector: PieceSelector::new(torrent),
             num_unchoked: 0,
             config,
-            ticks_to_recalc_unchoke: config.unchoke_interval,
-            ticks_to_recalc_optimistic_unchoke: config.optimistic_unchoke_interval,
+            ticks_to_recalc_unchoke: config.num_ticks_before_unchoke_recalc,
+            ticks_to_recalc_optimistic_unchoke: config.num_ticks_before_optimistic_unchoke_recalc,
             completed_piece_rc: rc,
             completed_piece_tx: tx,
             pieces,

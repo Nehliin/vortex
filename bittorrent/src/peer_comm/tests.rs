@@ -2173,7 +2173,7 @@ fn extension_handshake_generates_correct_message() {
         assert_eq!(dict.get("p".as_bytes()).unwrap().as_u64().unwrap(), 1234);
         assert_eq!(
             dict.get("reqq".as_bytes()).unwrap().as_u64().unwrap(),
-            state_ref.config.max_outstanding_requests
+            state_ref.config.max_reported_outstanding_requests
         );
         assert_eq!(
             dict.get("metadata_size".as_bytes())

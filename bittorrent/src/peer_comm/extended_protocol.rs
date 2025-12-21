@@ -88,7 +88,7 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef, config: &Config) -> Pee
     }
     handshake.insert(
         "reqq",
-        bt_bencode::value::to_value(&config.max_outstanding_requests).unwrap(),
+        bt_bencode::value::to_value(&config.max_reported_outstanding_requests).unwrap(),
     );
 
     PeerMessage::Extended {
