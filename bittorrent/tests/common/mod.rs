@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{collections::HashMap, path::PathBuf};
 
 use lava_torrent::torrent::v1::TorrentBuilder;

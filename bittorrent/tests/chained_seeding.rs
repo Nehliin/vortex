@@ -54,6 +54,19 @@ fn chained_seeding() {
     let middle_dir = TempDir::new(&format!("{}_middle", torrent_name));
     let leecher_dir = TempDir::new(&format!("{}_leecher", torrent_name));
 
+    let middle_dir_path = middle_dir.path().clone();
+    let leecher_dir_path = leecher_dir.path().clone();
+    let seeder_dir_path = seeder_dir.path().clone();
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        prev_hook(info);
+        // hacky clean up if a panic happens
+        std::fs::remove_dir_all(&middle_dir_path).unwrap();
+        std::fs::remove_dir_all(&leecher_dir_path).unwrap();
+        std::fs::remove_dir_all(&seeder_dir_path).unwrap();
+        std::process::abort();
+    }));
+
     // Set up seeder state with completed files
     let seeder_id = generate_peer_id();
     let seeder_state = State::from_metadata_and_root(metadata.clone(), seeder_dir.path().clone())
@@ -218,7 +231,8 @@ fn chained_seeding() {
                         }
                     }
 
-                    if middle_shutting_down.load(Ordering::Acquire) {
+                    // Check that we have handled the metrics event before quitting
+                    if middle_shutting_down.load(Ordering::Acquire) && saw_upload {
                         break;
                     }
                 }
