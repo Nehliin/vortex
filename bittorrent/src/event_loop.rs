@@ -386,7 +386,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                             for msg in msgs {
                                 connection.handle_message(msg, &mut state_ref, scope);
                             }
-                            // TODO: Trigger unchoked peers
                         }
                     }
 
