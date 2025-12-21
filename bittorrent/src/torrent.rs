@@ -652,7 +652,7 @@ impl State {
         }
     }
 
-    pub(crate) fn as_ref(&mut self) -> StateRef<'_> {
+    pub fn as_ref(&mut self) -> StateRef<'_> {
         StateRef {
             info_hash: self.info_hash,
             root: &self.root,
