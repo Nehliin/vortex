@@ -34,6 +34,8 @@ pub enum Error {
     PeerProviderDisconnect,
 }
 
+pub const CQE_WAIT_TIME_NS: u32 = 150_000_000;
+
 /// Configuration settings for a given torrent
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
@@ -67,7 +69,7 @@ pub struct Config {
     pub sq_size: u32,
     /// The event loop will wait for at least these amont of completion events
     /// before it starts processing them. If the target isn't reached it will wait for
-    /// at most 250ms before processing the ones currently in the completion queue.
+    /// at most [ `CQE_WAIT_TIME_NS` ] nanoseconds before processing the ones currently in the completion queue.
     pub completion_event_want: usize,
     /// The size of the Write/Read buffers used for IO operations. Defaults to SUBPIECE_SIZE * 2
     pub buffer_size: usize,

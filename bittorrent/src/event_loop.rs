@@ -29,7 +29,9 @@ use crate::{
         peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
     },
     piece_selector::{self},
-    torrent::{Command, Config, Error, PeerMetrics, State, StateRef, TorrentEvent},
+    torrent::{
+        CQE_WAIT_TIME_NS, Command, Config, Error, PeerMetrics, State, StateRef, TorrentEvent,
+    },
 };
 
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
@@ -281,7 +283,7 @@ impl From<Entry> for RawIoEvent {
     }
 }
 
-const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(250_000_000);
+const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(CQE_WAIT_TIME_NS);
 
 pub struct EventLoop {
     events: SlotMap<EventId, EventData>,
@@ -345,6 +347,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                         log::warn!("Ring busy")
                     }
                     Err(ref err) if err.raw_os_error() == Some(libc::ETIME) => {
+                        #[cfg(feature = "metrics")]
+                        {
+                            let counter = metrics::counter!("cqe_wait_time_hit");
+                            counter.increment(1);
+                        }
                         log::trace!("CQE_WAIT_TIME was reached before target events")
                     }
                     Err(err) => {
