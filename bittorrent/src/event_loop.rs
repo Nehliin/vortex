@@ -1091,6 +1091,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    #[cfg(feature = "metrics")]
     fn handshake_timeout() {
         env_logger::builder()
             .is_test(true)
@@ -1175,6 +1176,7 @@ mod tests {
 
     // Tests that a peer can successfully connect to our listener
     #[test]
+    #[cfg(feature = "metrics")]
     fn peer_can_connect_to_listener() {
         env_logger::builder()
             .is_test(true)
