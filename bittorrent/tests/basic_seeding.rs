@@ -125,8 +125,7 @@ fn basic_seeding() {
                         }
                     }
 
-                    // Check that we have handled the metrics event before quitting
-                    if seeder_shutting_down.load(Ordering::Acquire) && saw_upload {
+                    if seeder_shutting_down.load(Ordering::Acquire) {
                         break;
                     }
                 }
@@ -153,7 +152,7 @@ fn basic_seeding() {
                 });
 
                 loop {
-                    if test_time.elapsed() >= Duration::from_secs(60) {
+                    if test_time.elapsed() >= Duration::from_secs(40) {
                         panic!("Test timeout - download took too long");
                     }
 
@@ -165,6 +164,8 @@ fn basic_seeding() {
                                 let _ =
                                     downloader_command_tx.lock().unwrap().enqueue(Command::Stop);
                                 let _ = seeder_command_tx.enqueue(Command::Stop);
+                                // Give time for the other peers to receive the event (sent on tick)
+                                std::thread::sleep(Duration::from_secs(1));
                                 seeder_shutting_down_clone.store(true, Ordering::Release);
                                 return;
                             }
