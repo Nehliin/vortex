@@ -161,11 +161,12 @@ fn basic_seeding() {
                             TorrentEvent::TorrentComplete => {
                                 let elapsed = test_time.elapsed();
                                 log::info!("Download complete in: {:.2}s", elapsed.as_secs_f64());
+                                // Give time for the other peers to receive the event (sent on tick)
+                                std::thread::sleep(Duration::from_secs(1));
                                 let _ =
                                     downloader_command_tx.lock().unwrap().enqueue(Command::Stop);
                                 let _ = seeder_command_tx.enqueue(Command::Stop);
-                                // Give time for the other peers to receive the event (sent on tick)
-                                std::thread::sleep(Duration::from_secs(1));
+
                                 seeder_shutting_down_clone.store(true, Ordering::Release);
                                 return;
                             }
