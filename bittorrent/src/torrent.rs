@@ -119,7 +119,7 @@ impl Torrent {
     }
 
     /// Start the I/O event loop and the torrent itself. This will start
-    /// a new io_uring instance and allocate new buffer pools
+    /// a new io_uring instance and new buffer pools
     /// will be allocated and registered to the io uring instance.
     /// This is expected to run in a separate thread and interaction with
     /// the event loop happens via the spsc command queue. Torrent events will be sent to the
@@ -531,6 +531,7 @@ pub struct FileAndMetadata {
     pub metadata: Box<lava_torrent::torrent::v1::Torrent>,
 }
 
+/// Current state of the torrent
 pub struct State {
     pub(crate) info_hash: [u8; 20],
     pub(crate) listener_port: Option<u16>,
@@ -542,10 +543,16 @@ pub struct State {
 }
 
 impl State {
+    /// The torrent info hash
     pub fn info_hash(&self) -> [u8; 20] {
         self.info_hash
     }
 
+    /// Use this constructor if the torrent is unstarted.
+    /// `info_hash` is the info hash of the torrent that should be downloaded.
+    /// `root` is the directory where the torrent will be downloaded into.
+    /// Vortex will create this directory if it doesn't already exist.
+    /// `config` is the vortex config that should be used
     pub fn unstarted(info_hash: [u8; 20], root: PathBuf, config: Config) -> Self {
         Self {
             info_hash,
@@ -557,7 +564,17 @@ impl State {
         }
     }
 
-    /// This requires validating all the files on disk which may be slow
+    /// Use this constructor if you have access to the torrent metadata
+    /// and/or if the torrent has already started.
+    ///
+    /// `metadata` is the metadata associated with the torrent.
+    /// `root` is the directory where potentially already started torrent files
+    /// are expected to be found. If the folder doesn't exist vortex will create it.
+    ///
+    /// `config` is the vortex config that should be used.
+    ///
+    /// NOTE: This will go through all files in `root` and hash their pieces (in parallel) to determine torrent progress
+    /// which may be slow on large torrents.
     pub fn from_metadata_and_root(
         metadata: lava_torrent::torrent::v1::Torrent,
         root: PathBuf,
@@ -613,6 +630,7 @@ impl State {
         })
     }
 
+    #[cfg(test)]
     pub fn inprogress(
         info_hash: [u8; 20],
         root: PathBuf,
@@ -634,7 +652,7 @@ impl State {
         }
     }
 
-    pub fn as_ref(&mut self) -> StateRef<'_> {
+    pub(crate) fn as_ref(&mut self) -> StateRef<'_> {
         StateRef {
             info_hash: self.info_hash,
             root: &self.root,

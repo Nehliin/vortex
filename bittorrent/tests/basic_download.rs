@@ -37,6 +37,8 @@ fn basic_seeded_download() {
         State::from_metadata_and_root(metadata, tmp_dir.path().clone(), Config::default()).unwrap(),
     );
 
+    assert!(!torrent.is_complete());
+
     let download_time = Instant::now();
     let mut command_q = heapless::spsc::Queue::new();
     let mut event_q = heapless::spsc::Queue::new();
