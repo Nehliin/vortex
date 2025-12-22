@@ -140,14 +140,10 @@ pub fn write_to_connection<Q: SubmissionQueue>(
         io_uring::squeue::Flags::empty()
     };
     let buffer = buffer.as_slice();
-    let write_op = opcode::Write::new(
-        types::Fd(fd),
-        buffer.as_ptr(),
-        buffer.len() as u32,
-    )
-    .build()
-    .user_data(event_id.data().as_ffi())
-    .flags(flags);
+    let write_op = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
+        .build()
+        .user_data(event_id.data().as_ffi())
+        .flags(flags);
     sq.push(write_op);
 }
 
