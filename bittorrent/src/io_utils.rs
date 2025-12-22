@@ -15,6 +15,7 @@ use slotmap::{Key, SlotMap};
 use socket2::Socket;
 
 use crate::{
+    buf_pool::Buffer,
     buf_ring::Bgid,
     event_loop::{ConnectionId, EventData, EventId, EventType},
 };
@@ -119,31 +120,34 @@ impl<Q: SubmissionQueue> BackloggedSubmissionQueue<Q> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn write_to_connection<Q: SubmissionQueue>(
     conn_id: ConnectionId,
     fd: RawFd,
     events: &mut SlotMap<EventId, EventData>,
     sq: &mut BackloggedSubmissionQueue<Q>,
-    buffer_index: usize,
-    buffer: &[u8],
+    buffer: Buffer<'_>,
     ordered: bool,
 ) {
     let event_id = events.insert(EventData {
         typ: EventType::ConnectedWrite {
             connection_idx: conn_id,
         },
-        buffer_idx: Some(buffer_index),
+        buffer_idx: Some(buffer.index()),
     });
     let flags = if ordered {
         io_uring::squeue::Flags::IO_LINK
     } else {
         io_uring::squeue::Flags::empty()
     };
-    let write_op = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
-        .build()
-        .user_data(event_id.data().as_ffi())
-        .flags(flags);
+    let buffer = buffer.as_slice();
+    let write_op = opcode::Write::new(
+        types::Fd(fd),
+        buffer.as_ptr(),
+        buffer.len() as u32,
+    )
+    .build()
+    .user_data(event_id.data().as_ffi())
+    .flags(flags);
     sq.push(write_op);
 }
 

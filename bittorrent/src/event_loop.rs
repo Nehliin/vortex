@@ -457,16 +457,16 @@ impl<'scope, 'state: 'scope> EventLoop {
                     if let ConnectionState::Connected(socket) = &connection.connection_state {
                         for msg in connection.outgoing_msgs_buffer.iter_mut() {
                             let conn_fd = socket.as_raw_fd();
-                            let buffer = self.write_pool.get_buffer();
-                            msg.message.encode(buffer.inner);
+                            let mut buffer = self.write_pool.get_buffer();
                             let size = msg.message.encoded_size();
+                            let writable_slice = buffer.get_writable_slice(size).unwrap();
+                            msg.message.encode(writable_slice);
                             io_utils::write_to_connection(
                                 conn_id,
                                 conn_fd,
                                 &mut self.events,
                                 &mut sq,
-                                buffer.index,
-                                &buffer.inner[..size],
+                                buffer,
                                 msg.ordered,
                             );
                         }
@@ -510,21 +510,20 @@ impl<'scope, 'state: 'scope> EventLoop {
         socket: Socket,
         addr: SockAddr,
     ) {
-        let buffer = self.write_pool.get_buffer();
-        write_handshake(self.our_id, info_hash, buffer.inner);
+        let mut buffer = self.write_pool.get_buffer();
+        let wriable_slice = buffer
+            .get_writable_slice(HANDSHAKE_SIZE)
+            .expect("Buffer size is too small");
+        write_handshake(self.our_id, info_hash, wriable_slice);
         let fd = socket.as_raw_fd();
         let write_event_id = self.events.insert(EventData {
             typ: EventType::Write { socket, addr },
-            buffer_idx: Some(buffer.index),
+            buffer_idx: Some(buffer.index()),
         });
-        let write_op = opcode::Write::new(
-            types::Fd(fd),
-            buffer.inner.as_ptr(),
-            // TODO: Handle this better
-            HANDSHAKE_SIZE as u32,
-        )
-        .build()
-        .user_data(write_event_id.data().as_ffi());
+        let buffer = buffer.as_slice();
+        let write_op = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
+            .build()
+            .user_data(write_event_id.data().as_ffi());
         sq.push(write_op);
     }
 

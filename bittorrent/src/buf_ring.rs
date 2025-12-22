@@ -1,11 +1,16 @@
 use core::panic;
-use std::{io, ptr, sync::atomic::AtomicU16};
+use std::{
+    io,
+    ops::{Deref, DerefMut},
+    ptr,
+    sync::atomic::AtomicU16,
+};
 
 use io_uring::{Submitter, types};
 
 /// An anonymous region of memory mapped using `mmap(2)`, not backed by a file
 /// but that is guaranteed to be page-aligned and zero-filled.
-struct AnonymousMmap {
+pub struct AnonymousMmap {
     addr: ptr::NonNull<libc::c_void>,
     len: usize,
 }
@@ -30,6 +35,20 @@ impl AnonymousMmap {
                 }
             }
         }
+    }
+}
+
+impl Deref for AnonymousMmap {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::slice::from_raw_parts(self.addr.as_ptr().cast(), self.len) }
+    }
+}
+
+impl DerefMut for AnonymousMmap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { core::slice::from_raw_parts_mut(self.addr.as_ptr().cast(), self.len) }
     }
 }
 
