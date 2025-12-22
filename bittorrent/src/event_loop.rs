@@ -369,6 +369,14 @@ impl<'scope, 'state: 'scope> EventLoop {
                     return Err(Error::Io(err));
                 }
 
+                #[cfg(feature = "metrics")]
+                {
+                    let gauge = metrics::gauge!("write_pool_free_buffers");
+                    gauge.set(self.write_pool.free_buffers() as u32);
+                    let gauge = metrics::gauge!("write_pool_allocated_buffers");
+                    gauge.set(self.write_pool.allocated_buffers() as u32);
+                }
+
                 let tick_delta = last_tick.elapsed();
                 if tick_delta > Duration::from_secs(1) {
                     tick(
@@ -429,7 +437,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                         }
                         // time to return any potential write buffers
                         if let Some(write_idx) = buffer_idx {
-                            self.write_pool.return_buffer(write_idx);
+                            // SAFETY: All Buffers are dropped when the write operations
+                            // are sent to io_uring
+                            unsafe {
+                                self.write_pool.return_buffer(write_idx);
+                            }
                         }
                     } else {
                         let err = io_event.result.unwrap_err();
@@ -455,19 +467,40 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                 for (conn_id, connection) in self.connections.iter_mut() {
                     if let ConnectionState::Connected(socket) = &connection.connection_state {
-                        for msg in connection.outgoing_msgs_buffer.iter_mut() {
-                            let conn_fd = socket.as_raw_fd();
-                            let buffer = self.write_pool.get_buffer();
-                            msg.message.encode(buffer.inner);
+                        let mut buffer = self.write_pool.get_buffer();
+                        let conn_fd = socket.as_raw_fd();
+                        let mut ordered = false;
+                        for msg in connection.outgoing_msgs_buffer.iter() {
                             let size = msg.message.encoded_size();
+                            // If any massage is ordered make the whole socket write ordered
+                            ordered |= msg.ordered;
+                            if let Ok(writable_slice) = buffer.get_writable_slice(size) {
+                                msg.message.encode(writable_slice);
+                            } else {
+                                // Buffer is full, flush this one and fetch a new one
+                                io_utils::write_to_connection(
+                                    conn_id,
+                                    conn_fd,
+                                    &mut self.events,
+                                    &mut sq,
+                                    buffer,
+                                    ordered,
+                                );
+                                buffer = self.write_pool.get_buffer();
+                                let writable_slice = buffer
+                                    .get_writable_slice(size)
+                                    .expect("Buffer size to small to contain a single message");
+                                msg.message.encode(writable_slice);
+                            }
+                        }
+                        if !buffer.as_slice().is_empty() {
                             io_utils::write_to_connection(
                                 conn_id,
                                 conn_fd,
                                 &mut self.events,
                                 &mut sq,
-                                buffer.index,
-                                &buffer.inner[..size],
-                                msg.ordered,
+                                buffer,
+                                ordered,
                             );
                         }
                     }
@@ -510,21 +543,20 @@ impl<'scope, 'state: 'scope> EventLoop {
         socket: Socket,
         addr: SockAddr,
     ) {
-        let buffer = self.write_pool.get_buffer();
-        write_handshake(self.our_id, info_hash, buffer.inner);
+        let mut buffer = self.write_pool.get_buffer();
+        let wriable_slice = buffer
+            .get_writable_slice(HANDSHAKE_SIZE)
+            .expect("Buffer size is too small");
+        write_handshake(self.our_id, info_hash, wriable_slice);
         let fd = socket.as_raw_fd();
         let write_event_id = self.events.insert(EventData {
             typ: EventType::Write { socket, addr },
-            buffer_idx: Some(buffer.index),
+            buffer_idx: Some(buffer.index()),
         });
-        let write_op = opcode::Write::new(
-            types::Fd(fd),
-            buffer.inner.as_ptr(),
-            // TODO: Handle this better
-            HANDSHAKE_SIZE as u32,
-        )
-        .build()
-        .user_data(write_event_id.data().as_ffi());
+        let buffer = buffer.as_slice();
+        let write_op = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
+            .build()
+            .user_data(write_event_id.data().as_ffi());
         sq.push(write_op);
     }
 
