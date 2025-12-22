@@ -214,7 +214,6 @@ mod tests {
         // Get first buffer
         let buffer1 = pool.get_buffer();
         let index1 = buffer1.index();
-        drop(buffer1);
 
         // Return it to the pool
         unsafe {
