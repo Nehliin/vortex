@@ -429,7 +429,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                         }
                         // time to return any potential write buffers
                         if let Some(write_idx) = buffer_idx {
-                            self.write_pool.return_buffer(write_idx);
+                            // SAFETY: All Buffers are dropped when the write operations
+                            // are sent to io_uring
+                            unsafe {
+                                self.write_pool.return_buffer(write_idx);
+                            }
                         }
                     } else {
                         let err = io_event.result.unwrap_err();

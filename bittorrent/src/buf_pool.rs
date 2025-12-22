@@ -23,8 +23,8 @@ impl Buffer<'_> {
     }
 
     pub fn get_writable_slice(&mut self, len: usize) -> io::Result<&mut [u8]> {
-        if len >= self.inner.len() + self.cursor {
-            return Err(io::ErrorKind::ResourceBusy.into());
+        if self.cursor + len > self.inner.len() {
+            return Err(io::ErrorKind::StorageFull.into());
         }
         let result = &mut self.inner[self.cursor..self.cursor + len];
         self.cursor += len;
@@ -65,7 +65,9 @@ impl BufferPool {
         }
     }
 
-    pub fn return_buffer(&mut self, index: usize) {
+    // TODO: enforce safety in type system
+    /// SAFETY: You must ensure that the buffer on the given index is never used after returning it
+    pub unsafe fn return_buffer(&mut self, index: usize) {
         self.free.push(index);
     }
 }
