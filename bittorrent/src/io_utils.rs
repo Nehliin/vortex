@@ -18,6 +18,7 @@ use crate::{
     buf_pool::Buffer,
     buf_ring::Bgid,
     event_loop::{ConnectionId, EventData, EventId, EventType},
+    file_store::DiskOp,
 };
 
 pub trait SubmissionQueue {
@@ -145,6 +146,17 @@ pub fn write_to_connection<Q: SubmissionQueue>(
         .user_data(event_id.data().as_ffi())
         .flags(flags);
     sq.push(write_op);
+}
+
+pub fn write_to_disk(
+    events: &mut SlotMap<EventId, EventData>,
+    sq: &mut BackloggedSubmissionQueue<Q>,
+    disk_op: DiskOp,
+) {
+    let event_id = events.insert(EventData {
+        typ: EventType::DiskWrite { data: disk_op.data },
+        buffer_idx: None,
+    });
 }
 
 // NOTE: Socket contains an OwnedFd which automatically closes
