@@ -65,6 +65,16 @@ impl BufferPool {
         }
     }
 
+    #[cfg(feature = "metrics")]
+    pub fn free_buffers(&self) -> usize {
+        self.free.len()
+    }
+
+    #[cfg(feature = "metrics")]
+    pub fn allocated_buffers(&self) -> usize {
+        self.allocated_buffers.len()
+    }
+
     // TODO: enforce safety in type system
     /// SAFETY: You must ensure that the buffer on the given index is never used after returning it
     pub unsafe fn return_buffer(&mut self, index: usize) {

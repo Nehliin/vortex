@@ -369,6 +369,14 @@ impl<'scope, 'state: 'scope> EventLoop {
                     return Err(Error::Io(err));
                 }
 
+                #[cfg(feature = "metrics")]
+                {
+                    let gauge = metrics::gauge!("write_pool_free_buffers");
+                    gauge.set(self.write_pool.free_buffers() as u32);
+                    let gauge = metrics::gauge!("write_pool_allocated_buffers");
+                    gauge.set(self.write_pool.allocated_buffers() as u32);
+                }
+
                 let tick_delta = last_tick.elapsed();
                 if tick_delta > Duration::from_secs(1) {
                     tick(
