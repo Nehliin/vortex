@@ -21,7 +21,7 @@ use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    buf_pool::BufferPool,
+    buf_pool::{Buffer, BufferPool},
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::{
@@ -467,19 +467,48 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                 for (conn_id, connection) in self.connections.iter_mut() {
                     if let ConnectionState::Connected(socket) = &connection.connection_state {
-                        for msg in connection.outgoing_msgs_buffer.iter_mut() {
-                            let conn_fd = socket.as_raw_fd();
-                            let mut buffer = self.write_pool.get_buffer();
+                        let mut maybe_buffer: Option<Buffer<'_>> = None;
+                        let conn_fd = socket.as_raw_fd();
+                        let mut ordered = false;
+                        for msg in connection.outgoing_msgs_buffer.iter() {
                             let size = msg.message.encoded_size();
-                            let writable_slice = buffer.get_writable_slice(size).unwrap();
-                            msg.message.encode(writable_slice);
+                            // If any massage is ordered make the whole socket write ordered
+                            ordered |= msg.ordered;
+                            let writable_slice = match maybe_buffer.as_mut() {
+                                Some(buffer) => buffer.get_writable_slice(size),
+                                None => {
+                                    maybe_buffer = Some(self.write_pool.get_buffer());
+                                    maybe_buffer
+                                        .as_mut()
+                                        .expect("Buffer must exist")
+                                        .get_writable_slice(size)
+                                }
+                            };
+                            match writable_slice {
+                                Ok(writable_slice) => {
+                                    msg.message.encode(writable_slice);
+                                }
+                                Err(_) => {
+                                    // Buffer is full, flush this one and fetch a new one
+                                    io_utils::write_to_connection(
+                                        conn_id,
+                                        conn_fd,
+                                        &mut self.events,
+                                        &mut sq,
+                                        maybe_buffer.take().expect("Buffer must exist"),
+                                        ordered,
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(buffer) = maybe_buffer {
                             io_utils::write_to_connection(
                                 conn_id,
                                 conn_fd,
                                 &mut self.events,
                                 &mut sq,
                                 buffer,
-                                msg.ordered,
+                                ordered,
                             );
                         }
                     }
