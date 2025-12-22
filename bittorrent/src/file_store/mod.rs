@@ -1,6 +1,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use file::MmapFile;
@@ -56,15 +57,23 @@ impl WritablePieceFileView {
             if current_write_head >= file.file_handle.len() {
                 continue;
             }
-
             let max_possible_write =
                 (file.file_handle.len() - current_write_head).min(data.len() - subpiece_written);
+
+            #[cfg(feature = "metrics")]
+            let write_time = Instant::now();
+
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     data.as_ptr().add(subpiece_written),
                     file.file_handle.ptr().add(current_write_head).as_ptr() as _,
                     max_possible_write,
                 );
+            }
+            #[cfg(feature = "metrics")]
+            {
+                let histogram = metrics::histogram!("disk_write_time");
+                histogram.record(write_time.elapsed().as_micros() as u32);
             }
             subpiece_written += max_possible_write;
             // Break early if we've written the entire subpiece
@@ -123,10 +132,19 @@ impl ReadablePieceFileView {
             // what is the maximum that can be read
             let max_possible_read =
                 (file.file_handle.len() - current_read_head).min(buffer.len() - subpiece_read);
+
+            #[cfg(feature = "metrics")]
+            let read_time = Instant::now();
+
             let file_buffer = file.file_handle.get();
             buffer[subpiece_read..subpiece_read + max_possible_read].copy_from_slice(
                 &file_buffer[current_read_head..current_read_head + max_possible_read],
             );
+            #[cfg(feature = "metrics")]
+            {
+                let histogram = metrics::histogram!("disk_read_time");
+                histogram.record(read_time.elapsed().as_micros() as u32);
+            }
             subpiece_read += max_possible_read;
             // Break early if the subpiece has been completely read
             if subpiece_read >= buffer.len() {
