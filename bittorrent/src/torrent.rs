@@ -71,10 +71,14 @@ pub struct Config {
     /// before it starts processing them. If the target isn't reached it will wait for
     /// at most [ `CQE_WAIT_TIME_NS` ] nanoseconds before processing the ones currently in the completion queue.
     pub completion_event_want: usize,
-    /// The size of the Write/Read buffers used for IO operations. Defaults to SUBPIECE_SIZE * 2
-    pub buffer_size: usize,
-    /// The size of the Read/Write buffer pools
-    pub buffer_pool_size: usize,
+    /// The size of the Read buffers used for network operations. Defaults to SUBPIECE_SIZE * 2
+    pub network_read_buffer_size: usize,
+    /// The size of the Write buffers used for network operations. Defaults to SUBPIECE_SIZE + 4Kb
+    pub network_write_buffer_size: usize,
+    /// The size of the Write network buffer pools
+    pub write_buffer_pool_size: usize,
+    /// The size of the Reaad network buffer pools
+    pub read_buffer_pool_size: usize,
 }
 
 impl Default for Config {
@@ -89,8 +93,10 @@ impl Default for Config {
             cq_size: 4096,
             sq_size: 4096,
             completion_event_want: 32,
-            buffer_size: (SUBPIECE_SIZE * 2) as usize,
-            buffer_pool_size: 256,
+            network_read_buffer_size: (SUBPIECE_SIZE * 2) as usize,
+            read_buffer_pool_size: 256,
+            network_write_buffer_size: (SUBPIECE_SIZE + 4096) as usize,
+            write_buffer_pool_size: 256,
         }
     }
 }

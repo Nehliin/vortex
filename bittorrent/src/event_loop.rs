@@ -301,8 +301,16 @@ impl<'scope, 'state: 'scope> EventLoop {
     pub fn new(our_id: PeerId, events: SlotMap<EventId, EventData>, config: &Config) -> Self {
         Self {
             events,
-            write_pool: BufferPool::new(config.buffer_pool_size, config.buffer_size),
-            read_ring: BufferRing::new(1, config.buffer_pool_size, config.buffer_size).unwrap(),
+            write_pool: BufferPool::new(
+                config.write_buffer_pool_size,
+                config.network_write_buffer_size,
+            ),
+            read_ring: BufferRing::new(
+                1,
+                config.read_buffer_pool_size,
+                config.network_read_buffer_size,
+            )
+            .unwrap(),
             connections: SlotMap::with_capacity_and_key(config.max_connections),
             pending_connections: HashSet::with_capacity(config.max_connections),
             our_id,
@@ -374,7 +382,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                     let gauge = metrics::gauge!("write_pool_free_buffers");
                     gauge.set(self.write_pool.free_buffers() as u32);
                     let gauge = metrics::gauge!("write_pool_allocated_buffers");
-                    gauge.set(self.write_pool.allocated_buffers() as u32);
+                    gauge.set(self.write_pool.total_buffers() as u32);
                 }
 
                 let tick_delta = last_tick.elapsed();
