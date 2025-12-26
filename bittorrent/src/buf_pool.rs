@@ -79,12 +79,10 @@ impl BufferPool {
         }
     }
 
-    #[cfg(feature = "metrics")]
     pub fn free_buffers(&self) -> usize {
         self.free.count_ones()
     }
 
-    #[cfg(feature = "metrics")]
     pub fn total_buffers(&self) -> usize {
         self.pool.len()
     }
@@ -235,9 +233,7 @@ mod tests {
         let index1 = buffer1.index();
 
         // Return it to the pool
-        unsafe {
-            pool.return_buffer(index1);
-        }
+        pool.return_buffer(buffer1);
 
         // Get another buffer - should reuse the returned one
         let buffer2 = pool.get_buffer();
@@ -260,17 +256,16 @@ mod tests {
     }
 
     #[test]
-    fn test_buffer_pool_allocation_on_demand() {
+    fn test_buffer_pool_pre_allocation() {
         let mut pool = BufferPool::new(2, 256);
 
-        // Pool starts with no allocated buffers
-        assert_eq!(pool.pool.len(), 0);
+        // Pool pre-allocates all buffers
+        assert_eq!(pool.pool.len(), 2);
 
-        // First get_buffer allocates
+        // Getting buffers doesn't change pool size (until we exceed capacity)
         let _buffer1 = pool.get_buffer();
-        assert_eq!(pool.pool.len(), 1);
+        assert_eq!(pool.pool.len(), 2);
 
-        // Second get_buffer allocates
         let _buffer2 = pool.get_buffer();
         assert_eq!(pool.pool.len(), 2);
     }
@@ -301,4 +296,176 @@ mod tests {
         buffer.get_writable_slice(5).expect("should succeed");
         assert_eq!(buffer.as_slice().len(), 35);
     }
+
+    #[test]
+    fn test_buffer_pool_growth() {
+        let mut pool = BufferPool::new(2, 256);
+
+        // Initial size is 2
+        assert_eq!(pool.pool.len(), 2);
+
+        // Get all pre-allocated buffers
+        let buf1 = pool.get_buffer();
+        let buf2 = pool.get_buffer();
+
+        // Getting a third buffer should trigger growth
+        let buf3 = pool.get_buffer();
+
+        // Pool should grow to next power of 2 (from 2 to 4)
+        assert_eq!(pool.pool.len(), 4);
+
+        // All buffers should have different indices
+        assert_ne!(buf1.index(), buf2.index());
+        assert_ne!(buf1.index(), buf3.index());
+        assert_ne!(buf2.index(), buf3.index());
+    }
+
+
+    #[test]
+    fn test_buffer_pool_multiple_growth_cycles() {
+        let mut pool = BufferPool::new(1, 64);
+
+        let mut buffers = Vec::new();
+
+        // First buffer - pool size 1
+        buffers.push(pool.get_buffer());
+        assert_eq!(pool.pool.len(), 1);
+
+        // Second buffer - should grow to 2
+        buffers.push(pool.get_buffer());
+        assert_eq!(pool.pool.len(), 2);
+
+        // Third buffer - should grow to 4
+        buffers.push(pool.get_buffer());
+        assert_eq!(pool.pool.len(), 4);
+
+        // Fourth buffer - still 4
+        buffers.push(pool.get_buffer());
+        assert_eq!(pool.pool.len(), 4);
+
+        // Fifth buffer - should grow to 8
+        buffers.push(pool.get_buffer());
+        assert_eq!(pool.pool.len(), 8);
+    }
+
+    #[test]
+    fn test_buffer_return_resets_cursor() {
+        let mut pool = BufferPool::new(1, 1024);
+
+        // Get buffer and write to it
+        let mut buffer = pool.get_buffer();
+        let index = buffer.index();
+        buffer.get_writable_slice(100).expect("should succeed");
+        assert_eq!(buffer.as_slice().len(), 100);
+
+        // Return buffer
+        pool.return_buffer(buffer);
+
+        // Get the same buffer again
+        let buffer2 = pool.get_buffer();
+        assert_eq!(buffer2.index(), index);
+
+        // Cursor should be reset to 0
+        assert_eq!(buffer2.as_slice().len(), 0);
+    }
+
+    #[test]
+    fn test_buffer_pool_return_and_reuse_multiple() {
+        let mut pool = BufferPool::new(2, 512);
+
+        // Get two buffers
+        let buf1 = pool.get_buffer();
+        let buf2 = pool.get_buffer();
+        let idx1 = buf1.index();
+        let idx2 = buf2.index();
+
+        // Return both
+        pool.return_buffer(buf1);
+        pool.return_buffer(buf2);
+
+        // Get two more - should reuse the same indices
+        let buf3 = pool.get_buffer();
+        let buf4 = pool.get_buffer();
+
+        // Should get the same indices (order may vary)
+        let new_indices = vec![buf3.index(), buf4.index()];
+        assert!(new_indices.contains(&idx1));
+        assert!(new_indices.contains(&idx2));
+    }
+
+    #[test]
+    fn test_buffer_pool_partial_return() {
+        let mut pool = BufferPool::new(3, 256);
+
+        // Get three buffers
+        let buf1 = pool.get_buffer();
+        let buf2 = pool.get_buffer();
+        let buf3 = pool.get_buffer();
+        let idx2 = buf2.index();
+
+        // Return only the middle one
+        pool.return_buffer(buf2);
+
+        // Get a new buffer - should reuse buf2's index
+        let buf4 = pool.get_buffer();
+        assert_eq!(buf4.index(), idx2);
+
+        // Still holding buf1, buf3, buf4 - pool shouldn't grow yet
+        assert_eq!(pool.pool.len(), 3);
+
+        // Clean up
+        pool.return_buffer(buf1);
+        pool.return_buffer(buf3);
+        pool.return_buffer(buf4);
+    }
+
+    #[test]
+    fn test_buffer_data_written_readable() {
+        let mut pool = BufferPool::new(1, 1024);
+        let mut buffer = pool.get_buffer();
+
+        // Write sequential data
+        for i in 0..10 {
+            let slice = buffer.get_writable_slice(1).expect("should succeed");
+            slice[0] = i * 10;
+        }
+
+        // Verify all data is readable
+        let data = buffer.as_slice();
+        assert_eq!(data.len(), 10);
+        for i in 0..10 {
+            assert_eq!(data[i], i as u8 * 10);
+        }
+    }
+
+    #[test]
+    fn test_buffer_pool_metrics_after_growth() {
+        let mut pool = BufferPool::new(2, 128);
+
+        assert_eq!(pool.free_buffers(), 2);
+        assert_eq!(pool.total_buffers(), 2);
+
+        // Get all buffers
+        let buf1 = pool.get_buffer();
+        let buf2 = pool.get_buffer();
+
+        assert_eq!(pool.free_buffers(), 0);
+        assert_eq!(pool.total_buffers(), 2);
+
+        // Get one more to trigger growth
+        let buf3 = pool.get_buffer();
+
+        // Pool grew to 4, and we have 3 buffers out
+        assert_eq!(pool.free_buffers(), 1);
+        assert_eq!(pool.total_buffers(), 4);
+
+        // Return all buffers
+        pool.return_buffer(buf1);
+        pool.return_buffer(buf2);
+        pool.return_buffer(buf3);
+
+        assert_eq!(pool.free_buffers(), 4);
+        assert_eq!(pool.total_buffers(), 4);
+    }
+   
 }
