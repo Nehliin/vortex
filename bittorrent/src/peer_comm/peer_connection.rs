@@ -1095,7 +1095,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     );
                     return;
                 };
-                let file_store = &read_state.file_store;
+                let file_store = &mut read_state.file_store;
                 let torrent_info = &read_state.metadata;
                 if !self.is_valid_piece(index, begin, data.len(), torrent_state.num_pieces()) {
                     self.pending_disconnect = Some(DisconnectReason::ProtocolError(
@@ -1111,12 +1111,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 );
                 self.update_stats(index, begin, data.len() as u32);
 
-                if let Some(readable_piece_view) = torrent_state.pieces[index as usize]
+                if let Some(buffer) = torrent_state.pieces[index as usize]
                     .take_if(|piece| {
-                        piece.on_subpiece(index, begin, &data[..], file_store);
+                        piece.on_subpiece(index, begin, &data[..]);
                         piece.is_complete()
                     })
-                    .map(|completed_piece| completed_piece.into_readable())
+                    .map(|completed_piece| completed_piece.into_buffer())
                 {
                     if torrent_state.piece_selector.has_completed(index as usize)
                         // We assume the hash will match, if not we will just request it again
@@ -1132,9 +1132,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     let complete_tx = torrent_state.completed_piece_tx.clone();
                     let conn_id = self.conn_id;
                     scope.spawn(move |_| {
-                        let hash = &torrent_info.pieces[readable_piece_view.index as usize];
-                        let hash_check_result =
-                            readable_piece_view.check_hash(hash, file_store, true);
+                        let hash = &torrent_info.pieces[index as usize];
+                        let mut hasher = sha1::Sha1::new();
+                        hasher.update(buffer.as_slice());
+                        let hash_check_result = hasher.finalize().as_slice() == hash;
                         complete_tx
                             .send(CompletedPiece {
                                 index: index as usize,

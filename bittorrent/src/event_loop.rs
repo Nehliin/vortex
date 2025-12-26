@@ -60,6 +60,9 @@ pub enum EventType {
     ConnectedRecv {
         connection_idx: ConnectionId,
     },
+    DiskWrite {
+        data: Box<[u8]>
+    },
     Cancel,
     Close {
         maybe_connection_idx: Option<ConnectionId>,
@@ -467,8 +470,13 @@ impl<'scope, 'state: 'scope> EventLoop {
                     }
                 }
 
-                if let Some((_, torrent_state)) = state_ref.state() {
+                if let Some((file_store, torrent_state)) = state_ref.state() {
                     torrent_state.update_torrent_status(&mut self.connections, &mut event_tx);
+                    for disk_op in file_store.file_store.disk_operations.iter() {
+                        let buffer = self.write_pool.get_buffer();
+                        io_utils::write_to_disk(&mut self.events, &mut sq, disk_op);
+                    }
+
                 }
 
                 for (conn_id, connection) in self

@@ -260,75 +260,60 @@ impl InitializedState {
         event_tx: &mut Producer<'_, TorrentEvent>,
     ) {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
-            match completed_piece.hash_matched {
-                Ok(hash_matched) => {
-                    if hash_matched {
-                        self.piece_selector.mark_complete(completed_piece.index);
-                        if !self.is_complete && self.piece_selector.completed_all() {
-                            log::info!("Torrent complete!");
-                            self.is_complete = true;
-                            if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
-                                log::error!("Torrent completion event missed");
-                            }
-                            // We are no longer interestead in any of the
-                            // peers
-                            for (_, peer) in connections.iter_mut() {
-                                peer.not_interested(false);
-                                // If the peer is upload only and
-                                // we are upload only there is no reason
-                                // to stay connected
-                                if peer.is_upload_only {
-                                    peer.pending_disconnect =
-                                        Some(DisconnectReason::RedundantConnection);
-                                }
-                                // Notify all extensions that the torrent completed
-                                for (_, extension) in peer.extensions.iter_mut() {
-                                    extension.on_torrent_complete(&mut peer.outgoing_msgs_buffer);
-                                }
-                            }
+            if completed_piece.hash_matched {
+                self.piece_selector.mark_complete(completed_piece.index);
+                if !self.is_complete && self.piece_selector.completed_all() {
+                    log::info!("Torrent complete!");
+                    self.is_complete = true;
+                    if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
+                        log::error!("Torrent completion event missed");
+                    }
+                    // We are no longer interestead in any of the
+                    // peers
+                    for (_, peer) in connections.iter_mut() {
+                        peer.not_interested(false);
+                        // If the peer is upload only and
+                        // we are upload only there is no reason
+                        // to stay connected
+                        if peer.is_upload_only {
+                            peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
                         }
-                        for (conn_id, peer) in connections.iter_mut() {
-                            if let Some(bitfield) =
-                                self.piece_selector.interesting_peer_pieces(conn_id)
-                                && !bitfield.any()
-                                && peer.is_interesting
-                                && peer.queued.is_empty()
-                                && peer.inflight.is_empty()
-                            {
-                                // We are no longer interestead in this peer
-                                peer.not_interested(false);
-                                // if it's upload only we can close the
-                                // connection since it will never download from
-                                // us
-                                if peer.is_upload_only {
-                                    peer.pending_disconnect =
-                                        Some(DisconnectReason::RedundantConnection);
-                                }
-                            }
-                            peer.have(completed_piece.index as i32, false);
+                        // Notify all extensions that the torrent completed
+                        for (_, extension) in peer.extensions.iter_mut() {
+                            extension.on_torrent_complete(&mut peer.outgoing_msgs_buffer);
                         }
-                        log::debug!("Piece {} completed!", completed_piece.index);
-                    } else {
-                        // Only need to mark this as not hashing when it fails
-                        // since otherwise it will be marked as completed and this is moot
-                        self.piece_selector.mark_not_hashing(completed_piece.index);
-                        // TODO: disconnect, there also might be a minimal chance of a race
-                        // condition here where the connection id is replaced (by disconnect +
-                        // new connection so that the wrong peer is marked) but this should be
-                        // EXTREMELY rare
-                        log::error!("Piece hash didn't match expected hash!");
-                        self.piece_selector.mark_not_allocated(
-                            completed_piece.index as i32,
-                            completed_piece.conn_id,
-                        );
                     }
                 }
-                Err(err) => {
-                    log::error!(
-                        "Failed to sync and hash piece: {} Error: {err}",
-                        completed_piece.index
-                    );
+                for (conn_id, peer) in connections.iter_mut() {
+                    if let Some(bitfield) = self.piece_selector.interesting_peer_pieces(conn_id)
+                        && !bitfield.any()
+                        && peer.is_interesting
+                        && peer.queued.is_empty()
+                        && peer.inflight.is_empty()
+                    {
+                        // We are no longer interestead in this peer
+                        peer.not_interested(false);
+                        // if it's upload only we can close the
+                        // connection since it will never download from
+                        // us
+                        if peer.is_upload_only {
+                            peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
+                        }
+                    }
+                    peer.have(completed_piece.index as i32, false);
                 }
+                log::debug!("Piece {} completed!", completed_piece.index);
+            } else {
+                // Only need to mark this as not hashing when it fails
+                // since otherwise it will be marked as completed and this is moot
+                self.piece_selector.mark_not_hashing(completed_piece.index);
+                // TODO: disconnect, there also might be a minimal chance of a race
+                // condition here where the connection id is replaced (by disconnect +
+                // new connection so that the wrong peer is marked) but this should be
+                // EXTREMELY rare
+                log::error!("Piece hash didn't match expected hash!");
+                self.piece_selector
+                    .mark_not_allocated(completed_piece.index as i32, completed_piece.conn_id);
             }
         }
     }
@@ -690,7 +675,7 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
 
     pub fn state(
         &'e_iter mut self,
-    ) -> Option<(&'state FileAndMetadata, &'e_iter mut InitializedState)> {
+    ) -> Option<(&'state mut FileAndMetadata, &'e_iter mut InitializedState)> {
         if let Some(f) = self.full.get() {
             // SAFETY: If full has been initialized the torrent must have been initialized
             // as well

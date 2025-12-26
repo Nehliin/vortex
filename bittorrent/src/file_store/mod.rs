@@ -1,10 +1,11 @@
 use std::{
     io,
+    os::fd::{AsRawFd, BorrowedFd, RawFd},
     path::{Path, PathBuf},
     time::Instant,
 };
 
-use file::MmapFile;
+use file::File;
 use lava_torrent::torrent::v1::Torrent;
 use sha1::Digest;
 use smallvec::SmallVec;
@@ -22,7 +23,7 @@ struct TorrentFile {
     // Offset within the end piece
     end_offset: i32,
     // File handle
-    file_handle: file::MmapFile,
+    file_handle: file::File,
 }
 
 #[derive(Debug)]
@@ -35,7 +36,7 @@ pub struct WritablePieceFileView {
 
 impl WritablePieceFileView {
     /// Writes the subpiece to disk.
-    pub fn write_subpiece(&mut self, subpiece_offset: usize, data: &[u8], file_store: &FileStore) {
+    pub fn write_subpiece(&mut self, subpiece_offset: usize, data: &[u8], file_store: &mut FileStore) {
         let mut subpiece_written: usize = 0;
         for file_idx in &self.indicies {
             let file = &file_store.files[*file_idx];
@@ -60,21 +61,28 @@ impl WritablePieceFileView {
             let max_possible_write =
                 (file.file_handle.len() - current_write_head).min(data.len() - subpiece_written);
 
-            #[cfg(feature = "metrics")]
-            let write_time = Instant::now();
+            file_store.disk_operations.push(DiskOp {
+                fd: file.file_handle.as_fd(),
+                piece_index: self.index,
+                offset: current_write_head,
+                piece_index: current_write_head,
+                data: data[subpiece_written..subpiece_written + max_possible_write].into(),
+            });
+            // #[cfg(feature = "metrics")]
+            // let write_time = Instant::now();
 
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    data.as_ptr().add(subpiece_written),
-                    file.file_handle.ptr().add(current_write_head).as_ptr() as _,
-                    max_possible_write,
-                );
-            }
-            #[cfg(feature = "metrics")]
-            {
-                let histogram = metrics::histogram!("disk_write_time");
-                histogram.record(write_time.elapsed().as_micros() as u32);
-            }
+            // unsafe {
+            //     std::ptr::copy_nonoverlapping(
+            //         data.as_ptr().add(subpiece_written),
+            //         file.file_handle.ptr().add(current_write_head).as_ptr() as _,
+            //         max_possible_write,
+            //     );
+            // }
+            // #[cfg(feature = "metrics")]
+            // {
+            //     let histogram = metrics::histogram!("disk_write_time");
+            //     histogram.record(write_time.elapsed().as_micros() as u32);
+            // }
             subpiece_written += max_possible_write;
             // Break early if we've written the entire subpiece
             if subpiece_written >= data.len() {
@@ -200,11 +208,20 @@ impl ReadablePieceFileView {
     }
 }
 
+#[derive(Debug)]
+pub struct DiskOp {
+    pub fd: RawFd,
+    pub piece_index: i32,
+    pub offset: usize,
+    pub data: Box<[u8]>,
+}
+
 // TODO: consider tracking readable/writable views
 #[derive(Debug)]
 pub struct FileStore {
     avg_piece_size: u64,
     files: Vec<TorrentFile>,
+    pub disk_operations: Vec<DiskOp>,
 }
 
 impl FileStore {
@@ -246,7 +263,7 @@ impl FileStore {
                         return Err(err);
                     }
                 }
-                let file_handle = MmapFile::create(&file_path, torrent_file.length as usize)?;
+                let file_handle = File::create(&file_path, torrent_file.length as usize)?;
 
                 let torrent_file = TorrentFile {
                     start_piece,
@@ -262,6 +279,7 @@ impl FileStore {
             Ok(FileStore {
                 files: result,
                 avg_piece_size: piece_length,
+                disk_operations: Vec::new(),
             })
         }
         new_impl(root.as_ref(), torrent_info)

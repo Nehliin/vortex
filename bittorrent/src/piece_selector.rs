@@ -9,6 +9,7 @@ use rand::{Rng, SeedableRng, rngs::SmallRng};
 use slotmap::SecondaryMap;
 
 use crate::{
+    buf_pool::{Buffer, BufferPool},
     event_loop::ConnectionId,
     file_store::{FileStore, ReadablePieceFileView, WritablePieceFileView},
 };
@@ -53,6 +54,7 @@ pub struct PieceSelector {
     last_piece_length: u32,
     piece_length: u32,
     rng_gen: SmallRng,
+    piece_buffer_pool: BufferPool,
 }
 
 impl PieceSelector {
@@ -79,6 +81,7 @@ impl PieceSelector {
             rng_gen: SmallRng::from_os_rng(),
             #[cfg(test)]
             rng_gen: SmallRng::seed_from_u64(0xbeefdead),
+            piece_buffer_pool: BufferPool::new(256, piece_length as usize),
         }
     }
 
@@ -299,8 +302,20 @@ impl PieceSelector {
 pub struct CompletedPiece {
     pub index: usize,
     pub conn_id: ConnectionId,
-    pub hash_matched: std::io::Result<bool>,
+    pub hash_matched: bool,
 }
+
+// Make the write pool larger like 2*PIECE size
+// also pre-register them
+// 1. make the network writes reuse the buffers more efficiently
+// 2. make buf_pool use mmap instead < -- pr 1
+// 3. register buf pool buffers < -- pr 2
+// 2. Make each piece instead keep a buffer as the backing storage for the piece
+// 3. each subpiece becomes normal memcopy
+// 4. hashes are done on the thread pool
+// 5. writes are send directly using the buffer index to disk < -- pr 3
+// 6. setup metrics for pool useage and growth
+// 7. register the files and use read/write fixed
 
 #[derive(Debug)]
 // TODO flatten this
@@ -309,12 +324,13 @@ pub struct Piece {
     // Contains only completed subpieces
     pub completed_subpieces: BitBox,
     pub last_subpiece_length: i32,
-    pub piece_view: WritablePieceFileView,
+    // This is a buffer of the piece size that we fill
+    pub piece_view: Buffer,
     pub ref_count: u8,
 }
 
 impl Piece {
-    pub fn new(index: i32, lenght: u32, piece_view: WritablePieceFileView) -> Self {
+    pub fn new(index: i32, lenght: u32, piece_view: Buffer) -> Self {
         assert!(lenght > 0, "Piece lenght must be non zero");
         let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
             SUBPIECE_SIZE
@@ -359,11 +375,11 @@ impl Piece {
         deque
     }
 
-    pub fn into_readable(self) -> ReadablePieceFileView {
-        self.piece_view.into_readable()
+    pub fn into_buffer(self) -> Buffer {
+        self.piece_view
     }
 
-    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], file_store: &FileStore) {
+    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
@@ -377,8 +393,8 @@ impl Piece {
         } else {
             debug_assert_eq!(data.len() as i32, SUBPIECE_SIZE);
         }
-        self.piece_view
-            .write_subpiece(begin as usize, data, file_store);
+        let begin = begin as usize;
+        self.piece_view.full()[begin..(begin + data.len())].copy_from_slice(data);
         self.completed_subpieces.set(subpiece_index as usize, true);
     }
 
