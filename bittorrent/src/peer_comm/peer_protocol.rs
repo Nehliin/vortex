@@ -562,7 +562,7 @@ mod tests {
         let mut parsed = Vec::new();
         let mut encoded = BytesMut::new();
         for msg in messages.iter() {
-            let mut msg_buf = vec![0; msg.encoded_size()];
+            let mut msg_buf = Vec::with_capacity(msg.encoded_size());
             msg.encode(&mut msg_buf);
             encoded.extend_from_slice(&msg_buf);
         }
@@ -589,7 +589,7 @@ mod tests {
             0b0110_1001_u8.to_be(),
         ];
         let message = PeerMessage::Bitfield(BitVec::from_slice(bitfield.as_slice()));
-        let mut buf = vec![0; message.encoded_size()];
+        let mut buf = Vec::with_capacity(message.encoded_size());
         message.encode(&mut buf);
         // length prefix + tag + bitfield bytes
         assert_eq!(buf.len(), 14);
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn empty_bitfield() {
         let message = PeerMessage::Bitfield(BitVec::new());
-        let mut buf = vec![0; message.encoded_size()];
+        let mut buf = Vec::with_capacity(message.encoded_size());
         message.encode(&mut buf);
         let mut buf: Bytes = buf.into();
         // skip length prefix

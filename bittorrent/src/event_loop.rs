@@ -1290,7 +1290,7 @@ mod tests {
                     TcpStream::connect(format!("127.0.0.1:{}", listener_port)).unwrap();
 
                 // Send a valid handshake
-                let mut handshake = vec![0u8; HANDSHAKE_SIZE];
+                let mut handshake = Vec::with_capacity(HANDSHAKE_SIZE);
                 let peer_id = PeerId::generate();
                 write_handshake(peer_id, info_hash, &mut handshake);
                 stream.write_all(&handshake).unwrap();
