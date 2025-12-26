@@ -15,6 +15,8 @@ pub struct Buffer {
     index: usize,
     inner: AnonymousMmap,
     cursor: usize,
+    #[cfg(feature = "metrics")]
+    time_taken: std::time::Instant,
 }
 
 impl Buffer {
@@ -23,7 +25,6 @@ impl Buffer {
         self.index
     }
 
-    // rename to append or something
     pub fn get_writable_slice(&mut self, len: usize) -> io::Result<&mut [u8]> {
         if self.cursor + len > self.inner.len() {
             return Err(io::ErrorKind::StorageFull.into());
@@ -53,6 +54,7 @@ impl BufferPool {
             pool,
         }
     }
+
     pub fn get_buffer(&mut self) -> Buffer {
         if let Some(free_index) = self.free.first_one() {
             self.free.set(free_index, false);
@@ -62,6 +64,8 @@ impl BufferPool {
                     .take()
                     .expect("Free list out of sync with buffer pool"),
                 cursor: 0,
+                #[cfg(feature = "metrics")]
+                time_taken: std::time::Instant::now(),
             }
         } else {
             // resize
@@ -77,17 +81,23 @@ impl BufferPool {
 
     #[cfg(feature = "metrics")]
     pub fn free_buffers(&self) -> usize {
-        self.free.len()
+        self.free.count_ones()
     }
 
     #[cfg(feature = "metrics")]
-    pub fn allocated_buffers(&self) -> usize {
+    pub fn total_buffers(&self) -> usize {
         self.pool.len()
     }
 
-    pub fn return_buffer(&mut self, index: Buffer) {
-        self.free.set(index.index, true);
-        self.pool[index.index] = Some(index.inner);
+    pub fn return_buffer(&mut self, buffer: Buffer) {
+        #[cfg(feature = "metrics")]
+        {
+            use metrics::histogram;
+            let histogram = histogram!("buffer_lifetime_ms");
+            histogram.record(buffer.time_taken.elapsed().as_millis() as u32);
+        }
+        self.free.set(buffer.index, true);
+        self.pool[buffer.index] = Some(buffer.inner);
     }
 }
 
