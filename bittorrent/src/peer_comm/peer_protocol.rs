@@ -72,7 +72,7 @@ impl<'a> arbitrary::Arbitrary<'a> for PeerMessage {
 
 pub const HANDSHAKE_SIZE: usize = 68;
 
-pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], mut buffer: &mut [u8]) {
+pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], buffer: &mut impl BufMut) {
     const PROTOCOL: &[u8] = b"BitTorrent protocol";
     buffer.put_u8(PROTOCOL.len() as u8);
     buffer.put_slice(PROTOCOL);
@@ -262,7 +262,7 @@ impl PeerMessage {
         std::mem::size_of::<i32>() + message_size
     }
 
-    pub fn encode(&self, mut buf: &mut [u8]) {
+    pub fn encode(&self, buf: &mut impl BufMut) {
         // Message length, (encoded - size of len prefix)
         buf.put_i32((self.encoded_size() - std::mem::size_of::<i32>()) as i32);
         match self {

@@ -1,6 +1,5 @@
-use std::io;
-
 use bitvec::vec::BitVec;
+use bytes::BufMut;
 
 use crate::buf_ring::AnonymousMmap;
 
@@ -21,22 +20,22 @@ pub struct Buffer {
 
 impl Buffer {
     #[inline]
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
-    pub fn get_writable_slice(&mut self, len: usize) -> io::Result<&mut [u8]> {
-        if self.cursor + len > self.inner.len() {
-            return Err(io::ErrorKind::StorageFull.into());
-        }
-        let result = &mut self.inner[self.cursor..self.cursor + len];
-        self.cursor += len;
-        Ok(result)
-    }
-
-    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         &self.inner[..self.cursor]
+    }
+}
+
+unsafe impl BufMut for Buffer {
+    fn remaining_mut(&self) -> usize {
+        self.inner.len() - self.cursor
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        self.cursor += cnt
+    }
+
+    fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+        bytes::buf::UninitSlice::new(&mut self.inner[self.cursor..])
     }
 }
 
@@ -107,7 +106,7 @@ mod tests {
     fn test_buffer_index() {
         let mut pool = BufferPool::new(2, 1024);
         let buffer = pool.get_buffer();
-        let index = buffer.index();
+        let index = buffer.index;
 
         // First buffer should have index 0
         assert_eq!(index, 0);
