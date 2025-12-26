@@ -320,7 +320,6 @@ mod tests {
         assert_ne!(buf2.index(), buf3.index());
     }
 
-
     #[test]
     fn test_buffer_pool_multiple_growth_cycles() {
         let mut pool = BufferPool::new(1, 64);
@@ -467,5 +466,4 @@ mod tests {
         assert_eq!(pool.free_buffers(), 4);
         assert_eq!(pool.total_buffers(), 4);
     }
-   
 }
