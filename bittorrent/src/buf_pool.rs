@@ -1,27 +1,29 @@
 use std::io;
 
-use slab::Slab;
+use bitvec::vec::BitVec;
 
 use crate::buf_ring::AnonymousMmap;
 
 pub struct BufferPool {
-    free: Vec<usize>,
+    free: BitVec,
     buffer_size: usize,
-    allocated_buffers: Slab<AnonymousMmap>,
+    pool: Vec<Option<AnonymousMmap>>,
 }
 
-pub struct Buffer<'a> {
+#[derive(Debug)]
+pub struct Buffer {
     index: usize,
-    inner: &'a mut [u8],
+    inner: AnonymousMmap,
     cursor: usize,
 }
 
-impl Buffer<'_> {
+impl Buffer {
     #[inline]
     pub fn index(&self) -> usize {
         self.index
     }
 
+    // rename to append or something
     pub fn get_writable_slice(&mut self, len: usize) -> io::Result<&mut [u8]> {
         if self.cursor + len > self.inner.len() {
             return Err(io::ErrorKind::StorageFull.into());
@@ -39,29 +41,37 @@ impl Buffer<'_> {
 
 impl BufferPool {
     pub fn new(entries: usize, buf_size: usize) -> Self {
+        let mut pool = Vec::with_capacity(entries);
+        for _ in 0..entries {
+            pool.push(Some(
+                AnonymousMmap::new(buf_size).expect("memory to be available"),
+            ));
+        }
         Self {
-            free: Vec::with_capacity(entries),
+            free: BitVec::repeat(true, entries),
             buffer_size: buf_size,
-            allocated_buffers: Slab::with_capacity(entries),
+            pool,
         }
     }
-    pub fn get_buffer(&mut self) -> Buffer<'_> {
-        match self.free.pop() {
-            Some(free_idx) => Buffer {
-                index: free_idx,
-                inner: &mut self.allocated_buffers[free_idx],
+    pub fn get_buffer(&mut self) -> Buffer {
+        if let Some(free_index) = self.free.first_one() {
+            self.free.set(free_index, false);
+            Buffer {
+                index: free_index,
+                inner: self.pool[free_index]
+                    .take()
+                    .expect("Free list out of sync with buffer pool"),
                 cursor: 0,
-            },
-            None => {
-                let buf = AnonymousMmap::new(self.buffer_size).expect("memory to be available");
-                let buf_entry = self.allocated_buffers.vacant_entry();
-                let buf_index = buf_entry.key();
-                Buffer {
-                    index: buf_index,
-                    inner: buf_entry.insert(buf),
-                    cursor: 0,
-                }
             }
+        } else {
+            // resize
+            let pool_size = self.pool.len();
+            let new_size = (pool_size + 1).next_power_of_two();
+            self.pool.resize_with(new_size, || {
+                Some(AnonymousMmap::new(self.buffer_size).expect("memory to be available"))
+            });
+            self.free.resize(new_size, true);
+            self.get_buffer()
         }
     }
 
@@ -72,13 +82,12 @@ impl BufferPool {
 
     #[cfg(feature = "metrics")]
     pub fn allocated_buffers(&self) -> usize {
-        self.allocated_buffers.len()
+        self.pool.len()
     }
 
-    // TODO: enforce safety in type system
-    /// SAFETY: You must ensure that the buffer on the given index is never used after returning it
-    pub unsafe fn return_buffer(&mut self, index: usize) {
-        self.free.push(index);
+    pub fn return_buffer(&mut self, index: Buffer) {
+        self.free.set(index.index, true);
+        self.pool[index.index] = Some(index.inner);
     }
 }
 
@@ -245,15 +254,15 @@ mod tests {
         let mut pool = BufferPool::new(2, 256);
 
         // Pool starts with no allocated buffers
-        assert_eq!(pool.allocated_buffers.len(), 0);
+        assert_eq!(pool.pool.len(), 0);
 
         // First get_buffer allocates
         let _buffer1 = pool.get_buffer();
-        assert_eq!(pool.allocated_buffers.len(), 1);
+        assert_eq!(pool.pool.len(), 1);
 
         // Second get_buffer allocates
         let _buffer2 = pool.get_buffer();
-        assert_eq!(pool.allocated_buffers.len(), 2);
+        assert_eq!(pool.pool.len(), 2);
     }
 
     #[test]

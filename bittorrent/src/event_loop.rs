@@ -21,7 +21,7 @@ use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    buf_pool::BufferPool,
+    buf_pool::{Buffer, BufferPool},
     buf_ring::{Bgid, BufferRing},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::{
@@ -78,7 +78,7 @@ new_key_type! {
 #[derive(Debug)]
 pub struct EventData {
     pub typ: EventType,
-    pub buffer_idx: Option<usize>,
+    pub buffer_idx: Option<Buffer>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -436,12 +436,10 @@ impl<'scope, 'state: 'scope> EventLoop {
                             log::error!("Error handling event: {err}");
                         }
                         // time to return any potential write buffers
-                        if let Some(write_idx) = buffer_idx {
+                        if let Some(buffer) = buffer_idx {
                             // SAFETY: All Buffers are dropped when the write operations
                             // are sent to io_uring
-                            unsafe {
-                                self.write_pool.return_buffer(write_idx);
-                            }
+                            self.write_pool.return_buffer(buffer);
                         }
                     } else {
                         let err = io_event.result.unwrap_err();
@@ -549,12 +547,14 @@ impl<'scope, 'state: 'scope> EventLoop {
             .expect("Buffer size is too small");
         write_handshake(self.our_id, info_hash, wriable_slice);
         let fd = socket.as_raw_fd();
+        let buffer_slice = buffer.as_slice();
+        let buffer_ptr = buffer_slice.as_ptr();
+        let buffer_len = buffer_slice.len();
         let write_event_id = self.events.insert(EventData {
             typ: EventType::Write { socket, addr },
-            buffer_idx: Some(buffer.index()),
+            buffer_idx: Some(buffer),
         });
-        let buffer = buffer.as_slice();
-        let write_op = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
+        let write_op = opcode::Write::new(types::Fd(fd), buffer_ptr, buffer_len as u32)
             .build()
             .user_data(write_event_id.data().as_ffi());
         sq.push(write_op);
