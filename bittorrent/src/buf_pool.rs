@@ -387,7 +387,7 @@ mod tests {
         let buf4 = pool.get_buffer();
 
         // Should get the same indices (order may vary)
-        let new_indices = vec![buf3.index(), buf4.index()];
+        let new_indices = [buf3.index(), buf4.index()];
         assert!(new_indices.contains(&idx1));
         assert!(new_indices.contains(&idx2));
     }
@@ -432,8 +432,8 @@ mod tests {
         // Verify all data is readable
         let data = buffer.as_slice();
         assert_eq!(data.len(), 10);
-        for i in 0..10 {
-            assert_eq!(data[i], i as u8 * 10);
+        for (i, item) in data.iter().enumerate().take(10) {
+            assert_eq!(*item, i as u8 * 10);
         }
     }
 
