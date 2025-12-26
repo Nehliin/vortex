@@ -10,6 +10,7 @@ use io_uring::{Submitter, types};
 
 /// An anonymous region of memory mapped using `mmap(2)`, not backed by a file
 /// but that is guaranteed to be page-aligned and zero-filled.
+#[derive(Debug)]
 pub struct AnonymousMmap {
     addr: ptr::NonNull<libc::c_void>,
     len: usize,

@@ -125,22 +125,24 @@ pub fn write_to_connection<Q: SubmissionQueue>(
     fd: RawFd,
     events: &mut SlotMap<EventId, EventData>,
     sq: &mut BackloggedSubmissionQueue<Q>,
-    buffer: Buffer<'_>,
+    buffer: Buffer,
     ordered: bool,
 ) {
+    let buffer_slice = buffer.as_slice();
+    let buffer_ptr = buffer_slice.as_ptr();
+    let buffer_len = buffer_slice.len();
     let event_id = events.insert(EventData {
         typ: EventType::ConnectedWrite {
             connection_idx: conn_id,
         },
-        buffer_idx: Some(buffer.index()),
+        buffer_idx: Some(buffer),
     });
     let flags = if ordered {
         io_uring::squeue::Flags::IO_LINK
     } else {
         io_uring::squeue::Flags::empty()
     };
-    let buffer = buffer.as_slice();
-    let write_op = opcode::Write::new(types::Fd(fd), buffer.as_ptr(), buffer.len() as u32)
+    let write_op = opcode::Write::new(types::Fd(fd), buffer_ptr, buffer_len as u32)
         .build()
         .user_data(event_id.data().as_ffi())
         .flags(flags);

@@ -13,7 +13,6 @@ ahash = "0.8"
 io-uring = "0.7"
 libc = "0.2"
 slotmap = "1"
-slab = "0.4"
 bytes = { workspace = true }
 bitvec = { version = "1.0", default-features = false, features = ["alloc"]}
 arbitrary = { version = "1.4.1", features = ["derive"], optional = true }
