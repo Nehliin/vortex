@@ -8,6 +8,7 @@ use std::{
 
 use ahash::HashSet;
 use ahash::HashSetExt;
+use bytes::BufMut;
 use heapless::spsc::Producer;
 use io_uring::{
     IoUring,
@@ -78,7 +79,7 @@ new_key_type! {
 #[derive(Debug)]
 pub struct EventData {
     pub typ: EventType,
-    pub buffer_idx: Option<Buffer>,
+    pub buffer: Option<Buffer>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -437,7 +438,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                             io_event.event_data_idx,
                             event
                         );
-                        let buffer_idx = event.buffer_idx.take();
+                        let buffer_idx = event.buffer.take();
                         if let Err(err) =
                             self.event_handler(&mut sq, io_event, &mut state_ref, scope)
                         {
@@ -480,8 +481,8 @@ impl<'scope, 'state: 'scope> EventLoop {
                             let size = msg.message.encoded_size();
                             // If any massage is ordered make the whole socket write ordered
                             ordered |= msg.ordered;
-                            if let Ok(writable_slice) = buffer.get_writable_slice(size) {
-                                msg.message.encode(writable_slice);
+                            if buffer.remaining_mut() >= size {
+                                msg.message.encode(&mut buffer);
                             } else {
                                 // Buffer is full, flush this one and fetch a new one
                                 io_utils::write_to_connection(
@@ -493,10 +494,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                                     ordered,
                                 );
                                 buffer = self.write_pool.get_buffer();
-                                let writable_slice = buffer
-                                    .get_writable_slice(size)
-                                    .expect("Buffer size to small to contain a single message");
-                                msg.message.encode(writable_slice);
+                                msg.message.encode(&mut buffer);
                             }
                         }
                         if !buffer.as_slice().is_empty() {
@@ -529,7 +527,7 @@ impl<'scope, 'state: 'scope> EventLoop {
     fn setup_listener(&mut self, listener: TcpListener, ring: &mut IoUring) -> u16 {
         let event_idx: EventId = self.events.insert(EventData {
             typ: EventType::Accept,
-            buffer_idx: None,
+            buffer: None,
         });
         let port = listener.local_addr().unwrap().port();
         let accept_op = opcode::AcceptMulti::new(types::Fd(listener.into_raw_fd()))
@@ -550,22 +548,11 @@ impl<'scope, 'state: 'scope> EventLoop {
         addr: SockAddr,
     ) {
         let mut buffer = self.write_pool.get_buffer();
-        let wriable_slice = buffer
-            .get_writable_slice(HANDSHAKE_SIZE)
-            .expect("Buffer size is too small");
-        write_handshake(self.our_id, info_hash, wriable_slice);
-        let fd = socket.as_raw_fd();
-        let buffer_slice = buffer.as_slice();
-        let buffer_ptr = buffer_slice.as_ptr();
-        let buffer_len = buffer_slice.len();
-        let write_event_id = self.events.insert(EventData {
-            typ: EventType::Write { socket, addr },
-            buffer_idx: Some(buffer),
-        });
-        let write_op = opcode::Write::new(types::Fd(fd), buffer_ptr, buffer_len as u32)
-            .build()
-            .user_data(write_event_id.data().as_ffi());
-        sq.push(write_op);
+        if buffer.remaining_mut() < HANDSHAKE_SIZE {
+            panic!("Buffer size is too small for sending a handshake");
+        }
+        write_handshake(self.our_id, info_hash, &mut buffer);
+        io_utils::write(sq, &mut self.events, socket, addr, buffer)
     }
 
     fn handle_commands<Q: SubmissionQueue>(
@@ -636,7 +623,7 @@ impl<'scope, 'state: 'scope> EventLoop {
 
         let event_idx = self.events.insert(EventData {
             typ: EventType::Connect { socket, addr },
-            buffer_idx: None,
+            buffer: None,
         });
 
         let EventType::Connect { socket, addr } = &self.events[event_idx].typ else {
@@ -746,7 +733,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 debug_assert!(matches!(old.typ, EventType::Dummy));
                 let read_event_id = self.events.insert(EventData {
                     typ: EventType::Recv { socket, addr },
-                    buffer_idx: None,
+                    buffer: None,
                 });
                 // Write is only used for unestablished connections aka when doing handshake
                 #[cfg(feature = "metrics")]
@@ -826,7 +813,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                     typ: EventType::ConnectedRecv {
                         connection_idx: conn_id,
                     },
-                    buffer_idx: None,
+                    buffer: None,
                 });
 
                 // The initial Recv might have contained more data
@@ -1303,7 +1290,7 @@ mod tests {
                     TcpStream::connect(format!("127.0.0.1:{}", listener_port)).unwrap();
 
                 // Send a valid handshake
-                let mut handshake = vec![0u8; HANDSHAKE_SIZE];
+                let mut handshake = Vec::with_capacity(HANDSHAKE_SIZE);
                 let peer_id = PeerId::generate();
                 write_handshake(peer_id, info_hash, &mut handshake);
                 stream.write_all(&handshake).unwrap();

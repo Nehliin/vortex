@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     io,
-    os::fd::{IntoRawFd, RawFd},
+    os::fd::{AsRawFd, IntoRawFd, RawFd},
     ptr::null_mut,
 };
 
@@ -12,7 +12,7 @@ use io_uring::{
     types::{self, CancelBuilder, Timespec},
 };
 use slotmap::{Key, SlotMap};
-use socket2::Socket;
+use socket2::{SockAddr, Socket};
 
 use crate::{
     buf_pool::Buffer,
@@ -135,7 +135,7 @@ pub fn write_to_connection<Q: SubmissionQueue>(
         typ: EventType::ConnectedWrite {
             connection_idx: conn_id,
         },
-        buffer_idx: Some(buffer),
+        buffer: Some(buffer),
     });
     let flags = if ordered {
         io_uring::squeue::Flags::IO_LINK
@@ -146,6 +146,28 @@ pub fn write_to_connection<Q: SubmissionQueue>(
         .build()
         .user_data(event_id.data().as_ffi())
         .flags(flags);
+    sq.push(write_op);
+}
+
+// write to unestablsihed (from a bittorrent perspective) connection
+pub fn write<Q: SubmissionQueue>(
+    sq: &mut BackloggedSubmissionQueue<Q>,
+    events: &mut SlotMap<EventId, EventData>,
+    socket: Socket,
+    addr: SockAddr,
+    buffer: Buffer,
+) {
+    let fd = socket.as_raw_fd();
+    let buffer_slice = buffer.as_slice();
+    let buffer_ptr = buffer_slice.as_ptr();
+    let buffer_len = buffer_slice.len();
+    let write_event_id = events.insert(EventData {
+        typ: EventType::Write { socket, addr },
+        buffer: Some(buffer),
+    });
+    let write_op = opcode::Write::new(types::Fd(fd), buffer_ptr, buffer_len as u32)
+        .build()
+        .user_data(write_event_id.data().as_ffi());
     sq.push(write_op);
 }
 
@@ -169,7 +191,7 @@ pub fn close_socket<Q: SubmissionQueue>(
     let fd = socket.into_raw_fd();
     let event_id = events.insert(EventData {
         typ: EventType::Cancel,
-        buffer_idx: None,
+        buffer: None,
     });
 
     // If more events are received in the same cqe loop there might still linger events
@@ -182,7 +204,7 @@ pub fn close_socket<Q: SubmissionQueue>(
         typ: EventType::Close {
             maybe_connection_idx,
         },
-        buffer_idx: None,
+        buffer: None,
     });
     let close_op = opcode::Close::new(types::Fd(fd))
         .build()

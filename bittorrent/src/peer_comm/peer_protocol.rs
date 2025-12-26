@@ -72,7 +72,7 @@ impl<'a> arbitrary::Arbitrary<'a> for PeerMessage {
 
 pub const HANDSHAKE_SIZE: usize = 68;
 
-pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], mut buffer: &mut [u8]) {
+pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], buffer: &mut impl BufMut) {
     const PROTOCOL: &[u8] = b"BitTorrent protocol";
     buffer.put_u8(PROTOCOL.len() as u8);
     buffer.put_slice(PROTOCOL);
@@ -262,7 +262,7 @@ impl PeerMessage {
         std::mem::size_of::<i32>() + message_size
     }
 
-    pub fn encode(&self, mut buf: &mut [u8]) {
+    pub fn encode(&self, buf: &mut impl BufMut) {
         // Message length, (encoded - size of len prefix)
         buf.put_i32((self.encoded_size() - std::mem::size_of::<i32>()) as i32);
         match self {
@@ -562,7 +562,7 @@ mod tests {
         let mut parsed = Vec::new();
         let mut encoded = BytesMut::new();
         for msg in messages.iter() {
-            let mut msg_buf = vec![0; msg.encoded_size()];
+            let mut msg_buf = Vec::with_capacity(msg.encoded_size());
             msg.encode(&mut msg_buf);
             encoded.extend_from_slice(&msg_buf);
         }
@@ -589,7 +589,7 @@ mod tests {
             0b0110_1001_u8.to_be(),
         ];
         let message = PeerMessage::Bitfield(BitVec::from_slice(bitfield.as_slice()));
-        let mut buf = vec![0; message.encoded_size()];
+        let mut buf = Vec::with_capacity(message.encoded_size());
         message.encode(&mut buf);
         // length prefix + tag + bitfield bytes
         assert_eq!(buf.len(), 14);
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn empty_bitfield() {
         let message = PeerMessage::Bitfield(BitVec::new());
-        let mut buf = vec![0; message.encoded_size()];
+        let mut buf = Vec::with_capacity(message.encoded_size());
         message.encode(&mut buf);
         let mut buf: Bytes = buf.into();
         // skip length prefix

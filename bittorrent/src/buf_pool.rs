@@ -1,6 +1,5 @@
-use std::io;
-
 use bitvec::vec::BitVec;
+use bytes::BufMut;
 
 use crate::buf_ring::AnonymousMmap;
 
@@ -21,22 +20,22 @@ pub struct Buffer {
 
 impl Buffer {
     #[inline]
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
-    pub fn get_writable_slice(&mut self, len: usize) -> io::Result<&mut [u8]> {
-        if self.cursor + len > self.inner.len() {
-            return Err(io::ErrorKind::StorageFull.into());
-        }
-        let result = &mut self.inner[self.cursor..self.cursor + len];
-        self.cursor += len;
-        Ok(result)
-    }
-
-    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         &self.inner[..self.cursor]
+    }
+}
+
+unsafe impl BufMut for Buffer {
+    fn remaining_mut(&self) -> usize {
+        self.inner.len() - self.cursor
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        self.cursor += cnt
+    }
+
+    fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+        bytes::buf::UninitSlice::new(&mut self.inner[self.cursor..])
     }
 }
 
@@ -102,12 +101,13 @@ impl BufferPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BufMut;
 
     #[test]
     fn test_buffer_index() {
         let mut pool = BufferPool::new(2, 1024);
         let buffer = pool.get_buffer();
-        let index = buffer.index();
+        let index = buffer.index;
 
         // First buffer should have index 0
         assert_eq!(index, 0);
@@ -123,51 +123,52 @@ mod tests {
     }
 
     #[test]
-    fn test_buffer_get_writable_slice() {
+    fn test_buffer_remaining_mut() {
+        let mut pool = BufferPool::new(1, 1024);
+        let buffer = pool.get_buffer();
+
+        // Should have full capacity available
+        assert_eq!(buffer.remaining_mut(), 1024);
+    }
+
+    #[test]
+    fn test_buffer_write_and_advance() {
         let mut pool = BufferPool::new(1, 1024);
         let mut buffer = pool.get_buffer();
 
-        // Get a writable slice of 100 bytes
-        let slice = buffer.get_writable_slice(100).expect("should succeed");
-        assert_eq!(slice.len(), 100);
+        // Write 100 bytes
+        buffer.put_slice(&[42u8; 100]);
 
         // as_slice should now return 100 bytes
         assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.remaining_mut(), 924);
     }
 
     #[test]
-    fn test_buffer_get_writable_slice_advances_cursor() {
+    fn test_buffer_multiple_writes() {
         let mut pool = BufferPool::new(1, 1024);
         let mut buffer = pool.get_buffer();
 
-        // Get first slice
-        let slice1 = buffer.get_writable_slice(50).expect("should succeed");
-        assert_eq!(slice1.len(), 50);
+        // Write first 50 bytes
+        buffer.put_slice(&[1u8; 50]);
+        assert_eq!(buffer.as_slice().len(), 50);
 
-        // Get second slice
-        let slice2 = buffer.get_writable_slice(50).expect("should succeed");
-        assert_eq!(slice2.len(), 50);
-
-        // as_slice should now return 100 bytes total
+        // Write another 50 bytes
+        buffer.put_slice(&[2u8; 50]);
         assert_eq!(buffer.as_slice().len(), 100);
+
+        // Verify remaining capacity
+        assert_eq!(buffer.remaining_mut(), 924);
     }
 
     #[test]
-    fn test_buffer_get_writable_slice_writes_persist() {
+    fn test_buffer_writes_persist() {
         let mut pool = BufferPool::new(1, 1024);
         let mut buffer = pool.get_buffer();
 
-        // Write to first slice
-        {
-            let slice = buffer.get_writable_slice(4).expect("should succeed");
-            slice.copy_from_slice(&[1, 2, 3, 4]);
-        }
-
-        // Write to second slice
-        {
-            let slice = buffer.get_writable_slice(4).expect("should succeed");
-            slice.copy_from_slice(&[5, 6, 7, 8]);
-        }
+        // Write specific data
+        buffer.put_slice(&[1, 2, 3, 4]);
+        buffer.put_slice(&[5, 6, 7, 8]);
 
         // Verify as_slice contains both writes
         let data = buffer.as_slice();
@@ -175,53 +176,27 @@ mod tests {
     }
 
     #[test]
-    fn test_buffer_get_writable_slice_exact_capacity() {
+    fn test_buffer_exact_capacity() {
         let mut pool = BufferPool::new(1, 100);
         let mut buffer = pool.get_buffer();
 
-        // Request exact buffer size
-        let slice = buffer.get_writable_slice(100).expect("should succeed");
-        assert_eq!(slice.len(), 100);
+        // Write exact buffer size
+        buffer.put_slice(&[0u8; 100]);
         assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.remaining_mut(), 0);
     }
 
     #[test]
-    fn test_buffer_get_writable_slice_exceeds_capacity() {
-        let mut pool = BufferPool::new(1, 100);
+    fn test_buffer_chunk_mut() {
+        let mut pool = BufferPool::new(1, 1024);
         let mut buffer = pool.get_buffer();
 
-        // Request more than buffer size
-        let result = buffer.get_writable_slice(101);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::StorageFull);
-    }
+        // Write some data first
+        buffer.put_slice(&[1, 2, 3, 4]);
 
-    #[test]
-    fn test_buffer_get_writable_slice_exceeds_remaining_capacity() {
-        let mut pool = BufferPool::new(1, 100);
-        let mut buffer = pool.get_buffer();
-
-        // Use 60 bytes
-        buffer.get_writable_slice(60).expect("should succeed");
-
-        // Try to get 50 more bytes (would exceed capacity)
-        let result = buffer.get_writable_slice(50);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::StorageFull);
-    }
-
-    #[test]
-    fn test_buffer_get_writable_slice_fits_remaining_capacity() {
-        let mut pool = BufferPool::new(1, 100);
-        let mut buffer = pool.get_buffer();
-
-        // Use 60 bytes
-        buffer.get_writable_slice(60).expect("should succeed");
-
-        // Get exactly the remaining 40 bytes
-        let slice = buffer.get_writable_slice(40).expect("should succeed");
-        assert_eq!(slice.len(), 40);
-        assert_eq!(buffer.as_slice().len(), 100);
+        // Get mutable chunk for remaining space
+        let chunk = buffer.chunk_mut();
+        assert_eq!(chunk.len(), 1020);
     }
 
     #[test]
@@ -230,14 +205,14 @@ mod tests {
 
         // Get first buffer
         let buffer1 = pool.get_buffer();
-        let index1 = buffer1.index();
+        let index1 = buffer1.index;
 
         // Return it to the pool
         pool.return_buffer(buffer1);
 
         // Get another buffer - should reuse the returned one
         let buffer2 = pool.get_buffer();
-        assert_eq!(buffer2.index(), index1);
+        assert_eq!(buffer2.index, index1);
     }
 
     #[test]
@@ -245,9 +220,9 @@ mod tests {
         let mut pool = BufferPool::new(3, 512);
 
         // Get buffers one at a time and collect their indices
-        let idx1 = pool.get_buffer().index();
-        let idx2 = pool.get_buffer().index();
-        let idx3 = pool.get_buffer().index();
+        let idx1 = pool.get_buffer().index;
+        let idx2 = pool.get_buffer().index;
+        let idx3 = pool.get_buffer().index;
 
         // All buffers should have different indices
         assert_ne!(idx1, idx2);
@@ -271,13 +246,12 @@ mod tests {
     }
 
     #[test]
-    fn test_buffer_zero_length_slice() {
+    fn test_buffer_zero_length_write() {
         let mut pool = BufferPool::new(1, 1024);
         let mut buffer = pool.get_buffer();
 
-        // Get a zero-length slice
-        let slice = buffer.get_writable_slice(0).expect("should succeed");
-        assert_eq!(slice.len(), 0);
+        // Write zero bytes
+        buffer.put_slice(&[]);
         assert_eq!(buffer.as_slice().len(), 0);
     }
 
@@ -286,14 +260,14 @@ mod tests {
         let mut pool = BufferPool::new(1, 1024);
         let mut buffer = pool.get_buffer();
 
-        // Get slice, check as_slice, repeat
-        buffer.get_writable_slice(10).expect("should succeed");
+        // Write, check as_slice, repeat
+        buffer.put_slice(&[0u8; 10]);
         assert_eq!(buffer.as_slice().len(), 10);
 
-        buffer.get_writable_slice(20).expect("should succeed");
+        buffer.put_slice(&[0u8; 20]);
         assert_eq!(buffer.as_slice().len(), 30);
 
-        buffer.get_writable_slice(5).expect("should succeed");
+        buffer.put_slice(&[0u8; 5]);
         assert_eq!(buffer.as_slice().len(), 35);
     }
 
@@ -315,9 +289,9 @@ mod tests {
         assert_eq!(pool.pool.len(), 4);
 
         // All buffers should have different indices
-        assert_ne!(buf1.index(), buf2.index());
-        assert_ne!(buf1.index(), buf3.index());
-        assert_ne!(buf2.index(), buf3.index());
+        assert_ne!(buf1.index, buf2.index);
+        assert_ne!(buf1.index, buf3.index);
+        assert_ne!(buf2.index, buf3.index);
     }
 
     #[test]
@@ -353,8 +327,8 @@ mod tests {
 
         // Get buffer and write to it
         let mut buffer = pool.get_buffer();
-        let index = buffer.index();
-        buffer.get_writable_slice(100).expect("should succeed");
+        let index = buffer.index;
+        buffer.put_slice(&[0u8; 100]);
         assert_eq!(buffer.as_slice().len(), 100);
 
         // Return buffer
@@ -362,7 +336,7 @@ mod tests {
 
         // Get the same buffer again
         let buffer2 = pool.get_buffer();
-        assert_eq!(buffer2.index(), index);
+        assert_eq!(buffer2.index, index);
 
         // Cursor should be reset to 0
         assert_eq!(buffer2.as_slice().len(), 0);
@@ -375,8 +349,8 @@ mod tests {
         // Get two buffers
         let buf1 = pool.get_buffer();
         let buf2 = pool.get_buffer();
-        let idx1 = buf1.index();
-        let idx2 = buf2.index();
+        let idx1 = buf1.index;
+        let idx2 = buf2.index;
 
         // Return both
         pool.return_buffer(buf1);
@@ -387,7 +361,7 @@ mod tests {
         let buf4 = pool.get_buffer();
 
         // Should get the same indices (order may vary)
-        let new_indices = [buf3.index(), buf4.index()];
+        let new_indices = [buf3.index, buf4.index];
         assert!(new_indices.contains(&idx1));
         assert!(new_indices.contains(&idx2));
     }
@@ -400,14 +374,14 @@ mod tests {
         let buf1 = pool.get_buffer();
         let buf2 = pool.get_buffer();
         let buf3 = pool.get_buffer();
-        let idx2 = buf2.index();
+        let idx2 = buf2.index;
 
         // Return only the middle one
         pool.return_buffer(buf2);
 
         // Get a new buffer - should reuse buf2's index
         let buf4 = pool.get_buffer();
-        assert_eq!(buf4.index(), idx2);
+        assert_eq!(buf4.index, idx2);
 
         // Still holding buf1, buf3, buf4 - pool shouldn't grow yet
         assert_eq!(pool.pool.len(), 3);
@@ -424,9 +398,8 @@ mod tests {
         let mut buffer = pool.get_buffer();
 
         // Write sequential data
-        for i in 0..10 {
-            let slice = buffer.get_writable_slice(1).expect("should succeed");
-            slice[0] = i * 10;
+        for i in 0..10u8 {
+            buffer.put_u8(i * 10);
         }
 
         // Verify all data is readable
