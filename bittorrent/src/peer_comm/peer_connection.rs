@@ -299,7 +299,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 return;
             }
         }
-        if let Some((_, torrent_state)) = state_ref.state() {
+        if let Some(torrent_state) = state_ref.state() {
             self.release_all_pieces(torrent_state);
             // Don't count disconnected peers
             if !self.is_choking {
@@ -565,7 +565,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     pub fn on_request_timeout(
         &mut self,
         torrent_state: &mut InitializedState,
-        file_store: &'f_store FileStore,
     ) {
         if !self.snubbed {
             self.snubbed = true;
@@ -636,7 +635,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     self.inflight.clear();
                     // TODO handle as reject piece
                 }
-                if let Some((_, torrent_state)) = state_ref.state() {
+                if let Some(torrent_state) = state_ref.state() {
                     self.release_all_pieces(torrent_state);
                 }
             }
@@ -646,7 +645,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     // Not interested so don't do anything
                     return;
                 }
-                if let Some((file_and_info, torrent_state)) = state_ref.state() {
+                if let Some(torrent_state) = state_ref.state() {
                     if let Some(piece_idx) = torrent_state
                         .piece_selector
                         .next_piece(self.conn_id, &mut self.endgame)
@@ -665,7 +664,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 self.peer_interested = true;
 
                 let info_hash = *state_ref.info_hash();
-                if let Some((_, torrent_state)) = state_ref.state() {
+                if let Some(torrent_state) = state_ref.state() {
                     if !self.sent_allowed_fast && self.fast_ext {
                         self.sent_allowed_fast = true;
                         const ALLOWED_FAST_SET_SIZE: usize = 6;
@@ -717,12 +716,12 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     "[Peer: {}] Peer is no longer interested in us!",
                     self.peer_id
                 );
-                if let Some((_, torrent_state)) = state_ref.state() {
+                if let Some(torrent_state) = state_ref.state() {
                     self.choke(torrent_state, false);
                 }
             }
             PeerMessage::Have { index } => {
-                if let Some((_, torrent_state)) = state_ref.state() {
+                if let Some(torrent_state) = state_ref.state() {
                     if 0 > index || index >= torrent_state.num_pieces() as i32 {
                         self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                             "Invalid have index received",
@@ -753,14 +752,14 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 }
                 let valid_range = state_ref
                     .state()
-                    .map(|(_, state)| index < state.num_pieces() as i32)
+                    .map(|state| index < state.num_pieces() as i32)
                     // Assume it's valid
                     .unwrap_or(true);
                 if index < 0 || !valid_range {
                     log::warn!("[PeerId: {}] Invalid allowed fast message", self.peer_id);
                 } else if !self.allowed_fast_pieces.contains(&index) {
                     self.allowed_fast_pieces.push(index);
-                    if let Some((file_info, torrent_state)) = state_ref.state()
+                    if let Some(torrent_state) = state_ref.state()
                         && let Some(interesting_pieces) = torrent_state
                             .piece_selector
                             .interesting_peer_pieces(self.conn_id)
@@ -786,7 +785,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     return;
                 }
                 self.is_upload_only = true;
-                if let Some((_, torrent_state)) = state_ref.state() {
+                if let Some(torrent_state) = state_ref.state() {
                     if torrent_state.piece_selector.bitfield_received(self.conn_id) {
                         log::warn!(
                             "[PeerId: {}] (HaveAll) Bitfield already received",
@@ -814,7 +813,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     ));
                     return;
                 }
-                if let Some((_, torrent_state)) = state_ref.state() {
+                if let Some(torrent_state) = state_ref.state() {
                     if torrent_state.piece_selector.bitfield_received(self.conn_id) {
                         log::warn!(
                             "[PeerId: {}] (HaveNone) Bitfield already received",
@@ -836,7 +835,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 }
             }
             PeerMessage::Bitfield(mut field) => {
-                if let Some((_, torrent_state)) = state_ref.state() {
+                if let Some(torrent_state) = state_ref.state() {
                     if torrent_state.piece_selector.bitfield_received(self.conn_id) && self.fast_ext
                     {
                         log::warn!("[PeerId: {}] Bitfield already received", self.peer_id);
@@ -898,7 +897,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             } => {
                 // returns if it was accepted or not
                 let mut handle_req = || -> Option<Bytes> {
-                    let (file_info, torrent_state) = state_ref.state()?;
+                    let torrent_state = state_ref.state()?;
                     if !self.is_valid_piece_req(
                         index,
                         begin,
@@ -970,7 +969,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     ));
                     return;
                 }
-                let Some((file_info, torrent_state)) = state_ref.state() else {
+                let Some(torrent_state) = state_ref.state() else {
                     log::error!(
                         "[Peer: {}] Reject request received before metadata completed",
                         self.peer_id
@@ -1076,14 +1075,13 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 }
             }
             PeerMessage::Piece { index, begin, data } => {
-                let Some((read_state, torrent_state)) = state_ref.state() else {
+                let Some(torrent_state) = state_ref.state() else {
                     log::error!(
                         "[Peer: {}] Piece request received before metadata completed",
                         self.peer_id
                     );
                     return;
                 };
-                let torrent_info = &read_state.metadata;
                 if !self.is_valid_piece(index, begin, data.len(), torrent_state.num_pieces()) {
                     self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                         "Invalid piece message received",
@@ -1120,8 +1118,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     let complete_tx = torrent_state.completed_piece_tx.clone();
                     let conn_id = self.conn_id;
                     let piece_len = torrent_state.piece_selector.piece_len(index);
+                    let metadata = state_ref.metadata().unwrap();
                     scope.spawn(move |_| {
-                        let hash = &torrent_info.pieces[index as usize];
+                        let hash = &metadata.pieces[index as usize];
                         let mut hasher = sha1::Sha1::new();
                         hasher.update(&buffer.raw_slice()[..piece_len as usize]);
                         let hash_check_result = hasher.finalize().as_slice() == hash;

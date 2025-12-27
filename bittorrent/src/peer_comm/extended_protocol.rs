@@ -35,8 +35,8 @@ pub fn init_extension<'state>(
             else {
                 return Err(DisconnectReason::ProtocolError("metadata size not valid"));
             };
-            if let Some((file_and_meta, _)) = state_ref.state() {
-                let expected_size = file_and_meta.metadata.construct_info().encode().len();
+            if let Some(metadata) = state_ref.metadata() {
+                let expected_size = metadata.construct_info().encode().len();
                 if metadata_size != expected_size as u64 {
                     return Err(DisconnectReason::ProtocolError("metadata size not valid"));
                 }
@@ -74,13 +74,14 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef, config: &Config) -> Pee
     if let Some(listener_port) = state_ref.listener_port {
         handshake.insert("p", bt_bencode::value::to_value(listener_port).unwrap());
     }
-    if let Some((file_and_meta, state)) = state_ref.state() {
-        let metadata_size = file_and_meta.metadata.construct_info().encode().len();
+    let is_complete = state_ref.state().map_or(false, |state| state.is_complete);
+    if let Some(metadata) = state_ref.metadata() {
+        let metadata_size = metadata.construct_info().encode().len();
         handshake.insert(
             "metadata_size",
             bt_bencode::to_value(&metadata_size).unwrap(),
         );
-        let upload_only = if state.is_complete { 1 } else { 0 };
+        let upload_only = if is_complete { 1 } else { 0 };
         handshake.insert(
             UPLOAD_ONLY,
             bt_bencode::value::to_value(&upload_only).unwrap(),
@@ -264,8 +265,8 @@ impl ExtensionProtocol for MetadataExtension {
         match message.msg_type {
             REQUEST => {
                 // if we do not have all metadata yet then reject the requests
-                if let Some((file_and_meta, _)) = state.state() {
-                    let info_bytes = file_and_meta.metadata.construct_info().encode();
+                if let Some(metadata) = state.metadata() {
+                    let info_bytes = metadata.construct_info().encode();
                     if start_offset >= info_bytes.len() {
                         connection.outgoing_msgs_buffer.push(OutgoingMsg {
                             message: self.reject(message.piece),

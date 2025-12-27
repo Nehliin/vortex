@@ -9,11 +9,13 @@ pub struct BufferPool {
     pool: Vec<Option<AnonymousMmap>>,
 }
 
+// impl drop that checks that it's has been returned to the pool?
 #[derive(Debug)]
 pub struct Buffer {
     index: usize,
     inner: Option<AnonymousMmap>,
     cursor: usize,
+    // indicates if the buffer has been returned to the pool
     #[cfg(feature = "metrics")]
     time_taken: std::time::Instant,
 }

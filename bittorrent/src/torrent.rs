@@ -221,11 +221,12 @@ pub struct InitializedState {
     pub completed_piece_rc: Receiver<CompletedPiece>,
     pub completed_piece_tx: Sender<CompletedPiece>,
     pub pieces: Vec<Option<Piece>>,
+    pub file_store: FileStore,
     pub is_complete: bool,
 }
 
 impl InitializedState {
-    pub fn new(torrent: &lava_torrent::torrent::v1::Torrent, config: Config) -> Self {
+    pub fn new(root: &Path, torrent: &lava_torrent::torrent::v1::Torrent, config: Config) -> Self {
         let mut pieces = Vec::with_capacity(torrent.pieces.len());
         for _ in 0..torrent.pieces.len() {
             pieces.push(None);
@@ -241,6 +242,7 @@ impl InitializedState {
             completed_piece_tx: tx,
             pieces,
             is_complete: false,
+            file_store: FileStore::new(root, &torrent).unwrap(),
         }
     }
 
@@ -327,7 +329,7 @@ impl InitializedState {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             if completed_piece.hash_matched {
                 let piece_len = self.piece_selector.piece_len(completed_piece.index as i32);
-                file_store.create_disk_write_ops(
+                self.file_store.create_disk_write_ops(
                     completed_piece.index as i32,
                     completed_piece.buffer,
                     piece_len as usize,
@@ -545,10 +547,10 @@ impl InitializedState {
     }
 }
 
-pub struct FileAndMetadata {
-    pub file_store: FileStore,
-    pub metadata: Box<TorrentMetadata>,
-}
+// pub struct FileAndMetadata {
+//     pub file_store: FileStore,
+//     pub metadata: Box<TorrentMetadata>,
+// }
 
 /// Current state of the torrent
 pub struct State {
@@ -557,7 +559,7 @@ pub struct State {
     // TODO: Consider checking this is accessible at construction
     root: PathBuf,
     torrent_state: Option<InitializedState>,
-    file: OnceCell<FileAndMetadata>,
+    file: OnceCell<Box<TorrentMetadata>>,
     pub(crate) config: Config,
 }
 
@@ -599,8 +601,7 @@ impl State {
         root: PathBuf,
         config: Config,
     ) -> io::Result<Self> {
-        let file_store = FileStore::new(&root, &metadata)?;
-        let mut initialized_state = InitializedState::new(&metadata, config);
+        let mut initialized_state = InitializedState::new(&root, &metadata, config);
         let completed_pieces: Box<[bool]> = metadata
             .pieces
             .as_slice()
@@ -642,10 +643,7 @@ impl State {
             root,
             listener_port: None,
             torrent_state: Some(initialized_state),
-            file: OnceCell::from(FileAndMetadata {
-                file_store,
-                metadata: Box::new(metadata),
-            }),
+            file: OnceCell::from(Box::new(metadata)),
             config,
         })
     }
@@ -684,12 +682,13 @@ impl State {
     }
 }
 
+// is this even needed?
 pub struct StateRef<'state> {
     info_hash: [u8; 20],
     root: &'state Path,
     pub listener_port: &'state Option<u16>,
     torrent: &'state mut Option<InitializedState>,
-    full: &'state OnceCell<FileAndMetadata>,
+    full: &'state OnceCell<Box<TorrentMetadata>>,
     pub config: &'state Config,
 }
 
@@ -698,16 +697,12 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
         &self.info_hash
     }
 
-    pub fn state(
-        &'e_iter mut self,
-    ) -> Option<(&'state FileAndMetadata, &'e_iter mut InitializedState)> {
-        if let Some(f) = self.full.get() {
-            // SAFETY: If full has been initialized the torrent must have been initialized
-            // as well
-            unsafe { Some((f, self.torrent.as_mut().unwrap_unchecked())) }
-        } else {
-            None
-        }
+    pub fn state(&'e_iter mut self) -> Option<&'e_iter mut InitializedState> {
+        self.torrent.as_mut()
+    }
+
+    pub fn metadata(&'e_iter mut self) -> Option<&'state Box<TorrentMetadata>> {
+        self.full.get()
     }
 
     #[inline]
@@ -719,12 +714,9 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
         if self.is_initialzied() {
             return Err(io::Error::other("State initialized twice"));
         }
-        *self.torrent = Some(InitializedState::new(&metadata, *self.config));
+        *self.torrent = Some(InitializedState::new(self.root, &metadata, *self.config));
         self.full
-            .set(FileAndMetadata {
-                file_store: FileStore::new(self.root, &metadata)?,
-                metadata: Box::new(metadata),
-            })
+            .set(Box::new(metadata))
             .map_err(|_e| io::Error::other("State initialized twice"))?;
         Ok(())
     }

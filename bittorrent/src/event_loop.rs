@@ -422,14 +422,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                         &mut event_tx,
                     );
 
-                    if let Some((file_and_meta, _)) = state_ref.state()
+                    if let Some(metadata) = state_ref.metadata()
                         && !prev_state_initialized
                     {
                         prev_state_initialized = true;
                         event_tx
-                            .enqueue(TorrentEvent::MetadataComplete(
-                                file_and_meta.metadata.clone(),
-                            ))
+                            .enqueue(TorrentEvent::MetadataComplete(metadata.clone()))
                             .expect("event queue should never be full here");
                         for (_, connection) in self.connections.iter_mut() {
                             let msgs = std::mem::take(&mut connection.pre_meta_have_msgs);
@@ -493,11 +491,10 @@ impl<'scope, 'state: 'scope> EventLoop {
                     }
                 }
 
-                if let Some((file_store, torrent_state)) = state_ref.state() {
+                if let Some(torrent_state) = state_ref.state() {
                     torrent_state.update_torrent_status(
                         &mut self.connections,
                         &mut event_tx,
-                        &file_store.file_store,
                         &mut self.disk_operations,
                     );
                     for disk_op in self.disk_operations.drain(..) {
@@ -792,7 +789,7 @@ impl<'scope, 'state: 'scope> EventLoop {
             }
             EventType::DiskWrite { data, piece_idx } => {
                 self.events.remove(io_event.event_data_idx);
-                let (_, state) = state
+                let state = state
                     .state()
                     .expect("must have initialized state before starting disk io");
                 if let Ok(buffer) = Rc::try_unwrap(data) {
@@ -882,7 +879,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 io_utils::recv_multishot(sq, recv_multi_id, fd, self.read_ring.bgid());
 
                 // todo only if fast ext is enabled
-                let bitfield_msg = if let Some((_, torrent_state)) = state.state() {
+                let bitfield_msg = if let Some(torrent_state) = state.state() {
                     let completed = torrent_state.piece_selector.downloaded_clone();
                     let message = if completed.all() {
                         peer_protocol::PeerMessage::HaveAll
@@ -992,7 +989,7 @@ fn report_tick_metrics(
     let mut pieces_allocated = 0;
     let mut num_unchoked = 0;
 
-    if let Some((_, torrent_state)) = state.state() {
+    if let Some(torrent_state) = state.state() {
         let total_completed = torrent_state.piece_selector.total_completed();
         let total_allocated = torrent_state.piece_selector.total_allocated();
         pieces_completed = total_completed;
@@ -1036,7 +1033,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
     event_tx: &mut Producer<TorrentEvent>,
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
-    if let Some((_, torrent_state)) = torrent_state.state() {
+    if let Some(torrent_state) = torrent_state.state() {
         torrent_state.ticks_to_recalc_unchoke =
             torrent_state.ticks_to_recalc_unchoke.saturating_sub(1);
         torrent_state.ticks_to_recalc_optimistic_unchoke = torrent_state
@@ -1068,13 +1065,13 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             connection.pending_disconnect = Some(DisconnectReason::Idle);
             continue;
         }
-        if let Some((file_and_info, torrent_state)) = torrent_state.state() {
+        if let Some(torrent_state) = torrent_state.state() {
             // TODO: If we are not using fast extension this might be triggered by a snub
             if let Some(time) = connection.last_received_subpiece {
                 if time.elapsed() > connection.request_timeout() {
                     // warn just to make more visible
                     log::warn!("TIMEOUT: {}", connection.peer_id);
-                    connection.on_request_timeout(torrent_state, &file_and_info.file_store);
+                    connection.on_request_timeout(torrent_state);
                 } else if connection.snubbed {
                     // Did not timeout
                     connection.snubbed = false;
@@ -1116,7 +1113,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
         }
     }
     let mut peer_metrics = Vec::with_capacity(connections.len());
-    if let Some((file_and_info, torrent_state)) = torrent_state.state() {
+    if let Some(torrent_state) = torrent_state.state() {
         // Request new pieces and fill up request queues
         let mut peer_bandwidth: Vec<_> = connections
             .iter_mut()

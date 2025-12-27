@@ -1234,7 +1234,7 @@ fn piece_recv() {
         torrent_state.update_torrent_status(&mut connections, &mut event_tx);
         assert_eq!(torrent_state.piece_selector.total_allocated(), 0);
         assert!(!torrent_state.piece_selector.is_allocated(index as usize));
-        assert!(torrent_state.piece_selector.has_completed(index as usize));
+        assert!(torrent_state.piece_selector.has_downloaded(index as usize));
         assert_eq!(torrent_state.piece_selector.total_completed(), 1);
     });
 }
@@ -1306,7 +1306,7 @@ fn handles_duplicate_piece_recv() {
         torrent_state.update_torrent_status(&mut connections, &mut event_tx);
         assert_eq!(torrent_state.piece_selector.total_allocated(), 0);
         assert!(!torrent_state.piece_selector.is_allocated(index as usize));
-        assert!(torrent_state.piece_selector.has_completed(index as usize));
+        assert!(torrent_state.piece_selector.has_downloaded(index as usize));
         assert_eq!(torrent_state.piece_selector.total_completed(), 1);
         connections[key].handle_message(
             PeerMessage::Piece {
@@ -1320,7 +1320,7 @@ fn handles_duplicate_piece_recv() {
         let (_, torrent_state) = state_ref.state().unwrap();
         assert_eq!(torrent_state.piece_selector.total_allocated(), 0);
         assert!(!torrent_state.piece_selector.is_allocated(index as usize));
-        assert!(torrent_state.piece_selector.has_completed(index as usize));
+        assert!(torrent_state.piece_selector.has_downloaded(index as usize));
         assert_eq!(torrent_state.piece_selector.total_completed(), 1);
     });
 }
