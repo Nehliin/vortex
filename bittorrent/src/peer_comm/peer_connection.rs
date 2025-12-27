@@ -923,7 +923,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         if !self.is_choking
                             || (self.accept_fast_pieces.contains(&index) && self.fast_ext)
                         {
-                            if !torrent_state.piece_selector.has_completed(index as usize) {
+                            if !torrent_state.piece_selector.has_downloaded(index as usize) {
                                 return None;
                             }
                             assert!(torrent_state.pieces[index as usize].is_none());
@@ -1105,17 +1105,18 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     })
                     .map(|completed_piece| completed_piece.into_buffer())
                 {
-                    if torrent_state.piece_selector.has_completed(index as usize)
+                    if torrent_state.piece_selector.has_downloaded(index as usize)
                         // We assume the hash will match, if not we will just request it again
-                        || torrent_state.piece_selector.is_hashing(index as usize)
+                        || torrent_state.piece_selector.is_complete(index as usize)
                     {
+                        // RETURN BUFFER
                         // This might happen in end game mode when multiple peers race to complete the
                         // piece. Haven't implemented it yet though
                         log::debug!("Piece {index} already completed or pending hashing, skipping");
                         return;
                     }
                     log::debug!("Piece {index} download completed, sending to hash thread");
-                    torrent_state.piece_selector.mark_hashing(index as usize);
+                    torrent_state.piece_selector.mark_downloaded(index as usize);
                     let complete_tx = torrent_state.completed_piece_tx.clone();
                     let conn_id = self.conn_id;
                     let piece_len = torrent_state.piece_selector.piece_len(index);

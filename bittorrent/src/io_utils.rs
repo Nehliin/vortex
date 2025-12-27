@@ -189,6 +189,7 @@ pub fn write_to_disk<Q: SubmissionQueue>(
     let event_id = events.insert(EventData {
         typ: EventType::DiskWrite {
             data: disk_op.buffer,
+            piece_idx: disk_op.piece_idx,
         },
         buffer: None,
     });

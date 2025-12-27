@@ -64,6 +64,7 @@ pub enum EventType {
     },
     DiskWrite {
         data: Rc<Buffer>,
+        piece_idx: i32,
     },
     Cancel,
     Close {
@@ -253,19 +254,20 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         log::error!("{err_str}");
                         return Err(err);
                     }
-                    EventType::DiskWrite { data } => {
-                        // todo do more here
-                        let state = state_ref
-                            .state()
-                            .expect("must have initialized state before starting disk io");
-                        if let Ok(buffer) = Rc::try_unwrap(data) {
-                            state
-                                .1
-                                .piece_selector
-                                .piece_buffer_pool
-                                .return_buffer(buffer);
-                        }
-                        *inflight_disk_ops -= 1;
+                    EventType::DiskWrite { data, .. } => {
+                        todo!()
+                        // // todo do more here
+                        // let state = state_ref
+                        //     .state()
+                        //     .expect("must have initialized state before starting disk io");
+                        // if let Ok(buffer) = Rc::try_unwrap(data) {
+                        //     state
+                        //         .1
+                        //         .piece_selector
+                        //         .piece_buffer_pool
+                        //         .return_buffer(buffer);
+                        // }
+                        // *inflight_disk_ops -= 1;
                     }
                 }
             } else {
@@ -315,6 +317,7 @@ pub struct EventLoop {
     // pending peers as soon as max connections is reached
     connections: SlotMap<ConnectionId, PeerConnection>,
     pending_connections: HashSet<SockAddr>,
+    // file store since it doesn't need to be read only anymoer
     inflight_disk_ops: usize,
     disk_operations: Vec<DiskOp>,
     our_id: PeerId,
@@ -702,6 +705,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         sq: &mut BackloggedSubmissionQueue<Q>,
         io_event: RawIoEvent,
         state: &mut StateRef<'state>,
+        event_tx: &mut Producer<TorrentEvent, 512>,
         scope: &Scope<'scope>,
     ) -> io::Result<()> {
         let ret = match io_event.result {
@@ -786,22 +790,16 @@ impl<'scope, 'state: 'scope> EventLoop {
                     &HANDSHAKE_TIMEOUT,
                 );
             }
-            EventType::DiskWrite { data } => {
+            EventType::DiskWrite { data, piece_idx } => {
                 self.events.remove(io_event.event_data_idx);
-                let state = state
+                let (_, state) = state
                     .state()
                     .expect("must have initialized state before starting disk io");
                 if let Ok(buffer) = Rc::try_unwrap(data) {
-                    state
-                        .1
-                        .piece_selector
-                        .piece_buffer_pool
-                        .return_buffer(buffer);
+                    // If we are here we have completed the piece
+                    state.complete_piece(piece_idx, &mut self.connections, event_tx, buffer);
                 }
                 self.inflight_disk_ops -= 1;
-                // if state.0.file_store.inflight_disk_ops == 0 && state.1.is_complete {
-
-                // }
             }
             EventType::Cancel => {
                 log::trace!("Cancel event completed");
@@ -885,7 +883,7 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                 // todo only if fast ext is enabled
                 let bitfield_msg = if let Some((_, torrent_state)) = state.state() {
-                    let completed = torrent_state.piece_selector.completed_clone();
+                    let completed = torrent_state.piece_selector.downloaded_clone();
                     let message = if completed.all() {
                         peer_protocol::PeerMessage::HaveAll
                     } else if completed.not_any() {

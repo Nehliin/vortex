@@ -9,6 +9,7 @@ use std::{
 };
 
 use crate::{
+    buf_pool::Buffer,
     event_loop::{ConnectionId, EventLoop},
     peer_comm::peer_protocol::PeerId,
 };
@@ -256,6 +257,67 @@ impl InitializedState {
         self.pieces.len()
     }
 
+    pub(crate) fn complete_piece(
+        &mut self,
+        piece_idx: i32,
+        connections: &mut SlotMap<ConnectionId, PeerConnection>,
+        event_tx: &mut Producer<'_, TorrentEvent, 512>,
+        piece_buffer: Buffer,
+    ) {
+        self.piece_selector
+            .piece_buffer_pool
+            .return_buffer(piece_buffer);
+        self.piece_selector.mark_complete(piece_idx as usize);
+        if !self.is_complete && self.piece_selector.completed_all() {
+            log::info!("Torrent complete!");
+            self.is_complete = true;
+            // send later
+            if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
+                log::error!("Torrent completion event missed");
+            }
+            // We are no longer interestead in any of the
+            // peers
+            for (_, peer) in connections.iter_mut() {
+                peer.not_interested(false);
+                // If the peer is upload only and
+                // we are upload only there is no reason
+                // to stay connected
+                if peer.is_upload_only {
+                    peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
+                }
+                // Notify all extensions that the torrent completed
+                for (_, extension) in peer.extensions.iter_mut() {
+                    extension.on_torrent_complete(&mut peer.outgoing_msgs_buffer);
+                }
+            }
+        }
+        for (conn_id, peer) in connections.iter_mut() {
+            if let Some(bitfield) = self.piece_selector.interesting_peer_pieces(conn_id)
+                && !bitfield.any()
+                && peer.is_interesting
+                && peer.queued.is_empty()
+                && peer.inflight.is_empty()
+            {
+                // We are no longer interestead in this peer
+                peer.not_interested(false);
+                // if it's upload only we can close the
+                // connection since it will never download from
+                // us
+                if peer.is_upload_only {
+                    peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
+                }
+            }
+            peer.have(piece_idx, false);
+        }
+        log::debug!("Piece {piece_idx} completed!");
+    }
+
+    // 1. send to hash thread mark as downloaded (remove is hashing)
+    // 2. when complete write to disk
+    // 3. when complete to disk mark as complete and run the below logic
+    //  How to know if it's complted? if RC == 0 all writes for the piece have completed
+    //  store index as part of the event
+
     // TODO: Put this in the event loop directly instead when that is easier to test
     pub(crate) fn update_torrent_status(
         &mut self,
@@ -264,7 +326,6 @@ impl InitializedState {
     ) {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             if completed_piece.hash_matched {
-                self.piece_selector.mark_complete(completed_piece.index);
                 let piece_len = self.piece_selector.piece_len(completed_piece.index as i32);
                 file_store.create_disk_write_ops(
                     completed_piece.index as i32,
@@ -272,52 +333,11 @@ impl InitializedState {
                     piece_len as usize,
                     disk_operations,
                 );
-                if !self.is_complete && self.piece_selector.completed_all() {
-                    log::info!("Torrent complete!");
-                    self.is_complete = true;
-                    // send later
-                    if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
-                        log::error!("Torrent completion event missed");
-                    }
-                    // We are no longer interestead in any of the
-                    // peers
-                    for (_, peer) in connections.iter_mut() {
-                        peer.not_interested(false);
-                        // If the peer is upload only and
-                        // we are upload only there is no reason
-                        // to stay connected
-                        if peer.is_upload_only {
-                            peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
-                        }
-                        // Notify all extensions that the torrent completed
-                        for (_, extension) in peer.extensions.iter_mut() {
-                            extension.on_torrent_complete(&mut peer.outgoing_msgs_buffer);
-                        }
-                    }
-                }
-                for (conn_id, peer) in connections.iter_mut() {
-                    if let Some(bitfield) = self.piece_selector.interesting_peer_pieces(conn_id)
-                        && !bitfield.any()
-                        && peer.is_interesting
-                        && peer.queued.is_empty()
-                        && peer.inflight.is_empty()
-                    {
-                        // We are no longer interestead in this peer
-                        peer.not_interested(false);
-                        // if it's upload only we can close the
-                        // connection since it will never download from
-                        // us
-                        if peer.is_upload_only {
-                            peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
-                        }
-                    }
-                    peer.have(completed_piece.index as i32, false);
-                }
-                log::debug!("Piece {} completed!", completed_piece.index);
             } else {
-                // Only need to mark this as not hashing when it fails
+                // Only need to mark this as not downloaded when it fails
                 // since otherwise it will be marked as completed and this is moot
-                self.piece_selector.mark_not_hashing(completed_piece.index);
+                self.piece_selector
+                    .mark_not_downloaded(completed_piece.index);
                 // deallocate piece peer peer
                 // TODO: disconnect, there also might be a minimal chance of a race
                 // condition here where the connection id is replaced (by disconnect +

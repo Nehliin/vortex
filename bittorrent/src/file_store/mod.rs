@@ -219,7 +219,7 @@ struct TorrentFile {
 #[derive(Debug)]
 pub struct DiskOp {
     pub fd: RawFd,
-    pub piece_index: i32,
+    pub piece_idx: i32,
     pub file_offset: usize,
     pub buffer_offset: usize,
     pub write_len: usize,
@@ -321,7 +321,7 @@ impl FileStore {
 
             disk_operations.push(DiskOp {
                 fd: file.file_handle.as_fd(),
-                piece_index: index,
+                piece_idx: index,
                 file_offset: current_write_head,
                 buffer_offset: piece_written,
                 write_len: max_possible_write,

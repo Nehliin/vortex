@@ -39,11 +39,11 @@ pub struct Subpiece {
 pub struct PieceSelector {
     //    strategy: T,
     // Completed -> 1 completed 0 = not completed (global)
-    completed_pieces: BitBox<u8, Msb0>,
+    downloaded_pieces: BitBox<u8, Msb0>,
     // Allocated -> 1 allocated 0 = not allocated (global)
     allocated_pieces: BitBox<u8, Msb0>,
     // Hashing -> 1 is currently being hashed 0 = not hashing (global)
-    hashing_pieces: BitBox<u8, Msb0>,
+    completed_pieces: BitBox<u8, Msb0>,
     // These are all pieces the peer have that we have yet to complete
     // it should be kept up to date as the torrent is downloaded, completed
     // pieces are "turned off" and Have messages only set a bit if we do not already
@@ -70,9 +70,9 @@ impl PieceSelector {
             last_piece_length = piece_length;
         }
         Self {
-            completed_pieces,
+            downloaded_pieces: completed_pieces,
             allocated_pieces,
-            hashing_pieces,
+            completed_pieces: hashing_pieces,
             last_piece_length: last_piece_length as u32,
             piece_length: piece_length as u32,
             interesting_peer_pieces: Default::default(),
@@ -85,8 +85,8 @@ impl PieceSelector {
     }
 
     pub(crate) fn set_completed_bitfield(&mut self, completed_pieces: BitBox<u8, Msb0>) {
-        assert_eq!(self.completed_pieces.len(), completed_pieces.len());
-        self.completed_pieces = completed_pieces;
+        assert_eq!(self.downloaded_pieces.len(), completed_pieces.len());
+        self.downloaded_pieces = completed_pieces;
     }
 
     // Returns index and if the peer is in endgame mode
@@ -96,7 +96,7 @@ impl PieceSelector {
         endgame_mode: &mut bool,
     ) -> Option<i32> {
         let interesting_pieces = self.interesting_peer_pieces.get(connection_id)?;
-        let pickable = !self.hashing_pieces.clone() & interesting_pieces;
+        let pickable = !self.downloaded_pieces.clone() & interesting_pieces;
         // due to lifetime issues
         let first_pickable = pickable.first_one();
         let unallocated_pickable = !self.allocated_pieces.clone() & pickable;
@@ -111,11 +111,11 @@ impl PieceSelector {
         }
 
         let procentage_left =
-            self.completed_pieces.count_zeros() as f32 / self.completed_pieces.len() as f32;
+            self.downloaded_pieces.count_zeros() as f32 / self.downloaded_pieces.len() as f32;
         if procentage_left > 0.95 {
             for _ in 0..5 {
                 let index =
-                    (self.rng_gen.random::<f32>() * self.completed_pieces.len() as f32) as usize;
+                    (self.rng_gen.random::<f32>() * self.downloaded_pieces.len() as f32) as usize;
                 if unallocated_pickable[index] {
                     *endgame_mode = false;
                     return Some(index as i32);
@@ -157,7 +157,7 @@ impl PieceSelector {
         connection_id: ConnectionId,
         peer_pieces: BitBox<u8, Msb0>,
     ) -> bool {
-        let not_completed = !self.completed_pieces.clone();
+        let not_completed = !self.downloaded_pieces.clone();
         let interesting_pieces = peer_pieces & not_completed;
         let is_interesting = interesting_pieces.any();
         self.interesting_peer_pieces
@@ -171,7 +171,7 @@ impl PieceSelector {
         connection_id: ConnectionId,
         piece_index: usize,
     ) -> bool {
-        let is_interesting = !self.completed_pieces[piece_index];
+        let is_interesting = !self.downloaded_pieces[piece_index];
         let entry = self
             .interesting_peer_pieces
             .entry(connection_id)
@@ -180,7 +180,7 @@ impl PieceSelector {
             .and_modify(|pieces| pieces.set(piece_index, is_interesting))
             .or_insert_with(|| {
                 let mut all_pieces: BitBox<u8, Msb0> =
-                    BitVec::repeat(false, self.completed_pieces.len()).into();
+                    BitVec::repeat(false, self.downloaded_pieces.len()).into();
                 all_pieces.set(piece_index, is_interesting);
                 all_pieces
             });
@@ -207,17 +207,17 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn mark_hashing(&mut self, index: usize) {
+    pub fn mark_downloaded(&mut self, index: usize) {
+        assert!(!self.downloaded_pieces[index]);
         assert!(!self.completed_pieces[index]);
-        assert!(!self.hashing_pieces[index]);
-        self.hashing_pieces.set(index, true);
+        self.downloaded_pieces.set(index, true);
     }
 
     #[inline]
-    pub fn mark_not_hashing(&mut self, index: usize) {
+    pub fn mark_not_downloaded(&mut self, index: usize) {
+        assert!(self.downloaded_pieces[index]);
         assert!(!self.completed_pieces[index]);
-        assert!(self.hashing_pieces[index]);
-        self.hashing_pieces.set(index, false);
+        self.downloaded_pieces.set(index, false);
     }
 
     #[inline]
@@ -248,18 +248,18 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn completed_clone(&self) -> BitBox<u8, Msb0> {
-        self.completed_pieces.clone()
+    pub fn downloaded_clone(&self) -> BitBox<u8, Msb0> {
+        self.downloaded_pieces.clone()
     }
 
     #[inline]
-    pub fn has_completed(&self, index: usize) -> bool {
+    pub fn has_downloaded(&self, index: usize) -> bool {
+        self.downloaded_pieces[index]
+    }
+
+    #[inline]
+    pub fn is_complete(&self, index: usize) -> bool {
         self.completed_pieces[index]
-    }
-
-    #[inline]
-    pub fn is_hashing(&self, index: usize) -> bool {
-        self.hashing_pieces[index]
     }
 
     #[inline]
@@ -269,7 +269,7 @@ impl PieceSelector {
 
     #[inline]
     pub fn total_completed(&self) -> usize {
-        self.completed_pieces.count_ones()
+        self.downloaded_pieces.count_ones()
     }
 
     #[inline]
@@ -279,7 +279,7 @@ impl PieceSelector {
 
     #[inline]
     pub fn piece_len(&self, index: i32) -> u32 {
-        if index == (self.completed_pieces.len() as i32 - 1) {
+        if index == (self.downloaded_pieces.len() as i32 - 1) {
             self.last_piece_length
         } else {
             self.piece_length
