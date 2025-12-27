@@ -34,6 +34,16 @@ impl Buffer {
         // It's only used to track if buffers are actually returned
         unsafe { &self.inner.as_ref().unwrap_unchecked()[..self.cursor] }
     }
+
+    #[inline]
+    pub fn raw_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.inner
+    }
+
+    #[inline]
+    pub fn raw_slice(&self) -> &[u8] {
+        &self.inner
+    }
 }
 
 unsafe impl BufMut for Buffer {

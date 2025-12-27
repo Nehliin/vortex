@@ -16,6 +16,9 @@ pub struct AnonymousMmap {
     len: usize,
 }
 
+unsafe impl Send for AnonymousMmap {}
+unsafe impl Sync for AnonymousMmap {}
+
 impl AnonymousMmap {
     /// Allocate `len` bytes that are page aligned and zero-filled.
     pub fn new(len: usize) -> io::Result<AnonymousMmap> {

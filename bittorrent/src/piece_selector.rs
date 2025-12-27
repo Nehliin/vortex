@@ -11,7 +11,6 @@ use slotmap::SecondaryMap;
 use crate::{
     buf_pool::{Buffer, BufferPool},
     event_loop::ConnectionId,
-    file_store::{FileStore, ReadablePieceFileView, WritablePieceFileView},
 };
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
@@ -54,7 +53,7 @@ pub struct PieceSelector {
     last_piece_length: u32,
     piece_length: u32,
     rng_gen: SmallRng,
-    piece_buffer_pool: BufferPool,
+    pub piece_buffer_pool: BufferPool,
 }
 
 impl PieceSelector {
@@ -303,6 +302,7 @@ pub struct CompletedPiece {
     pub index: usize,
     pub conn_id: ConnectionId,
     pub hash_matched: bool,
+    pub buffer: Buffer,
 }
 
 // Make the write pool larger like 2*PIECE size
@@ -394,7 +394,7 @@ impl Piece {
             debug_assert_eq!(data.len() as i32, SUBPIECE_SIZE);
         }
         let begin = begin as usize;
-        self.piece_view.full()[begin..(begin + data.len())].copy_from_slice(data);
+        self.piece_view.raw_mut_slice()[begin..(begin + data.len())].copy_from_slice(data);
         self.completed_subpieces.set(subpiece_index as usize, true);
     }
 

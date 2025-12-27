@@ -173,16 +173,30 @@ pub fn write<Q: SubmissionQueue>(
     sq.push(write_op);
 }
 
-
-pub fn write_to_disk(
+pub fn write_to_disk<Q: SubmissionQueue>(
     events: &mut SlotMap<EventId, EventData>,
     sq: &mut BackloggedSubmissionQueue<Q>,
     disk_op: DiskOp,
 ) {
+    let write_ptr = unsafe {
+        disk_op
+            .buffer
+            .raw_slice()
+            .as_ptr()
+            .add(disk_op.buffer_offset)
+    };
+    let write_len = disk_op.write_len;
     let event_id = events.insert(EventData {
-        typ: EventType::DiskWrite { data: disk_op.data },
-        buffer_idx: None,
+        typ: EventType::DiskWrite {
+            data: disk_op.buffer,
+        },
+        buffer: None,
     });
+    let write_op = opcode::Write::new(types::Fd(disk_op.fd), write_ptr, write_len as u32)
+        .offset(disk_op.file_offset as u64)
+        .build()
+        .user_data(event_id.data().as_ffi());
+    sq.push(write_op);
 }
 
 // NOTE: Socket contains an OwnedFd which automatically closes

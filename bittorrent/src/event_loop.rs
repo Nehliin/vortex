@@ -2,6 +2,7 @@ use std::{
     io,
     net::TcpListener,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd},
+    rc::Rc,
     sync::mpsc::Receiver,
     time::{Duration, Instant},
 };
@@ -24,6 +25,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use crate::{
     buf_pool::{Buffer, BufferPool},
     buf_ring::{Bgid, BufferRing},
+    file_store::DiskOp,
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::{
         extended_protocol::extension_handshake_msg,
@@ -61,7 +63,7 @@ pub enum EventType {
         connection_idx: ConnectionId,
     },
     DiskWrite {
-        data: Box<[u8]>
+        data: Rc<Buffer>,
     },
     Cancel,
     Close {
@@ -94,6 +96,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
     state_ref: &mut StateRef<'state>,
     connections: &mut SlotMap<ConnectionId, PeerConnection>,
     pending_connections: &mut HashSet<SockAddr>,
+    inflight_disk_ops: &mut usize,
     bgid: Bgid,
 ) -> io::Result<()> {
     match error_code as i32 {
@@ -250,6 +253,20 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         log::error!("{err_str}");
                         return Err(err);
                     }
+                    EventType::DiskWrite { data } => {
+                        // todo do more here
+                        let state = state_ref
+                            .state()
+                            .expect("must have initialized state before starting disk io");
+                        if let Ok(buffer) = Rc::try_unwrap(data) {
+                            state
+                                .1
+                                .piece_selector
+                                .piece_buffer_pool
+                                .return_buffer(buffer);
+                        }
+                        *inflight_disk_ops -= 1;
+                    }
                 }
             } else {
                 log::error!(
@@ -298,6 +315,8 @@ pub struct EventLoop {
     // pending peers as soon as max connections is reached
     connections: SlotMap<ConnectionId, PeerConnection>,
     pending_connections: HashSet<SockAddr>,
+    inflight_disk_ops: usize,
+    disk_operations: Vec<DiskOp>,
     our_id: PeerId,
 }
 
@@ -318,6 +337,8 @@ impl<'scope, 'state: 'scope> EventLoop {
             connections: SlotMap::with_capacity_and_key(config.max_connections),
             pending_connections: HashSet::with_capacity(config.max_connections),
             our_id,
+            inflight_disk_ops: 0,
+            disk_operations: Vec::with_capacity(32),
         }
     }
 
@@ -343,7 +364,6 @@ impl<'scope, 'state: 'scope> EventLoop {
         }
 
         let mut state_ref = state.as_ref();
-
         let mut prev_state_initialized = state_ref.is_initialzied();
         // lambda to be able to catch errors an always unregistering the read ring
         let result = rayon::in_place_scope(|scope| {
@@ -471,12 +491,16 @@ impl<'scope, 'state: 'scope> EventLoop {
                 }
 
                 if let Some((file_store, torrent_state)) = state_ref.state() {
-                    torrent_state.update_torrent_status(&mut self.connections, &mut event_tx);
-                    for disk_op in file_store.file_store.disk_operations.iter() {
-                        let buffer = self.write_pool.get_buffer();
+                    torrent_state.update_torrent_status(
+                        &mut self.connections,
+                        &mut event_tx,
+                        &file_store.file_store,
+                        &mut self.disk_operations,
+                    );
+                    for disk_op in self.disk_operations.drain(..) {
+                        self.inflight_disk_ops += 1;
                         io_utils::write_to_disk(&mut self.events, &mut sq, disk_op);
                     }
-
                 }
 
                 for (conn_id, connection) in self
@@ -522,7 +546,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 sq.sync();
 
                 self.handle_commands(&mut sq, &mut shutting_down, &mut command_rc, &mut state_ref);
-                if shutting_down && self.connections.is_empty() {
+                if shutting_down && self.connections.is_empty() && self.inflight_disk_ops == 0 {
                     log::info!("All connections closed, shutdown complete");
                     return Ok(());
                 }
@@ -691,6 +715,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                     state,
                     &mut self.connections,
                     &mut self.pending_connections,
+                    &mut self.inflight_disk_ops,
                     self.read_ring.bgid(),
                 );
             }
@@ -760,6 +785,23 @@ impl<'scope, 'state: 'scope> EventLoop {
                     self.read_ring.bgid(),
                     &HANDSHAKE_TIMEOUT,
                 );
+            }
+            EventType::DiskWrite { data } => {
+                self.events.remove(io_event.event_data_idx);
+                let state = state
+                    .state()
+                    .expect("must have initialized state before starting disk io");
+                if let Ok(buffer) = Rc::try_unwrap(data) {
+                    state
+                        .1
+                        .piece_selector
+                        .piece_buffer_pool
+                        .return_buffer(buffer);
+                }
+                self.inflight_disk_ops -= 1;
+                // if state.0.file_store.inflight_disk_ops == 0 && state.1.is_complete {
+
+                // }
             }
             EventType::Cancel => {
                 log::trace!("Cancel event completed");
@@ -841,6 +883,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // Recv has been complete, move over to multishot, same user data
                 io_utils::recv_multishot(sq, recv_multi_id, fd, self.read_ring.bgid());
 
+                // todo only if fast ext is enabled
                 let bitfield_msg = if let Some((_, torrent_state)) = state.state() {
                     let completed = torrent_state.piece_selector.completed_clone();
                     let message = if completed.all() {
@@ -1103,11 +1146,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
                     .piece_selector
                     .next_piece(peer_key, &mut peer.endgame)
                 {
-                    let mut queue = torrent_state.allocate_piece(
-                        next_piece,
-                        peer.conn_id,
-                        &file_and_info.file_store,
-                    );
+                    let mut queue = torrent_state.allocate_piece(next_piece, peer.conn_id);
                     let queue_len = queue.len();
                     peer.append_and_fill(&mut queue);
                     // Remove all subpieces from available bandwidth

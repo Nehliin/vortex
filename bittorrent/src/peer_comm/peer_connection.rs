@@ -594,8 +594,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 // is the final inflight piece
                 self.target_inflight = 2;
                 if let Some(new_piece) = maybe_new_piece {
-                    let mut subpieces =
-                        torrent_state.allocate_piece(new_piece, self.conn_id, file_store);
+                    let mut subpieces = torrent_state.allocate_piece(new_piece, self.conn_id);
                     self.append_and_fill(&mut subpieces);
                 }
                 // Update to actual target
@@ -653,11 +652,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         .next_piece(self.conn_id, &mut self.endgame)
                     {
                         log::info!("[Peer: {}] Unchoked us, start downloading", self.peer_id);
-                        let mut subpieces = torrent_state.allocate_piece(
-                            piece_idx,
-                            self.conn_id,
-                            &file_and_info.file_store,
-                        );
+                        let mut subpieces = torrent_state.allocate_piece(piece_idx, self.conn_id);
                         // TODO: might be more than the peer can handle
                         self.append_and_fill(&mut subpieces);
                     } else {
@@ -778,11 +773,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         );
                         // Mark ourselves as interested
                         self.interested(true);
-                        let mut subpieces = torrent_state.allocate_piece(
-                            index,
-                            self.conn_id,
-                            &file_info.file_store,
-                        );
+                        let mut subpieces = torrent_state.allocate_piece(index, self.conn_id);
                         self.append_and_fill(&mut subpieces);
                     }
                 }
@@ -906,7 +897,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 length,
             } => {
                 // returns if it was accepted or not
-                let mut handle_req = || {
+                let mut handle_req = || -> Option<Bytes> {
                     let (file_info, torrent_state) = state_ref.state()?;
                     if !self.is_valid_piece_req(
                         index,
@@ -936,22 +927,23 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                 return None;
                             }
                             assert!(torrent_state.pieces[index as usize].is_none());
+                            None
                             // TODO: cache this
                             // SAFETY: we've check that this is completed and the writable piece is gone
                             // from the piece vector in that case no other writers should exist for the piece
-                            let Ok(readable_piece_view) =
-                                (unsafe { file_info.file_store.readable_piece_view(index) })
-                            else {
-                                return None;
-                            };
-                            // TODO: consider using maybe uninit
-                            let mut subpiece_data = vec![0; length as usize].into_boxed_slice();
-                            readable_piece_view.read_subpiece(
-                                begin as usize,
-                                &mut subpiece_data,
-                                &file_info.file_store,
-                            );
-                            Some(subpiece_data)
+                            // let Ok(readable_piece_view) =
+                            //     (unsafe { file_info.file_store.readable_piece_view(index) })
+                            // else {
+                            //     return None;
+                            // };
+                            // // TODO: consider using maybe uninit
+                            // let mut subpiece_data = vec![0; length as usize].into_boxed_slice();
+                            // readable_piece_view.read_subpiece(
+                            //     begin as usize,
+                            //     &mut subpiece_data,
+                            //     &file_info.file_store,
+                            // );
+                            // Some(subpiece_data)
                         } else {
                             log::warn!(
                                 "[Peer: {}] Piece request ignored/rejected, peer can't be unchoked",
@@ -1029,11 +1021,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         defer_deallocation = false;
                         torrent_state.deallocate_piece(index, self.conn_id);
                     }
-                    let mut subpieces = torrent_state.allocate_piece(
-                        new_index,
-                        self.conn_id,
-                        &file_info.file_store,
-                    );
+                    let mut subpieces = torrent_state.allocate_piece(new_index, self.conn_id);
                     self.append_and_fill(&mut subpieces);
                 }
                 if defer_deallocation {
@@ -1095,7 +1083,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     );
                     return;
                 };
-                let file_store = &mut read_state.file_store;
                 let torrent_info = &read_state.metadata;
                 if !self.is_valid_piece(index, begin, data.len(), torrent_state.num_pieces()) {
                     self.pending_disconnect = Some(DisconnectReason::ProtocolError(
@@ -1131,16 +1118,18 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     torrent_state.piece_selector.mark_hashing(index as usize);
                     let complete_tx = torrent_state.completed_piece_tx.clone();
                     let conn_id = self.conn_id;
+                    let piece_len = torrent_state.piece_selector.piece_len(index);
                     scope.spawn(move |_| {
                         let hash = &torrent_info.pieces[index as usize];
                         let mut hasher = sha1::Sha1::new();
-                        hasher.update(buffer.as_slice());
+                        hasher.update(&buffer.raw_slice()[..piece_len as usize]);
                         let hash_check_result = hasher.finalize().as_slice() == hash;
                         complete_tx
                             .send(CompletedPiece {
                                 index: index as usize,
                                 conn_id,
                                 hash_matched: hash_check_result,
+                                buffer,
                             })
                             .unwrap();
                     });

@@ -8,10 +8,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::piece_selector::{CompletedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece};
 use crate::{
     event_loop::{ConnectionId, EventLoop},
     peer_comm::peer_protocol::PeerId,
+};
+use crate::{
+    file_store::DiskOp,
+    piece_selector::{CompletedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece},
 };
 use crate::{file_store::FileStore, peer_connection::PeerConnection};
 use ahash::HashSetExt;
@@ -262,9 +265,17 @@ impl InitializedState {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             if completed_piece.hash_matched {
                 self.piece_selector.mark_complete(completed_piece.index);
+                let piece_len = self.piece_selector.piece_len(completed_piece.index as i32);
+                file_store.create_disk_write_ops(
+                    completed_piece.index as i32,
+                    completed_piece.buffer,
+                    piece_len as usize,
+                    disk_operations,
+                );
                 if !self.is_complete && self.piece_selector.completed_all() {
                     log::info!("Torrent complete!");
                     self.is_complete = true;
+                    // send later
                     if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
                         log::error!("Torrent completion event missed");
                     }
@@ -307,6 +318,7 @@ impl InitializedState {
                 // Only need to mark this as not hashing when it fails
                 // since otherwise it will be marked as completed and this is moot
                 self.piece_selector.mark_not_hashing(completed_piece.index);
+                // deallocate piece peer peer
                 // TODO: disconnect, there also might be a minimal chance of a race
                 // condition here where the connection id is replaced (by disconnect +
                 // new connection so that the wrong peer is marked) but this should be
@@ -319,23 +331,15 @@ impl InitializedState {
     }
 
     // Allocates a piece and increments the piece ref count
-    pub fn allocate_piece(
-        &mut self,
-        index: i32,
-        conn_id: ConnectionId,
-        file_store: &FileStore,
-    ) -> VecDeque<Subpiece> {
+    pub fn allocate_piece(&mut self, index: i32, conn_id: ConnectionId) -> VecDeque<Subpiece> {
         log::debug!("Allocating piece: conn_id: {conn_id:?}, index: {index}");
         self.piece_selector.mark_allocated(index, conn_id);
         match &mut self.pieces[index as usize] {
             Some(allocated_piece) => allocated_piece.allocate_remaining_subpieces(),
             None => {
                 let length = self.piece_selector.piece_len(index);
-                // SAFETY: There only exist a single piece per index in the torrent_state
-                // piece vector which guarantees that there can never be two concurrent writable
-                // piece views for the same index
-                let piece_view = unsafe { file_store.writable_piece_view(index).unwrap() };
-                let mut piece = Piece::new(index, length, piece_view);
+                let buffer = self.piece_selector.piece_buffer_pool.get_buffer();
+                let mut piece = Piece::new(index, length, buffer);
                 let subpieces = piece.allocate_remaining_subpieces();
                 self.pieces[index as usize] = Some(piece);
                 subpieces
@@ -587,18 +591,19 @@ impl State {
                 // should not exist any existing writable_piece_views. NOTE: this isn't 100%
                 // guraranteed since someone else could be mmapping the file but it's not much
                 // we can do about that
-                match unsafe { file_store.readable_piece_view(idx as i32) } {
-                    Ok(readable_view) => {
-                        // Since we do not sync it should never panic
-                        readable_view.check_hash(hash, &file_store, false).unwrap()
-                    }
-                    Err(err) => {
-                        if err.kind() != io::ErrorKind::NotFound {
-                            panic!("Unexpected error reading file {err}");
-                        }
-                        false
-                    }
-                }
+                // match unsafe { file_store.readable_piece_view(idx as i32) } {
+                //     Ok(readable_view) => {
+                //         // Since we do not sync it should never panic
+                //         readable_view.check_hash(hash, &file_store, false).unwrap()
+                //     }
+                //     Err(err) => {
+                //         if err.kind() != io::ErrorKind::NotFound {
+                //             panic!("Unexpected error reading file {err}");
+                //         }
+                //         false
+                //     }
+                // }
+                false
             })
             .collect();
         let completed_pieces: BitVec<u8, Msb0> = completed_pieces.into_iter().collect();
@@ -675,7 +680,7 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
 
     pub fn state(
         &'e_iter mut self,
-    ) -> Option<(&'state mut FileAndMetadata, &'e_iter mut InitializedState)> {
+    ) -> Option<(&'state FileAndMetadata, &'e_iter mut InitializedState)> {
         if let Some(f) = self.full.get() {
             // SAFETY: If full has been initialized the torrent must have been initialized
             // as well
