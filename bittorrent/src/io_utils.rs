@@ -18,7 +18,7 @@ use crate::{
     buf_pool::Buffer,
     buf_ring::Bgid,
     event_loop::{ConnectionId, EventData, EventId, EventType},
-    file_store::DiskOp,
+    file_store::{DiskOp, DiskOpType},
 };
 
 pub trait SubmissionQueue {
@@ -173,33 +173,59 @@ pub fn write<Q: SubmissionQueue>(
     sq.push(write_op);
 }
 
-pub fn write_to_disk<Q: SubmissionQueue>(
+pub fn read_write_disk<Q: SubmissionQueue>(
     events: &mut SlotMap<EventId, EventData>,
     sq: &mut BackloggedSubmissionQueue<Q>,
     disk_op: DiskOp,
     inflight_disk_ops: &mut usize,
 ) {
-    let write_ptr = unsafe {
-        disk_op
-            .buffer
-            .raw_slice()
-            .as_ptr()
-            .add(disk_op.buffer_offset)
+    let op = match disk_op.op_type {
+        DiskOpType::Write => {
+            let write_ptr = unsafe {
+                disk_op
+                    .buffer
+                    .raw_slice()
+                    .as_ptr()
+                    .add(disk_op.buffer_offset)
+            };
+            let write_len = disk_op.operation_len;
+            let event_id = events.insert(EventData {
+                typ: EventType::DiskWrite {
+                    data: disk_op.buffer,
+                    piece_idx: disk_op.piece_idx,
+                },
+                buffer: None,
+            });
+            opcode::Write::new(types::Fd(disk_op.fd), write_ptr, write_len as u32)
+                .offset(disk_op.file_offset as u64)
+                .build()
+                .user_data(event_id.data().as_ffi())
+        }
+        DiskOpType::Read => {
+            let read_ptr = unsafe {
+                disk_op
+                    .buffer
+                    .raw_slice()
+                    .as_ptr()
+                    .add(disk_op.buffer_offset)
+            };
+            let read_len = disk_op.operation_len;
+            let event_id = events.insert(EventData {
+                // TODO: create DiskRead and replace the event
+                typ: EventType::DiskWrite {
+                    data: disk_op.buffer,
+                    piece_idx: disk_op.piece_idx,
+                },
+                buffer: None,
+            });
+            opcode::Read::new(types::Fd(disk_op.fd), read_ptr as *mut _, read_len as u32)
+                .offset(disk_op.file_offset as u64)
+                .build()
+                .user_data(event_id.data().as_ffi())
+        }
     };
-    let write_len = disk_op.operation_len;
-    let event_id = events.insert(EventData {
-        typ: EventType::DiskWrite {
-            data: disk_op.buffer,
-            piece_idx: disk_op.piece_idx,
-        },
-        buffer: None,
-    });
-    let write_op = opcode::Write::new(types::Fd(disk_op.fd), write_ptr, write_len as u32)
-        .offset(disk_op.file_offset as u64)
-        .build()
-        .user_data(event_id.data().as_ffi());
     *inflight_disk_ops += 1;
-    sq.push(write_op);
+    sq.push(op);
 }
 
 // NOTE: Socket contains an OwnedFd which automatically closes

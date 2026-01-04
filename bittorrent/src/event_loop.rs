@@ -66,6 +66,10 @@ pub enum EventType {
         data: Rc<Buffer>,
         piece_idx: i32,
     },
+    // DiskRead {
+    //     data: Rc<Buffer>,
+    //     piece_idx: i32,
+    // },
     Cancel,
     Close {
         maybe_connection_idx: Option<ConnectionId>,
@@ -496,7 +500,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                         &mut self.queued_disk_operations,
                     );
                     for disk_op in self.queued_disk_operations.drain(..) {
-                        io_utils::write_to_disk(
+                        io_utils::read_write_disk(
                             &mut self.events,
                             &mut sq,
                             disk_op,
