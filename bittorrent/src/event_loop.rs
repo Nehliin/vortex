@@ -312,9 +312,12 @@ pub struct EventLoop {
     // pending peers as soon as max connections is reached
     connections: SlotMap<ConnectionId, PeerConnection>,
     pending_connections: HashSet<SockAddr>,
-    // file store since it doesn't need to be read only anymoer
+    // How many file operations are inflight in the kernel
     inflight_disk_ops: usize,
-    disk_operations: Vec<DiskOp>,
+    // This contains the queued up disk operations. It's owned
+    // by the event loop instead of the file store so that FileStore
+    // can remain Send
+    queued_disk_operations: Vec<DiskOp>,
     our_id: PeerId,
 }
 
@@ -336,7 +339,7 @@ impl<'scope, 'state: 'scope> EventLoop {
             pending_connections: HashSet::with_capacity(config.max_connections),
             our_id,
             inflight_disk_ops: 0,
-            disk_operations: Vec::with_capacity(32),
+            queued_disk_operations: Vec::with_capacity(32),
         }
     }
 
@@ -490,9 +493,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                     torrent_state.update_torrent_status(
                         &mut self.connections,
                         &mut event_tx,
-                        &mut self.disk_operations,
+                        &mut self.queued_disk_operations,
                     );
-                    for disk_op in self.disk_operations.drain(..) {
+                    for disk_op in self.queued_disk_operations.drain(..) {
                         io_utils::write_to_disk(
                             &mut self.events,
                             &mut sq,

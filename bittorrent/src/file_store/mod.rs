@@ -293,7 +293,16 @@ impl FileStore {
         new_impl(root.as_ref(), torrent_info)
     }
 
-    pub fn create_disk_write_ops(&self, index: i32, data: Buffer, piece_len: usize, disk_operations: &mut Vec<DiskOp>) {
+    pub fn queue_piece_write(
+        &self,
+        index: i32,
+        data: Buffer,
+        piece_len: usize,
+        // This is provided here as an argument to make State
+        // which contains FileStore Send. That makes the lib easier to
+        // use when writing applications
+        pending_disk_operations: &mut Vec<DiskOp>,
+    ) {
         let files = self
             .files
             .iter()
@@ -319,7 +328,7 @@ impl FileStore {
             let max_possible_write =
                 (file.file_handle.len() - current_write_head).min(piece_len - piece_written);
 
-            disk_operations.push(DiskOp {
+            pending_disk_operations.push(DiskOp {
                 fd: file.file_handle.as_fd(),
                 piece_idx: index,
                 file_offset: current_write_head,
@@ -343,7 +352,7 @@ impl FileStore {
             //     histogram.record(write_time.elapsed().as_micros() as u32);
             // }
             piece_written += max_possible_write;
-            // Break early if we've written the entire piece 
+            // Break early if we've written the entire piece
             if piece_written >= piece_len {
                 break;
             }

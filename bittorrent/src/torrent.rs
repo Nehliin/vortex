@@ -329,11 +329,11 @@ impl InitializedState {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             if completed_piece.hash_matched {
                 let piece_len = self.piece_selector.piece_len(completed_piece.index as i32);
-                self.file_store.create_disk_write_ops(
+                self.file_store.queue_piece_write(
                     completed_piece.index as i32,
                     completed_piece.buffer,
                     piece_len as usize,
-                    disk_operations,
+                    pending_disk_operations,
                 );
             } else {
                 // Only need to mark this as not downloaded when it fails
@@ -546,11 +546,6 @@ impl InitializedState {
         }
     }
 }
-
-// pub struct FileAndMetadata {
-//     pub file_store: FileStore,
-//     pub metadata: Box<TorrentMetadata>,
-// }
 
 /// Current state of the torrent
 pub struct State {
