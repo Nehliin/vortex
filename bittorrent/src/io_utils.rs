@@ -177,6 +177,7 @@ pub fn write_to_disk<Q: SubmissionQueue>(
     events: &mut SlotMap<EventId, EventData>,
     sq: &mut BackloggedSubmissionQueue<Q>,
     disk_op: DiskOp,
+    inflight_disk_ops: &mut usize,
 ) {
     let write_ptr = unsafe {
         disk_op
@@ -197,6 +198,7 @@ pub fn write_to_disk<Q: SubmissionQueue>(
         .offset(disk_op.file_offset as u64)
         .build()
         .user_data(event_id.data().as_ffi());
+    *inflight_disk_ops += 1;
     sq.push(write_op);
 }
 

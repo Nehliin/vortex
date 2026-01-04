@@ -226,14 +226,14 @@ pub struct InitializedState {
 }
 
 impl InitializedState {
-    pub fn new(root: &Path, torrent: &lava_torrent::torrent::v1::Torrent, config: Config) -> Self {
-        let mut pieces = Vec::with_capacity(torrent.pieces.len());
-        for _ in 0..torrent.pieces.len() {
+    pub fn new(root: &Path, metadata: &TorrentMetadata, config: Config) -> Self {
+        let mut pieces = Vec::with_capacity(metadata.pieces.len());
+        for _ in 0..metadata.pieces.len() {
             pieces.push(None);
         }
         let (tx, rc) = std::sync::mpsc::channel();
         Self {
-            piece_selector: PieceSelector::new(torrent),
+            piece_selector: PieceSelector::new(metadata),
             num_unchoked: 0,
             config,
             ticks_to_recalc_unchoke: config.num_ticks_before_unchoke_recalc,
@@ -242,7 +242,7 @@ impl InitializedState {
             completed_piece_tx: tx,
             pieces,
             is_complete: false,
-            file_store: FileStore::new(root, &torrent).unwrap(),
+            file_store: FileStore::new(root, metadata).unwrap(),
         }
     }
 
@@ -652,7 +652,6 @@ impl State {
     pub fn inprogress(
         info_hash: [u8; 20],
         root: PathBuf,
-        file_store: FileStore,
         metadata: lava_torrent::torrent::v1::Torrent,
         state: InitializedState,
         config: Config,
@@ -662,10 +661,7 @@ impl State {
             root,
             listener_port: None,
             torrent_state: Some(state),
-            file: OnceCell::from(FileAndMetadata {
-                file_store,
-                metadata: Box::new(metadata),
-            }),
+            file: OnceCell::from(Box::new(metadata)),
             config,
         }
     }

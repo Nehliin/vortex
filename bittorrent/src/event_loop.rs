@@ -229,7 +229,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
         _ => {
             let err = std::io::Error::from_raw_os_error(error_code as i32);
             if let Some(event) = events.remove(event_data_idx) {
-                let err_str = format!("Unhandled error: {err}, event type: {event:?}");
+                let err_str = format!("Unhandled error code: {err}, event type: {event:?}");
                 match event.typ {
                     EventType::Connect { socket, addr }
                     | EventType::Write { socket, addr }
@@ -254,20 +254,15 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         log::error!("{err_str}");
                         return Err(err);
                     }
-                    EventType::DiskWrite { data, .. } => {
-                        todo!()
-                        // // todo do more here
-                        // let state = state_ref
-                        //     .state()
-                        //     .expect("must have initialized state before starting disk io");
-                        // if let Ok(buffer) = Rc::try_unwrap(data) {
-                        //     state
-                        //         .1
-                        //         .piece_selector
-                        //         .piece_buffer_pool
-                        //         .return_buffer(buffer);
-                        // }
-                        // *inflight_disk_ops -= 1;
+                    EventType::DiskWrite { data, piece_idx } => {
+                        log::error!("{err_str} - Failed to write piece_idx to disk: {piece_idx}");
+                        let state = state_ref
+                            .state()
+                            .expect("must have initialized state before starting disk io");
+                        if let Ok(buffer) = Rc::try_unwrap(data) {
+                            state.piece_selector.piece_buffer_pool.return_buffer(buffer);
+                        }
+                        *inflight_disk_ops -= 1;
                     }
                 }
             } else {
@@ -498,8 +493,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                         &mut self.disk_operations,
                     );
                     for disk_op in self.disk_operations.drain(..) {
-                        self.inflight_disk_ops += 1;
-                        io_utils::write_to_disk(&mut self.events, &mut sq, disk_op);
+                        io_utils::write_to_disk(
+                            &mut self.events,
+                            &mut sq,
+                            disk_op,
+                            &mut self.inflight_disk_ops,
+                        );
                     }
                 }
 
