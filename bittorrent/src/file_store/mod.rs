@@ -216,13 +216,21 @@ struct TorrentFile {
 //     }
 // }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DiskOpType {
+    Write,
+    Read,
+}
+
 #[derive(Debug)]
 pub struct DiskOp {
     pub fd: RawFd,
     pub piece_idx: i32,
     pub file_offset: usize,
     pub buffer_offset: usize,
-    pub write_len: usize,
+    // write/read length
+    pub operation_len: usize,
+    pub op_type: DiskOpType,
     pub buffer: Rc<Buffer>,
 }
 
@@ -293,11 +301,12 @@ impl FileStore {
         new_impl(root.as_ref(), torrent_info)
     }
 
-    pub fn queue_piece_write(
+    pub fn queue_piece_disk_operation(
         &self,
         index: i32,
         data: Buffer,
         piece_len: usize,
+        op_type: DiskOpType,
         // This is provided here as an argument to make State
         // which contains FileStore Send. That makes the lib easier to
         // use when writing applications
@@ -307,7 +316,7 @@ impl FileStore {
             .files
             .iter()
             .filter(|file| file.start_piece <= index && index <= file.end_piece);
-        let mut piece_written: usize = 0;
+        let mut piece_cursor: usize = 0;
         let buffer = Rc::new(data);
         for file in files {
             // Where in the _file_ does the piece start
@@ -318,47 +327,32 @@ impl FileStore {
             // NOTE: the write head should never be negative since we loop across all files in order
             // that are part of the piece. We should thus have already written the relevant parts
             // of the subpiece from the previous files to ensure we start at minimum on 0
-            let current_write_head = file_offset + piece_written as i64;
+            let current_write_head = file_offset + piece_cursor as i64;
             assert!(current_write_head >= 0);
             let current_write_head = current_write_head as usize;
             // if we are past this file, move on to the next
             if current_write_head >= file.file_handle.len() {
                 continue;
             }
-            let max_possible_write =
-                (file.file_handle.len() - current_write_head).min(piece_len - piece_written);
-
+            let max_possible_operation_length =
+                (file.file_handle.len() - current_write_head).min(piece_len - piece_cursor);
             pending_disk_operations.push(DiskOp {
                 fd: file.file_handle.as_fd(),
                 piece_idx: index,
                 file_offset: current_write_head,
-                buffer_offset: piece_written,
-                write_len: max_possible_write,
+                buffer_offset: piece_cursor,
+                operation_len: max_possible_operation_length,
+                op_type,
                 buffer: buffer.clone(),
             });
-            // #[cfg(feature = "metrics")]
-            // let write_time = Instant::now();
-
-            // unsafe {
-            //     std::ptr::copy_nonoverlapping(
-            //         data.as_ptr().add(subpiece_written),
-            //         file.file_handle.ptr().add(current_write_head).as_ptr() as _,
-            //         max_possible_write,
-            //     );
-            // }
-            // #[cfg(feature = "metrics")]
-            // {
-            //     let histogram = metrics::histogram!("disk_write_time");
-            //     histogram.record(write_time.elapsed().as_micros() as u32);
-            // }
-            piece_written += max_possible_write;
+            piece_cursor += max_possible_operation_length;
             // Break early if we've written the entire piece
-            if piece_written >= piece_len {
+            if piece_cursor >= piece_len {
                 break;
             }
         }
         // Must have written all data
-        assert_eq!(piece_written, piece_len);
+        assert_eq!(piece_cursor, piece_len);
     }
 
     // Invariant: Must ensure only one writable_piece_view exists at any given time

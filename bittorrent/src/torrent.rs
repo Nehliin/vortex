@@ -9,9 +9,7 @@ use std::{
 };
 
 use crate::{
-    buf_pool::Buffer,
-    event_loop::{ConnectionId, EventLoop},
-    peer_comm::peer_protocol::PeerId,
+    buf_pool::Buffer, event_loop::{ConnectionId, EventLoop}, file_store::DiskOpType, peer_comm::peer_protocol::PeerId
 };
 use crate::{
     file_store::DiskOp,
@@ -329,10 +327,11 @@ impl InitializedState {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             if completed_piece.hash_matched {
                 let piece_len = self.piece_selector.piece_len(completed_piece.index as i32);
-                self.file_store.queue_piece_write(
+                self.file_store.queue_piece_disk_operation(
                     completed_piece.index as i32,
                     completed_piece.buffer,
                     piece_len as usize,
+                    DiskOpType::Write,
                     pending_disk_operations,
                 );
             } else {

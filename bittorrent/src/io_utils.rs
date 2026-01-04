@@ -186,7 +186,7 @@ pub fn write_to_disk<Q: SubmissionQueue>(
             .as_ptr()
             .add(disk_op.buffer_offset)
     };
-    let write_len = disk_op.write_len;
+    let write_len = disk_op.operation_len;
     let event_id = events.insert(EventData {
         typ: EventType::DiskWrite {
             data: disk_op.buffer,
