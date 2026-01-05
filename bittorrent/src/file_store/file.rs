@@ -1,11 +1,10 @@
 use std::{
     io,
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
+        fd::{AsRawFd, OwnedFd, RawFd},
         unix::fs::MetadataExt,
     },
     path::Path,
-    ptr,
 };
 
 #[derive(Debug)]
