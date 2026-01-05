@@ -22,7 +22,6 @@ mod test_utils {
     use std::{collections::HashMap, path::PathBuf};
 
     use crate::{
-        file_store::FileStore,
         peer_connection::PeerConnection,
         peer_protocol::{ParsedHandshake, PeerId},
         piece_selector::SUBPIECE_SIZE,
@@ -177,13 +176,10 @@ mod test_utils {
             (SUBPIECE_SIZE * 2) as usize,
             files,
         );
-        let download_tmp_dir_path = root.clone();
-        let file_store = FileStore::new(&download_tmp_dir_path, &torrent_info).unwrap();
-        let state = InitializedState::new(&torrent_info, Config::default());
+        let state = InitializedState::new(&root, &torrent_info, Config::default());
         State::inprogress(
             torrent_info.info_hash_bytes().try_into().unwrap(),
             root,
-            file_store,
             torrent_info,
             state,
             Config::default(),

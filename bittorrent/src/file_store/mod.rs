@@ -8,7 +8,7 @@ use std::{
 use file::File;
 use lava_torrent::torrent::v1::Torrent;
 
-use crate::buf_pool::Buffer;
+use crate::{buf_pool::Buffer, event_loop::ConnectionId};
 
 mod file;
 
@@ -216,7 +216,11 @@ struct TorrentFile {
 #[derive(Debug, Clone, Copy)]
 pub enum DiskOpType {
     Write,
-    Read,
+    Read {
+        // Connection that triggered the read
+        connection_idx: ConnectionId,
+        piece_offset: i32,
+    },
 }
 
 #[derive(Debug)]
@@ -396,10 +400,11 @@ impl FileStore {
 mod tests {
     use std::collections::HashMap;
 
-    use lava_torrent::torrent::v1::TorrentBuilder;
     use bytes::BufMut;
-    use std::os::fd::FromRawFd;
+    use lava_torrent::torrent::v1::TorrentBuilder;
     use rand::Rng;
+    use slotmap::Key;
+    use std::os::fd::FromRawFd;
 
     use super::*;
 
@@ -549,7 +554,7 @@ mod tests {
                     file.write_all_at(data_slice, op.file_offset as u64)
                         .expect("Write should succeed");
                 }
-                DiskOpType::Read => {
+                DiskOpType::Read { .. } => {
                     // For reads, we'd need to write into the buffer, but we're mainly testing write logic
                     // So we'll skip actual read execution in tests
                 }
@@ -637,7 +642,15 @@ mod tests {
             let piece = piece.to_vec();
 
             // Verify read operations are created correctly
-            verify_disk_operations(&file_store, index as i32, &piece, DiskOpType::Read);
+            verify_disk_operations(
+                &file_store,
+                index as i32,
+                &piece,
+                DiskOpType::Read {
+                    connection_idx: ConnectionId::null(),
+                    piece_offset: 0,
+                },
+            );
 
             all_data = remainder.to_vec();
         }
@@ -822,11 +835,7 @@ mod tests {
         for piece_idx in 0..num_pieces as i32 {
             let current_piece_len = if piece_idx == num_pieces as i32 - 1 {
                 let remainder = file_size % piece_len;
-                if remainder == 0 {
-                    piece_len
-                } else {
-                    remainder
-                }
+                if remainder == 0 { piece_len } else { remainder }
             } else {
                 piece_len
             };

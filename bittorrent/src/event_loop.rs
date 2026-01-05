@@ -9,7 +9,7 @@ use std::{
 
 use ahash::HashSet;
 use ahash::HashSetExt;
-use bytes::BufMut;
+use bytes::{BufMut, Bytes};
 use heapless::spsc::Producer;
 use io_uring::{
     IoUring,
@@ -66,10 +66,15 @@ pub enum EventType {
         data: Rc<Buffer>,
         piece_idx: i32,
     },
-    // DiskRead {
-    //     data: Rc<Buffer>,
-    //     piece_idx: i32,
-    // },
+    DiskRead {
+        // Peer that requested the piece
+        connection_idx: ConnectionId,
+        // Full piece data
+        data: Rc<Buffer>,
+        piece_idx: i32,
+        // Offset inside piece
+        piece_offset: i32,
+    },
     Cancel,
     Close {
         maybe_connection_idx: Option<ConnectionId>,
@@ -258,8 +263,13 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         log::error!("{err_str}");
                         return Err(err);
                     }
-                    EventType::DiskWrite { data, piece_idx } => {
-                        log::error!("{err_str} - Failed to write piece_idx to disk: {piece_idx}");
+                    EventType::DiskWrite { data, piece_idx }
+                    | EventType::DiskRead {
+                        data, piece_idx, ..
+                    } => {
+                        log::error!(
+                            "{err_str} - Failed to write or read piece_idx to/from disk: {piece_idx}"
+                        );
                         let state = state_ref
                             .state()
                             .expect("must have initialized state before starting disk io");
@@ -435,7 +445,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                             let msgs = std::mem::take(&mut connection.pre_meta_have_msgs);
                             // Get all piece msgs
                             for msg in msgs {
-                                connection.handle_message(msg, &mut state_ref, scope);
+                                connection.handle_message(
+                                    msg,
+                                    &mut state_ref,
+                                    &mut self.queued_disk_operations,
+                                    scope,
+                                );
                             }
                         }
                     }
@@ -500,7 +515,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                         &mut self.queued_disk_operations,
                     );
                     for disk_op in self.queued_disk_operations.drain(..) {
-                        io_utils::read_write_disk(
+                        io_utils::disk_operation(
                             &mut self.events,
                             &mut sq,
                             disk_op,
@@ -804,6 +819,30 @@ impl<'scope, 'state: 'scope> EventLoop {
                 }
                 self.inflight_disk_ops -= 1;
             }
+            EventType::DiskRead {
+                data,
+                piece_idx,
+                connection_idx,
+                piece_offset: offset,
+            } => {
+                self.events.remove(io_event.event_data_idx);
+                let connection = &mut self.connections[connection_idx];
+                connection.send_piece(
+                    piece_idx,
+                    offset,
+                    // TODO: avoid this copy by caching the piece buffer and make the Piece message
+                    // take an enum of either Rc<Buffer> or bytes?
+                    Bytes::copy_from_slice(data.as_slice()),
+                    false,
+                );
+                let state = state
+                    .state()
+                    .expect("must have initialized state before starting disk io");
+                if let Ok(buffer) = Rc::try_unwrap(data) {
+                    state.piece_selector.piece_buffer_pool.return_buffer(buffer);
+                }
+                self.inflight_disk_ops -= 1;
+            }
             EventType::Cancel => {
                 log::trace!("Cancel event completed");
                 self.events.remove(io_event.event_data_idx);
@@ -874,7 +913,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // incoming recv cqe
                 let connection = &mut self.connections[conn_id];
                 connection.stateful_decoder.append_data(remainder);
-                conn_parse_and_handle_msgs(connection, state, scope);
+                conn_parse_and_handle_msgs(
+                    connection,
+                    state,
+                    &mut self.queued_disk_operations,
+                    scope,
+                );
                 if connection.extended_extension {
                     connection.outgoing_msgs_buffer.push(OutgoingMsg {
                         message: extension_handshake_msg(state, state.config),
@@ -948,7 +992,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                     .unwrap();
                 let buffer = &buffer[..len];
                 connection.stateful_decoder.append_data(buffer);
-                conn_parse_and_handle_msgs(connection, state, scope);
+                conn_parse_and_handle_msgs(
+                    connection,
+                    state,
+                    &mut self.queued_disk_operations,
+                    scope,
+                );
             }
             EventType::Close {
                 maybe_connection_idx,
@@ -967,12 +1016,13 @@ impl<'scope, 'state: 'scope> EventLoop {
 fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection: &mut PeerConnection,
     state: &mut StateRef<'f_store>,
+    pending_disk_operations: &mut Vec<DiskOp>,
     scope: &Scope<'scope>,
 ) {
     while let Some(parse_result) = connection.stateful_decoder.next() {
         match parse_result {
             Ok(peer_message) => {
-                connection.handle_message(peer_message, state, scope);
+                connection.handle_message(peer_message, state, pending_disk_operations, scope);
             }
             Err(err) => {
                 log::error!("Failed {:?} decoding message: {err}", connection.conn_id);

@@ -173,7 +173,7 @@ pub fn write<Q: SubmissionQueue>(
     sq.push(write_op);
 }
 
-pub fn read_write_disk<Q: SubmissionQueue>(
+pub fn disk_operation<Q: SubmissionQueue>(
     events: &mut SlotMap<EventId, EventData>,
     sq: &mut BackloggedSubmissionQueue<Q>,
     disk_op: DiskOp,
@@ -201,7 +201,7 @@ pub fn read_write_disk<Q: SubmissionQueue>(
                 .build()
                 .user_data(event_id.data().as_ffi())
         }
-        DiskOpType::Read => {
+        DiskOpType::Read { connection_idx, piece_offset } => {
             let read_ptr = unsafe {
                 disk_op
                     .buffer
@@ -211,11 +211,13 @@ pub fn read_write_disk<Q: SubmissionQueue>(
             };
             let read_len = disk_op.operation_len;
             let event_id = events.insert(EventData {
-                // TODO: create DiskRead and replace the event
-                typ: EventType::DiskWrite {
+                typ: EventType::DiskRead {
                     data: disk_op.buffer,
                     piece_idx: disk_op.piece_idx,
+                    connection_idx,
+                    piece_offset,
                 },
+                // TODO: consider using this instead
                 buffer: None,
             });
             opcode::Read::new(types::Fd(disk_op.fd), read_ptr as *mut _, read_len as u32)
