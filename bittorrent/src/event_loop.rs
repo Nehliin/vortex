@@ -32,7 +32,7 @@ use crate::{
         peer_connection::{ConnectionState, DisconnectReason, OutgoingMsg, PeerConnection},
         peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
     },
-    piece_selector::{self},
+    piece_selector::{self, SUBPIECE_SIZE},
     torrent::{
         CQE_WAIT_TIME_NS, Command, Config, Error, PeerMetrics, State, StateRef, TorrentEvent,
     },
@@ -831,7 +831,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                     .expect("must have initialized state before starting disk io");
                 let connection = &mut self.connections[connection_idx];
                 let start_idx = piece_offset as usize;
-                let end_idx = start_idx + state.piece_selector.piece_len(piece_idx) as usize;
+                let end_idx = start_idx
+                    + state
+                        .piece_selector
+                        .piece_len(piece_idx)
+                        .min(SUBPIECE_SIZE as u32) as usize;
                 connection.send_piece(
                     piece_idx,
                     piece_offset,
