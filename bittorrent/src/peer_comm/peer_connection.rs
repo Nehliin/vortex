@@ -1111,8 +1111,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     })
                     .map(|completed_piece| completed_piece.into_buffer())
                 {
+                    // We assume the hash will match, if not we will just request it again
                     if torrent_state.piece_selector.has_downloaded(index as usize)
-                        // We assume the hash will match, if not we will just request it again
                         || torrent_state.piece_selector.is_complete(index as usize)
                     {
                         // RETURN BUFFER

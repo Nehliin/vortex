@@ -199,6 +199,7 @@ impl PieceSelector {
     #[inline]
     pub fn mark_complete(&mut self, index: usize) {
         assert!(!self.completed_pieces[index]);
+        assert!(self.downloaded_pieces[index]);
         self.completed_pieces.set(index, true);
         self.allocated_pieces.set(index, false);
         // The piece is no longer interesting if we've completed it
@@ -270,7 +271,7 @@ impl PieceSelector {
 
     #[inline]
     pub fn total_completed(&self) -> usize {
-        self.downloaded_pieces.count_ones()
+        self.completed_pieces.count_ones()
     }
 
     #[inline]
