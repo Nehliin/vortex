@@ -895,6 +895,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                 begin,
                 length,
             } => {
+                log::trace!(
+                    "[Peer: {}] received piece request for index: {index}, begin: {begin}",
+                    self.peer_id
+                );
                 // returns if it was accepted or not
                 let mut handle_req = || -> bool {
                     let Some(torrent_state) = state_ref.state() else {
@@ -927,6 +931,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             // TODO: downloaded should be enough and then reading from the piece
                             // buffer directly before it's been written to disk
                             if !torrent_state.piece_selector.is_complete(index as usize) {
+                                log::warn!(
+                                    "[Peer: {}] Piece request ignored/rejected, piece not completed yet",
+                                    self.peer_id
+                                );
                                 return false;
                             }
                             assert!(torrent_state.pieces[index as usize].is_none());
