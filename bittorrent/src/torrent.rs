@@ -596,29 +596,22 @@ impl State {
         config: Config,
     ) -> io::Result<Self> {
         let mut initialized_state = InitializedState::new(&root, &metadata, config);
+        let file_store = &initialized_state.file_store;
         let completed_pieces: Box<[bool]> = metadata
             .pieces
             .as_slice()
             .par_iter()
             .enumerate()
             .map(|(idx, hash)| {
-                // SAFETY: The filestore we are reading from is created above and thus there
-                // should not exist any existing writable_piece_views. NOTE: this isn't 100%
-                // guraranteed since someone else could be mmapping the file but it's not much
-                // we can do about that
-                // match unsafe { file_store.readable_piece_view(idx as i32) } {
-                //     Ok(readable_view) => {
-                //         // Since we do not sync it should never panic
-                //         readable_view.check_hash(hash, &file_store, false).unwrap()
-                //     }
-                //     Err(err) => {
-                //         if err.kind() != io::ErrorKind::NotFound {
-                //             panic!("Unexpected error reading file {err}");
-                //         }
-                //         false
-                //     }
-                // }
-                false
+                match file_store.check_piece_hash_sync(idx as i32, hash) {
+                    Ok(is_valid) => is_valid,
+                    Err(err) => {
+                        if err.kind() != io::ErrorKind::NotFound {
+                            log::warn!("Error checking piece {idx}: {err}");
+                        }
+                        false
+                    }
+                }
             })
             .collect();
         let completed_pieces: BitVec<u8, Msb0> = completed_pieces.into_iter().collect();

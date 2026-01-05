@@ -356,44 +356,73 @@ impl FileStore {
         assert_eq!(piece_cursor, piece_len);
     }
 
-    // Invariant: Must ensure only one writable_piece_view exists at any given time
-    // exclusivly for an index. I.e read + write to the same index is forbidden
-    // pub unsafe fn writable_piece_view(&self, index: i32) -> io::Result<WritablePieceFileView> {
-    //     let indicies: SmallVec<usize, 4> = self
-    //         .files
-    //         .iter()
-    //         .enumerate()
-    //         .filter(|(_, file)| file.start_piece <= index && index <= file.end_piece)
-    //         .map(|(idx, _)| idx)
-    //         .collect();
-    //     if indicies.is_empty() {
-    //         return Err(io::ErrorKind::NotFound.into());
-    //     }
-    //     Ok(WritablePieceFileView {
-    //         index,
-    //         avg_piece_size: self.avg_piece_size,
-    //         indicies,
-    //     })
-    // }
 
-    // // Invariant: Must ensure that no other writable_piece_views exist of this index
-    // pub unsafe fn readable_piece_view(&self, index: i32) -> io::Result<ReadablePieceFileView> {
-    //     let indicies: SmallVec<usize, 4> = self
-    //         .files
-    //         .iter()
-    //         .enumerate()
-    //         .filter(|(_, file)| file.start_piece <= index && index <= file.end_piece)
-    //         .map(|(idx, _)| idx)
-    //         .collect();
-    //     if indicies.is_empty() {
-    //         return Err(io::ErrorKind::NotFound.into());
-    //     }
-    //     Ok(ReadablePieceFileView {
-    //         index,
-    //         avg_piece_size: self.avg_piece_size,
-    //         indicies,
-    //     })
-    // }
+    /// Synchronously check if a piece exists and has the correct hash.
+    /// This is used during initialization to determine which pieces are already complete.
+    /// Returns true if the piece data matches the expected hash.
+    pub fn check_piece_hash_sync(
+        &self,
+        piece_index: i32,
+        expected_hash: &[u8],
+    ) -> io::Result<bool> {
+        use sha1::Digest;
+        use std::fs::File as StdFile;
+        use std::io::{Read, Seek, SeekFrom};
+        use std::os::fd::FromRawFd;
+
+        let mut hasher = sha1::Sha1::new();
+        let mut total_read = 0;
+
+        let files = self
+            .files
+            .iter()
+            .filter(|file| file.start_piece <= piece_index && piece_index <= file.end_piece);
+
+        for file in files {
+            // Where in the _file_ does the piece start
+            let file_index = (piece_index - file.start_piece) as i64;
+            // The offset might be negative here if the piece starts before the file
+            let file_offset = file_index * self.avg_piece_size as i64 - file.start_offset as i64;
+            let piece_offset_in_file = file_offset + total_read as i64;
+
+            // we should always have read the files in order so that
+            // total read ensures this offset to be greater than 0
+            assert!(piece_offset_in_file >= 0);
+            let piece_offset_in_file = piece_offset_in_file as u64;
+
+            let to_read = if piece_index == file.end_piece {
+                // Either the piece ends within this file, then we should read
+                // to that piece offset - how much we've already read
+                // (end_offset is the offset relative to the entire piece)
+                file.end_offset as usize - total_read
+            } else {
+                // Or the piece continues past this file (or ends exactly at the end of this file),
+                // in that case we read the remainder of the piece up the maximum of the file length
+                (self.avg_piece_size as usize - total_read).min(file.file_handle.len())
+            };
+
+            // Nothing to read, the file ends at a piece boundary
+            if to_read == 0 {
+                continue;
+            }
+
+            // Open the file using the raw fd and read synchronously
+            let fd = file.file_handle.as_fd();
+            let mut std_file = unsafe { StdFile::from_raw_fd(fd) };
+            std_file.seek(SeekFrom::Start(piece_offset_in_file))?;
+
+            let mut buffer = vec![0u8; to_read];
+            std_file.read_exact(&mut buffer)?;
+
+            hasher.update(&buffer);
+            total_read += to_read;
+
+            // Important: Don't close the file descriptor by preventing std_file from being dropped
+            std::mem::forget(std_file);
+        }
+
+        Ok(hasher.finalize().as_slice() == expected_hash)
+    }
 }
 
 #[cfg(test)]
