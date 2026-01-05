@@ -823,21 +823,24 @@ impl<'scope, 'state: 'scope> EventLoop {
                 data,
                 piece_idx,
                 connection_idx,
-                piece_offset: offset,
+                piece_offset,
             } => {
                 self.events.remove(io_event.event_data_idx);
-                let connection = &mut self.connections[connection_idx];
-                connection.send_piece(
-                    piece_idx,
-                    offset,
-                    // TODO: avoid this copy by caching the piece buffer and make the Piece message
-                    // take an enum of either Rc<Buffer> or bytes?
-                    Bytes::copy_from_slice(data.as_slice()),
-                    false,
-                );
                 let state = state
                     .state()
                     .expect("must have initialized state before starting disk io");
+                let connection = &mut self.connections[connection_idx];
+                let start_idx = piece_offset as usize;
+                let end_idx = start_idx + state.piece_selector.piece_len(piece_idx) as usize;
+                connection.send_piece(
+                    piece_idx,
+                    piece_offset,
+                    // TODO: avoid this copy by caching the piece buffer and make the Piece message
+                    // take an enum of either Rc<Buffer> or bytes?
+                    Bytes::copy_from_slice(&data.raw_slice()[start_idx..end_idx]),
+                    false,
+                );
+
                 if let Ok(buffer) = Rc::try_unwrap(data) {
                     state.piece_selector.piece_buffer_pool.return_buffer(buffer);
                 }

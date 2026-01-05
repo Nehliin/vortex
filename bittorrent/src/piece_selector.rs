@@ -38,11 +38,11 @@ pub struct Subpiece {
 
 pub struct PieceSelector {
     //    strategy: T,
-    // Completed -> 1 completed 0 = not completed (global)
+    // Downloading -> 1 downloaded 0 = not downloaded (global)
     downloaded_pieces: BitBox<u8, Msb0>,
     // Allocated -> 1 allocated 0 = not allocated (global)
     allocated_pieces: BitBox<u8, Msb0>,
-    // Hashing -> 1 is currently being hashed 0 = not hashing (global)
+    // Completed -> 1 completed 0 = not completed (global)
     completed_pieces: BitBox<u8, Msb0>,
     // These are all pieces the peer have that we have yet to complete
     // it should be kept up to date as the torrent is downloaded, completed
@@ -85,7 +85,8 @@ impl PieceSelector {
     }
 
     pub(crate) fn set_completed_bitfield(&mut self, completed_pieces: BitBox<u8, Msb0>) {
-        assert_eq!(self.downloaded_pieces.len(), completed_pieces.len());
+        assert_eq!(self.completed_pieces.len(), completed_pieces.len());
+        self.completed_pieces = completed_pieces.clone();
         self.downloaded_pieces = completed_pieces;
     }
 
