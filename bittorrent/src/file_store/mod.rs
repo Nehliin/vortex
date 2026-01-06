@@ -178,9 +178,6 @@ impl FileStore {
         expected_hash: &[u8],
     ) -> io::Result<bool> {
         use sha1::Digest;
-        use std::fs::File as StdFile;
-        use std::io::{Read, Seek, SeekFrom};
-        use std::os::fd::FromRawFd;
 
         let mut hasher = sha1::Sha1::new();
         let mut total_read = 0;
@@ -218,19 +215,35 @@ impl FileStore {
                 continue;
             }
 
-            // Open the file using the raw fd and read synchronously
             let fd = file.file_handle.as_fd();
-            let mut std_file = unsafe { StdFile::from_raw_fd(fd) };
-            std_file.seek(SeekFrom::Start(piece_offset_in_file))?;
-
             let mut buffer = vec![0u8; to_read];
-            std_file.read_exact(&mut buffer)?;
+            let mut bytes_read = 0;
+
+            // pread might not read all bytes in one call, so loop until we get everything
+            while bytes_read < to_read {
+                let result = unsafe {
+                    libc::pread(
+                        fd,
+                        buffer.as_mut_ptr().add(bytes_read) as *mut libc::c_void,
+                        to_read - bytes_read,
+                        (piece_offset_in_file + bytes_read as u64) as libc::off_t,
+                    )
+                };
+
+                if result < 0 {
+                    return Err(io::Error::last_os_error());
+                } else if result == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "unexpected EOF while reading file",
+                    ));
+                }
+
+                bytes_read += result as usize;
+            }
 
             hasher.update(&buffer);
             total_read += to_read;
-
-            // Important: Don't close the file descriptor by preventing std_file from being dropped
-            std::mem::forget(std_file);
         }
 
         Ok(hasher.finalize().as_slice() == expected_hash)
