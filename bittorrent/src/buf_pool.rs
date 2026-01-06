@@ -9,7 +9,6 @@ pub struct BufferPool {
     pool: Vec<Option<AnonymousMmap>>,
 }
 
-// impl drop that checks that it's has been returned to the pool?
 #[derive(Debug)]
 pub struct Buffer {
     index: usize,
@@ -39,12 +38,16 @@ impl Buffer {
 
     #[inline]
     pub fn raw_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.inner
+        // SAFETY: inner is only None after returned to the pool.
+        // It's only used to track if buffers are actually returned
+        unsafe { self.inner.as_mut().unwrap_unchecked() }
     }
 
     #[inline]
     pub fn raw_slice(&self) -> &[u8] {
-        &self.inner
+        // SAFETY: inner is only None after returned to the pool.
+        // It's only used to track if buffers are actually returned
+        unsafe { self.inner.as_ref().unwrap_unchecked() }
     }
 }
 
