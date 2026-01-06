@@ -448,7 +448,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                             &mut sq,
                             io_event,
                             &mut state_ref,
-                            &mut event_tx,
                             scope,
                         ) {
                             log::error!("Error handling event: {err}");
