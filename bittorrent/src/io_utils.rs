@@ -129,6 +129,7 @@ pub fn write_to_connection<Q: SubmissionQueue>(
     ordered: bool,
 ) {
     let buffer_slice = buffer.as_slice();
+    assert!(!buffer_slice.is_empty());
     let buffer_ptr = buffer_slice.as_ptr();
     let buffer_len = buffer_slice.len();
     let event_id = events.insert(EventData {
