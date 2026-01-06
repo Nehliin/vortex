@@ -36,6 +36,7 @@ impl Buffer {
         unsafe { &self.inner.as_ref().unwrap_unchecked()[..self.cursor] }
     }
 
+    /// Returns a mutable slice of the whole buffer
     #[inline]
     pub fn raw_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: inner is only None after returned to the pool.
@@ -43,6 +44,7 @@ impl Buffer {
         unsafe { self.inner.as_mut().unwrap_unchecked() }
     }
 
+    /// Returns a slice of the whole buffer
     #[inline]
     pub fn raw_slice(&self) -> &[u8] {
         // SAFETY: inner is only None after returned to the pool.
