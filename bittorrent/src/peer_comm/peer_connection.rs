@@ -1115,7 +1115,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     if torrent_state.piece_selector.has_downloaded(index as usize)
                         || torrent_state.piece_selector.is_complete(index as usize)
                     {
-                        // RETURN BUFFER
+                        torrent_state.piece_buffer_pool.return_buffer(buffer);
                         // This might happen in end game mode when multiple peers race to complete the
                         // piece. Haven't implemented it yet though
                         log::debug!("Piece {index} already completed or pending hashing, skipping");
