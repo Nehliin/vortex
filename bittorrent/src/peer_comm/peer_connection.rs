@@ -655,7 +655,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         // TODO: might be more than the peer can handle
                         self.append_and_fill(&mut subpieces);
                     } else {
-                        log::warn!("[Peer: {}] No more pieces available", self.peer_id);
+                        log::info!("[Peer: {}] No more pieces available", self.peer_id);
                     }
                 }
             }
