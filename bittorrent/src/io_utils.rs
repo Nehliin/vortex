@@ -128,7 +128,8 @@ pub fn write_to_connection<Q: SubmissionQueue>(
     buffer: Buffer,
     ordered: bool,
 ) {
-    let buffer_slice = buffer.as_slice();
+    let buffer_slice = buffer.filled_slice();
+    assert!(!buffer_slice.is_empty());
     let buffer_ptr = buffer_slice.as_ptr();
     let buffer_len = buffer_slice.len();
     let event_id = events.insert(EventData {
@@ -158,7 +159,7 @@ pub fn write<Q: SubmissionQueue>(
     buffer: Buffer,
 ) {
     let fd = socket.as_raw_fd();
-    let buffer_slice = buffer.as_slice();
+    let buffer_slice = buffer.filled_slice();
     let buffer_ptr = buffer_slice.as_ptr();
     let buffer_len = buffer_slice.len();
     let write_event_id = events.insert(EventData {

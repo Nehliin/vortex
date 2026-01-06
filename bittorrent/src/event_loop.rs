@@ -438,17 +438,16 @@ impl<'scope, 'state: 'scope> EventLoop {
                             io_event.event_data_idx,
                             event
                         );
-                        let buffer_idx = event.buffer.take();
+                        // time to return any potential write buffers
+                        if let Some(buffer) = event.buffer.take() {
+                            // SAFETY: All Buffers are dropped when the write operations
+                            // are sent to io_uring
+                            self.write_pool.return_buffer(buffer);
+                        }
                         if let Err(err) =
                             self.event_handler(&mut sq, io_event, &mut state_ref, scope)
                         {
                             log::error!("Error handling event: {err}");
-                        }
-                        // time to return any potential write buffers
-                        if let Some(buffer) = buffer_idx {
-                            // SAFETY: All Buffers are dropped when the write operations
-                            // are sent to io_uring
-                            self.write_pool.return_buffer(buffer);
                         }
                     } else {
                         let err = io_event.result.unwrap_err();
@@ -472,7 +471,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                     torrent_state.update_torrent_status(&mut self.connections, &mut event_tx);
                 }
 
-                for (conn_id, connection) in self.connections.iter_mut() {
+                for (conn_id, connection) in self
+                    .connections
+                    .iter_mut()
+                    .filter(|(_, conn)| !conn.outgoing_msgs_buffer.is_empty())
+                {
                     if let ConnectionState::Connected(socket) = &connection.connection_state {
                         let mut buffer = self.write_pool.get_buffer();
                         let conn_fd = socket.as_raw_fd();
@@ -497,16 +500,14 @@ impl<'scope, 'state: 'scope> EventLoop {
                                 msg.message.encode(&mut buffer);
                             }
                         }
-                        if !buffer.as_slice().is_empty() {
-                            io_utils::write_to_connection(
-                                conn_id,
-                                conn_fd,
-                                &mut self.events,
-                                &mut sq,
-                                buffer,
-                                ordered,
-                            );
-                        }
+                        io_utils::write_to_connection(
+                            conn_id,
+                            conn_fd,
+                            &mut self.events,
+                            &mut sq,
+                            buffer,
+                            ordered,
+                        );
                     }
                     connection.outgoing_msgs_buffer.clear();
                 }

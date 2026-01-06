@@ -12,22 +12,36 @@ pub struct BufferPool {
 #[derive(Debug)]
 pub struct Buffer {
     index: usize,
-    inner: AnonymousMmap,
+    inner: Option<AnonymousMmap>,
     cursor: usize,
     #[cfg(feature = "metrics")]
     time_taken: std::time::Instant,
 }
 
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        if self.inner.is_some() {
+            panic!("Buffer must be returned to the pool before being dropped!");
+        }
+    }
+}
+
 impl Buffer {
+    /// Returns a slice of the filled part of the buffer
     #[inline]
-    pub fn as_slice(&self) -> &[u8] {
-        &self.inner[..self.cursor]
+    pub fn filled_slice(&self) -> &[u8] {
+        // SAFETY: inner is only None after returned to the pool.
+        // It's only used to track if buffers are actually returned
+        unsafe { &self.inner.as_ref().unwrap_unchecked()[..self.cursor] }
     }
 }
 
 unsafe impl BufMut for Buffer {
     fn remaining_mut(&self) -> usize {
-        self.inner.len() - self.cursor
+        // SAFETY: inner is only None after returned to the pool.
+        // It's only used to track if buffers are actually returned
+        let length = unsafe { self.inner.as_ref().unwrap_unchecked().len() };
+        length - self.cursor
     }
 
     unsafe fn advance_mut(&mut self, cnt: usize) {
@@ -35,7 +49,11 @@ unsafe impl BufMut for Buffer {
     }
 
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
-        bytes::buf::UninitSlice::new(&mut self.inner[self.cursor..])
+        // SAFETY: inner is only None after returned to the pool.
+        // It's only used to track if buffers are actually returned
+        unsafe {
+            bytes::buf::UninitSlice::new(&mut self.inner.as_mut().unwrap_unchecked()[self.cursor..])
+        }
     }
 }
 
@@ -59,9 +77,11 @@ impl BufferPool {
             self.free.set(free_index, false);
             Buffer {
                 index: free_index,
-                inner: self.pool[free_index]
-                    .take()
-                    .expect("Free list out of sync with buffer pool"),
+                inner: Some(
+                    self.pool[free_index]
+                        .take()
+                        .expect("Free list out of sync with buffer pool"),
+                ),
                 cursor: 0,
                 #[cfg(feature = "metrics")]
                 time_taken: std::time::Instant::now(),
@@ -86,7 +106,7 @@ impl BufferPool {
         self.pool.len()
     }
 
-    pub fn return_buffer(&mut self, buffer: Buffer) {
+    pub fn return_buffer(&mut self, mut buffer: Buffer) {
         #[cfg(feature = "metrics")]
         {
             use metrics::histogram;
@@ -94,7 +114,7 @@ impl BufferPool {
             histogram.record(buffer.time_taken.elapsed().as_millis() as u32);
         }
         self.free.set(buffer.index, true);
-        self.pool[buffer.index] = Some(buffer.inner);
+        self.pool[buffer.index] = buffer.inner.take();
     }
 }
 
@@ -111,6 +131,8 @@ mod tests {
 
         // First buffer should have index 0
         assert_eq!(index, 0);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -119,7 +141,9 @@ mod tests {
         let buffer = pool.get_buffer();
 
         // Initial slice should be empty (cursor at 0)
-        assert_eq!(buffer.as_slice().len(), 0);
+        assert_eq!(buffer.filled_slice().len(), 0);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -129,6 +153,8 @@ mod tests {
 
         // Should have full capacity available
         assert_eq!(buffer.remaining_mut(), 1024);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -140,8 +166,10 @@ mod tests {
         buffer.put_slice(&[42u8; 100]);
 
         // as_slice should now return 100 bytes
-        assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.filled_slice().len(), 100);
         assert_eq!(buffer.remaining_mut(), 924);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -151,14 +179,16 @@ mod tests {
 
         // Write first 50 bytes
         buffer.put_slice(&[1u8; 50]);
-        assert_eq!(buffer.as_slice().len(), 50);
+        assert_eq!(buffer.filled_slice().len(), 50);
 
         // Write another 50 bytes
         buffer.put_slice(&[2u8; 50]);
-        assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.filled_slice().len(), 100);
 
         // Verify remaining capacity
         assert_eq!(buffer.remaining_mut(), 924);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -171,8 +201,10 @@ mod tests {
         buffer.put_slice(&[5, 6, 7, 8]);
 
         // Verify as_slice contains both writes
-        let data = buffer.as_slice();
+        let data = buffer.filled_slice();
         assert_eq!(data, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -182,8 +214,10 @@ mod tests {
 
         // Write exact buffer size
         buffer.put_slice(&[0u8; 100]);
-        assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.filled_slice().len(), 100);
         assert_eq!(buffer.remaining_mut(), 0);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -197,6 +231,8 @@ mod tests {
         // Get mutable chunk for remaining space
         let chunk = buffer.chunk_mut();
         assert_eq!(chunk.len(), 1020);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -213,6 +249,8 @@ mod tests {
         // Get another buffer - should reuse the returned one
         let buffer2 = pool.get_buffer();
         assert_eq!(buffer2.index, index1);
+
+        pool.return_buffer(buffer2);
     }
 
     #[test]
@@ -220,14 +258,21 @@ mod tests {
         let mut pool = BufferPool::new(3, 512);
 
         // Get buffers one at a time and collect their indices
-        let idx1 = pool.get_buffer().index;
-        let idx2 = pool.get_buffer().index;
-        let idx3 = pool.get_buffer().index;
+        let buf1 = pool.get_buffer();
+        let buf2 = pool.get_buffer();
+        let buf3 = pool.get_buffer();
+        let idx1 = buf1.index;
+        let idx2 = buf2.index;
+        let idx3 = buf3.index;
 
         // All buffers should have different indices
         assert_ne!(idx1, idx2);
         assert_ne!(idx1, idx3);
         assert_ne!(idx2, idx3);
+
+        pool.return_buffer(buf1);
+        pool.return_buffer(buf2);
+        pool.return_buffer(buf3);
     }
 
     #[test]
@@ -238,11 +283,14 @@ mod tests {
         assert_eq!(pool.pool.len(), 2);
 
         // Getting buffers doesn't change pool size (until we exceed capacity)
-        let _buffer1 = pool.get_buffer();
+        let buffer1 = pool.get_buffer();
         assert_eq!(pool.pool.len(), 2);
 
-        let _buffer2 = pool.get_buffer();
+        let buffer2 = pool.get_buffer();
         assert_eq!(pool.pool.len(), 2);
+
+        pool.return_buffer(buffer1);
+        pool.return_buffer(buffer2);
     }
 
     #[test]
@@ -252,7 +300,9 @@ mod tests {
 
         // Write zero bytes
         buffer.put_slice(&[]);
-        assert_eq!(buffer.as_slice().len(), 0);
+        assert_eq!(buffer.filled_slice().len(), 0);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -262,13 +312,15 @@ mod tests {
 
         // Write, check as_slice, repeat
         buffer.put_slice(&[0u8; 10]);
-        assert_eq!(buffer.as_slice().len(), 10);
+        assert_eq!(buffer.filled_slice().len(), 10);
 
         buffer.put_slice(&[0u8; 20]);
-        assert_eq!(buffer.as_slice().len(), 30);
+        assert_eq!(buffer.filled_slice().len(), 30);
 
         buffer.put_slice(&[0u8; 5]);
-        assert_eq!(buffer.as_slice().len(), 35);
+        assert_eq!(buffer.filled_slice().len(), 35);
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
@@ -292,6 +344,10 @@ mod tests {
         assert_ne!(buf1.index, buf2.index);
         assert_ne!(buf1.index, buf3.index);
         assert_ne!(buf2.index, buf3.index);
+
+        pool.return_buffer(buf1);
+        pool.return_buffer(buf2);
+        pool.return_buffer(buf3);
     }
 
     #[test]
@@ -319,6 +375,11 @@ mod tests {
         // Fifth buffer - should grow to 8
         buffers.push(pool.get_buffer());
         assert_eq!(pool.pool.len(), 8);
+
+        // Return all buffers
+        for buffer in buffers {
+            pool.return_buffer(buffer);
+        }
     }
 
     #[test]
@@ -329,7 +390,7 @@ mod tests {
         let mut buffer = pool.get_buffer();
         let index = buffer.index;
         buffer.put_slice(&[0u8; 100]);
-        assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.filled_slice().len(), 100);
 
         // Return buffer
         pool.return_buffer(buffer);
@@ -339,7 +400,9 @@ mod tests {
         assert_eq!(buffer2.index, index);
 
         // Cursor should be reset to 0
-        assert_eq!(buffer2.as_slice().len(), 0);
+        assert_eq!(buffer2.filled_slice().len(), 0);
+
+        pool.return_buffer(buffer2);
     }
 
     #[test]
@@ -364,6 +427,9 @@ mod tests {
         let new_indices = [buf3.index, buf4.index];
         assert!(new_indices.contains(&idx1));
         assert!(new_indices.contains(&idx2));
+
+        pool.return_buffer(buf3);
+        pool.return_buffer(buf4);
     }
 
     #[test]
@@ -403,11 +469,13 @@ mod tests {
         }
 
         // Verify all data is readable
-        let data = buffer.as_slice();
+        let data = buffer.filled_slice();
         assert_eq!(data.len(), 10);
         for (i, item) in data.iter().enumerate().take(10) {
             assert_eq!(*item, i as u8 * 10);
         }
+
+        pool.return_buffer(buffer);
     }
 
     #[test]
