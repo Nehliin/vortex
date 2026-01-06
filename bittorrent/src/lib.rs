@@ -176,7 +176,7 @@ mod test_utils {
             (SUBPIECE_SIZE * 2) as usize,
             files,
         );
-        let state = InitializedState::new(&root, &torrent_info, Config::default());
+        let state = InitializedState::new(&root, &torrent_info, Config::default()).unwrap();
         State::inprogress(
             torrent_info.info_hash_bytes().try_into().unwrap(),
             root,

@@ -940,7 +940,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             assert!(torrent_state.pieces[index as usize].is_none());
                             // TODO: cache the entire piece and store it with some TTL
                             // to avoid reading the entire piece for each subpiece request
-                            let data = torrent_state.piece_selector.piece_buffer_pool.get_buffer();
+                            let data = torrent_state.piece_buffer_pool.get_buffer();
                             let piece_len = torrent_state.piece_selector.piece_len(index);
                             torrent_state.file_store.queue_piece_disk_operation(
                                 index,

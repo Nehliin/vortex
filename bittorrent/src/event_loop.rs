@@ -274,7 +274,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                             .state()
                             .expect("must have initialized state before starting disk io");
                         if let Ok(buffer) = Rc::try_unwrap(data) {
-                            state.piece_selector.piece_buffer_pool.return_buffer(buffer);
+                            state.piece_buffer_pool.return_buffer(buffer);
                         }
                         *inflight_disk_ops -= 1;
                     }
@@ -845,7 +845,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                         Bytes::copy_from_slice(&buffer.raw_slice()[start_idx..end_idx]),
                         false,
                     );
-                    state.piece_selector.piece_buffer_pool.return_buffer(buffer);
+                    state.piece_buffer_pool.return_buffer(buffer);
                 }
                 self.inflight_disk_ops -= 1;
             }
@@ -934,7 +934,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // Recv has been complete, move over to multishot, same user data
                 io_utils::recv_multishot(sq, recv_multi_id, fd, self.read_ring.bgid());
 
-                // todo only if fast ext is enabled
+                // TODO: only if fast ext is enabled
                 let bitfield_msg = if let Some(torrent_state) = state.state() {
                     let completed = torrent_state.piece_selector.downloaded_clone();
                     let message = if completed.all() {

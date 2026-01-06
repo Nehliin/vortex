@@ -9,7 +9,10 @@ use std::{
 };
 
 use crate::{
-    buf_pool::Buffer, event_loop::{ConnectionId, EventLoop}, file_store::DiskOpType, peer_comm::peer_protocol::PeerId
+    buf_pool::{Buffer, BufferPool},
+    event_loop::{ConnectionId, EventLoop},
+    file_store::DiskOpType,
+    peer_comm::peer_protocol::PeerId,
 };
 use crate::{
     file_store::DiskOp,
@@ -220,17 +223,18 @@ pub struct InitializedState {
     pub completed_piece_tx: Sender<CompletedPiece>,
     pub pieces: Vec<Option<Piece>>,
     pub file_store: FileStore,
+    pub piece_buffer_pool: BufferPool,
     pub is_complete: bool,
 }
 
 impl InitializedState {
-    pub fn new(root: &Path, metadata: &TorrentMetadata, config: Config) -> Self {
+    pub fn new(root: &Path, metadata: &TorrentMetadata, config: Config) -> io::Result<Self> {
         let mut pieces = Vec::with_capacity(metadata.pieces.len());
         for _ in 0..metadata.pieces.len() {
             pieces.push(None);
         }
         let (tx, rc) = std::sync::mpsc::channel();
-        Self {
+        Ok(Self {
             piece_selector: PieceSelector::new(metadata),
             num_unchoked: 0,
             config,
@@ -240,8 +244,9 @@ impl InitializedState {
             completed_piece_tx: tx,
             pieces,
             is_complete: false,
-            file_store: FileStore::new(root, metadata).unwrap(),
-        }
+            piece_buffer_pool: BufferPool::new(256, metadata.piece_length as usize),
+            file_store: FileStore::new(root, metadata)?,
+        })
     }
 
     #[allow(dead_code)]
@@ -264,9 +269,7 @@ impl InitializedState {
         event_tx: &mut Producer<'_, TorrentEvent, 512>,
         piece_buffer: Buffer,
     ) {
-        self.piece_selector
-            .piece_buffer_pool
-            .return_buffer(piece_buffer);
+        self.piece_buffer_pool.return_buffer(piece_buffer);
         self.piece_selector.mark_complete(piece_idx as usize);
         if !self.is_complete && self.piece_selector.completed_all() {
             log::info!("Torrent complete!");
@@ -359,7 +362,7 @@ impl InitializedState {
             Some(allocated_piece) => allocated_piece.allocate_remaining_subpieces(),
             None => {
                 let length = self.piece_selector.piece_len(index);
-                let buffer = self.piece_selector.piece_buffer_pool.get_buffer();
+                let buffer = self.piece_buffer_pool.get_buffer();
                 let mut piece = Piece::new(index, length, buffer);
                 let subpieces = piece.allocate_remaining_subpieces();
                 self.pieces[index as usize] = Some(piece);
@@ -595,15 +598,15 @@ impl State {
         root: PathBuf,
         config: Config,
     ) -> io::Result<Self> {
-        let mut initialized_state = InitializedState::new(&root, &metadata, config);
+        let mut initialized_state = InitializedState::new(&root, &metadata, config)?;
         let file_store = &initialized_state.file_store;
         let completed_pieces: Box<[bool]> = metadata
             .pieces
             .as_slice()
             .par_iter()
             .enumerate()
-            .map(|(idx, hash)| {
-                match file_store.check_piece_hash_sync(idx as i32, hash) {
+            .map(
+                |(idx, hash)| match file_store.check_piece_hash_sync(idx as i32, hash) {
                     Ok(is_valid) => is_valid,
                     Err(err) => {
                         if err.kind() != io::ErrorKind::NotFound {
@@ -611,8 +614,8 @@ impl State {
                         }
                         false
                     }
-                }
-            })
+                },
+            )
             .collect();
         let completed_pieces: BitVec<u8, Msb0> = completed_pieces.into_iter().collect();
         let completed_pieces: BitBox<u8, Msb0> = completed_pieces.into_boxed_bitslice();
@@ -697,7 +700,7 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
         if self.is_initialzied() {
             return Err(io::Error::other("State initialized twice"));
         }
-        *self.torrent = Some(InitializedState::new(self.root, &metadata, *self.config));
+        *self.torrent = Some(InitializedState::new(self.root, &metadata, *self.config)?);
         self.full
             .set(Box::new(metadata))
             .map_err(|_e| io::Error::other("State initialized twice"))?;

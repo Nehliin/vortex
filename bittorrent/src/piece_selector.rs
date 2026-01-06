@@ -8,10 +8,7 @@ use lava_torrent::torrent::v1::Torrent;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use slotmap::SecondaryMap;
 
-use crate::{
-    buf_pool::{Buffer, BufferPool},
-    event_loop::ConnectionId,
-};
+use crate::{buf_pool::Buffer, event_loop::ConnectionId};
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -53,7 +50,6 @@ pub struct PieceSelector {
     last_piece_length: u32,
     piece_length: u32,
     rng_gen: SmallRng,
-    pub piece_buffer_pool: BufferPool,
 }
 
 impl PieceSelector {
@@ -80,7 +76,6 @@ impl PieceSelector {
             rng_gen: SmallRng::from_os_rng(),
             #[cfg(test)]
             rng_gen: SmallRng::seed_from_u64(0xbeefdead),
-            piece_buffer_pool: BufferPool::new(256, piece_length as usize),
         }
     }
 
@@ -307,18 +302,6 @@ pub struct CompletedPiece {
     pub buffer: Buffer,
 }
 
-// Make the write pool larger like 2*PIECE size
-// also pre-register them
-// 1. make the network writes reuse the buffers more efficiently
-// 2. make buf_pool use mmap instead < -- pr 1
-// 3. register buf pool buffers < -- pr 2
-// 2. Make each piece instead keep a buffer as the backing storage for the piece
-// 3. each subpiece becomes normal memcopy
-// 4. hashes are done on the thread pool
-// 5. writes are send directly using the buffer index to disk < -- pr 3
-// 6. setup metrics for pool useage and growth
-// 7. register the files and use read/write fixed
-
 #[derive(Debug)]
 // TODO flatten this
 pub struct Piece {
@@ -326,8 +309,8 @@ pub struct Piece {
     // Contains only completed subpieces
     pub completed_subpieces: BitBox,
     pub last_subpiece_length: i32,
-    // This is a buffer of the piece size that we fill
-    pub piece_view: Buffer,
+    // Contains the piece data, will be sized as like the average piece size
+    pub piece_data: Buffer,
     pub ref_count: u8,
 }
 
@@ -346,7 +329,7 @@ impl Piece {
             index,
             completed_subpieces,
             last_subpiece_length,
-            piece_view,
+            piece_data: piece_view,
             ref_count: 0,
         }
     }
@@ -378,7 +361,7 @@ impl Piece {
     }
 
     pub fn into_buffer(self) -> Buffer {
-        self.piece_view
+        self.piece_data
     }
 
     pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) {
@@ -396,7 +379,7 @@ impl Piece {
             debug_assert_eq!(data.len() as i32, SUBPIECE_SIZE);
         }
         let begin = begin as usize;
-        self.piece_view.raw_mut_slice()[begin..(begin + data.len())].copy_from_slice(data);
+        self.piece_data.raw_mut_slice()[begin..(begin + data.len())].copy_from_slice(data);
         self.completed_subpieces.set(subpiece_index as usize, true);
     }
 
