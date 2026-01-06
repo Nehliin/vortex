@@ -16,7 +16,7 @@ use crate::{
 };
 use crate::{
     file_store::DiskOp,
-    piece_selector::{CompletedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece},
+    piece_selector::{DownloadedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece},
 };
 use crate::{file_store::FileStore, peer_connection::PeerConnection};
 use ahash::HashSetExt;
@@ -219,8 +219,8 @@ pub struct InitializedState {
     pub config: Config,
     pub ticks_to_recalc_unchoke: u32,
     pub ticks_to_recalc_optimistic_unchoke: u32,
-    pub completed_piece_rc: Receiver<CompletedPiece>,
-    pub completed_piece_tx: Sender<CompletedPiece>,
+    pub downloaded_piece_rc: Receiver<DownloadedPiece>,
+    pub downloaded_piece_tx: Sender<DownloadedPiece>,
     pub pieces: Vec<Option<Piece>>,
     pub file_store: FileStore,
     pub piece_buffer_pool: BufferPool,
@@ -240,8 +240,8 @@ impl InitializedState {
             config,
             ticks_to_recalc_unchoke: config.num_ticks_before_unchoke_recalc,
             ticks_to_recalc_optimistic_unchoke: config.num_ticks_before_optimistic_unchoke_recalc,
-            completed_piece_rc: rc,
-            completed_piece_tx: tx,
+            downloaded_piece_rc: rc,
+            downloaded_piece_tx: tx,
             pieces,
             is_complete: false,
             piece_buffer_pool: BufferPool::new(256, metadata.piece_length as usize),
@@ -316,11 +316,11 @@ impl InitializedState {
     }
 
     // TODO: Put this in the event loop directly instead when that is easier to test
-    pub(crate) fn queue_disk_write_for_completed_pieces(
+    pub(crate) fn queue_disk_write_for_downloaded_pieces(
         &mut self,
         pending_disk_operations: &mut Vec<DiskOp>,
     ) {
-        while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
+        while let Ok(completed_piece) = self.downloaded_piece_rc.try_recv() {
             if completed_piece.hash_matched {
                 let piece_len = self.piece_selector.piece_len(completed_piece.index as i32);
                 self.file_store.queue_piece_disk_operation(

@@ -295,7 +295,7 @@ impl PieceSelector {
 }
 
 #[derive(Debug)]
-pub struct CompletedPiece {
+pub struct DownloadedPiece {
     pub index: usize,
     pub conn_id: ConnectionId,
     pub hash_matched: bool,

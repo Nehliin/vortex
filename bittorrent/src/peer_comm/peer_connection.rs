@@ -21,7 +21,7 @@ use crate::{
         extended_protocol::{EXTENSIONS, UPLOAD_ONLY, init_extension},
         peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     },
-    piece_selector::{CompletedPiece, SUBPIECE_SIZE, Subpiece},
+    piece_selector::{DownloadedPiece, SUBPIECE_SIZE, Subpiece},
     torrent::{InitializedState, PeerMetrics, StateRef},
 };
 
@@ -1123,7 +1123,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                     log::debug!("Piece {index} download completed, sending to hash thread");
                     torrent_state.piece_selector.mark_downloaded(index as usize);
-                    let complete_tx = torrent_state.completed_piece_tx.clone();
+                    let complete_tx = torrent_state.downloaded_piece_tx.clone();
                     let conn_id = self.conn_id;
                     let piece_len = torrent_state.piece_selector.piece_len(index);
                     let metadata = state_ref.metadata().unwrap();
@@ -1133,7 +1133,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         hasher.update(&buffer.raw_slice()[..piece_len as usize]);
                         let hash_matched = hasher.finalize().as_slice() == hash;
                         complete_tx
-                            .send(CompletedPiece {
+                            .send(DownloadedPiece {
                                 index: index as usize,
                                 conn_id,
                                 hash_matched,

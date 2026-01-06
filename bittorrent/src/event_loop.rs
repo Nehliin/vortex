@@ -514,7 +514,7 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                 if let Some(torrent_state) = state_ref.state() {
                     torrent_state
-                        .queue_disk_write_for_completed_pieces(&mut self.queued_disk_operations);
+                        .queue_disk_write_for_downloaded_pieces(&mut self.queued_disk_operations);
                     for disk_op in self.queued_disk_operations.drain(..) {
                         io_utils::disk_operation(
                             &mut self.events,
