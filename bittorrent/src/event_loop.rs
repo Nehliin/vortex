@@ -444,12 +444,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                             // are sent to io_uring
                             self.write_pool.return_buffer(buffer);
                         }
-                        if let Err(err) = self.event_handler(
-                            &mut sq,
-                            io_event,
-                            &mut state_ref,
-                            scope,
-                        ) {
+                        if let Err(err) =
+                            self.event_handler(&mut sq, io_event, &mut state_ref, scope)
+                        {
                             log::error!("Error handling event: {err}");
                         }
                     } else {
