@@ -27,8 +27,9 @@ impl Drop for Buffer {
 }
 
 impl Buffer {
+    /// Returns a slice of the filled part of the buffer
     #[inline]
-    pub fn as_slice(&self) -> &[u8] {
+    pub fn filled_slice(&self) -> &[u8] {
         // SAFETY: inner is only None after returned to the pool.
         // It's only used to track if buffers are actually returned
         unsafe { &self.inner.as_ref().unwrap_unchecked()[..self.cursor] }
@@ -140,7 +141,7 @@ mod tests {
         let buffer = pool.get_buffer();
 
         // Initial slice should be empty (cursor at 0)
-        assert_eq!(buffer.as_slice().len(), 0);
+        assert_eq!(buffer.filled_slice().len(), 0);
 
         pool.return_buffer(buffer);
     }
@@ -165,7 +166,7 @@ mod tests {
         buffer.put_slice(&[42u8; 100]);
 
         // as_slice should now return 100 bytes
-        assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.filled_slice().len(), 100);
         assert_eq!(buffer.remaining_mut(), 924);
 
         pool.return_buffer(buffer);
@@ -178,11 +179,11 @@ mod tests {
 
         // Write first 50 bytes
         buffer.put_slice(&[1u8; 50]);
-        assert_eq!(buffer.as_slice().len(), 50);
+        assert_eq!(buffer.filled_slice().len(), 50);
 
         // Write another 50 bytes
         buffer.put_slice(&[2u8; 50]);
-        assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.filled_slice().len(), 100);
 
         // Verify remaining capacity
         assert_eq!(buffer.remaining_mut(), 924);
@@ -200,7 +201,7 @@ mod tests {
         buffer.put_slice(&[5, 6, 7, 8]);
 
         // Verify as_slice contains both writes
-        let data = buffer.as_slice();
+        let data = buffer.filled_slice();
         assert_eq!(data, &[1, 2, 3, 4, 5, 6, 7, 8]);
 
         pool.return_buffer(buffer);
@@ -213,7 +214,7 @@ mod tests {
 
         // Write exact buffer size
         buffer.put_slice(&[0u8; 100]);
-        assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.filled_slice().len(), 100);
         assert_eq!(buffer.remaining_mut(), 0);
 
         pool.return_buffer(buffer);
@@ -299,7 +300,7 @@ mod tests {
 
         // Write zero bytes
         buffer.put_slice(&[]);
-        assert_eq!(buffer.as_slice().len(), 0);
+        assert_eq!(buffer.filled_slice().len(), 0);
 
         pool.return_buffer(buffer);
     }
@@ -311,13 +312,13 @@ mod tests {
 
         // Write, check as_slice, repeat
         buffer.put_slice(&[0u8; 10]);
-        assert_eq!(buffer.as_slice().len(), 10);
+        assert_eq!(buffer.filled_slice().len(), 10);
 
         buffer.put_slice(&[0u8; 20]);
-        assert_eq!(buffer.as_slice().len(), 30);
+        assert_eq!(buffer.filled_slice().len(), 30);
 
         buffer.put_slice(&[0u8; 5]);
-        assert_eq!(buffer.as_slice().len(), 35);
+        assert_eq!(buffer.filled_slice().len(), 35);
 
         pool.return_buffer(buffer);
     }
@@ -389,7 +390,7 @@ mod tests {
         let mut buffer = pool.get_buffer();
         let index = buffer.index;
         buffer.put_slice(&[0u8; 100]);
-        assert_eq!(buffer.as_slice().len(), 100);
+        assert_eq!(buffer.filled_slice().len(), 100);
 
         // Return buffer
         pool.return_buffer(buffer);
@@ -399,7 +400,7 @@ mod tests {
         assert_eq!(buffer2.index, index);
 
         // Cursor should be reset to 0
-        assert_eq!(buffer2.as_slice().len(), 0);
+        assert_eq!(buffer2.filled_slice().len(), 0);
 
         pool.return_buffer(buffer2);
     }
@@ -468,7 +469,7 @@ mod tests {
         }
 
         // Verify all data is readable
-        let data = buffer.as_slice();
+        let data = buffer.filled_slice();
         assert_eq!(data.len(), 10);
         for (i, item) in data.iter().enumerate().take(10) {
             assert_eq!(*item, i as u8 * 10);
