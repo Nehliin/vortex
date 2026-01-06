@@ -315,17 +315,10 @@ impl InitializedState {
         log::debug!("Piece {piece_idx} completed!");
     }
 
-    // 1. send to hash thread mark as downloaded (remove is hashing)
-    // 2. when complete write to disk
-    // 3. when complete to disk mark as complete and run the below logic
-    //  How to know if it's complted? if RC == 0 all writes for the piece have completed
-    //  store index as part of the event
-
     // TODO: Put this in the event loop directly instead when that is easier to test
-    pub(crate) fn update_torrent_status(
+    pub(crate) fn queue_disk_write_for_completed_pieces(
         &mut self,
-        connections: &mut SlotMap<ConnectionId, PeerConnection>,
-        event_tx: &mut Producer<'_, TorrentEvent>,
+        pending_disk_operations: &mut Vec<DiskOp>,
     ) {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             if completed_piece.hash_matched {
@@ -380,14 +373,14 @@ impl InitializedState {
             .update_peer_piece_intrest(conn_id, index as usize);
         // The piece might have been mid hashing when a timeout is received
         // (two separate peer) which causes to be completed whilst another peer
-        // tried to download it. It's fine (TODO: confirm)
-        if let Some(piece) = self.pieces[index as usize].as_mut() {
-            // Will we reach 0 in the ref count?
-            if piece.ref_count == 1 {
-                log::debug!("marked as not allocated: conn_id: {conn_id:?}, index: {index}");
-                self.piece_selector.mark_not_allocated(index, conn_id);
-            }
-            piece.ref_count = piece.ref_count.saturating_sub(1)
+        // tried to download it. It's fine
+        if let Some(piece) = self.pieces[index as usize].take_if(|piece| {
+            piece.ref_count = piece.ref_count.saturating_sub(1);
+            piece.ref_count == 0
+        }) {
+            log::debug!("Marked as not allocated: conn_id: {conn_id:?}, index: {index}");
+            self.piece_buffer_pool.return_buffer(piece.into_buffer());
+            self.piece_selector.mark_not_allocated(index, conn_id);
         }
     }
 
