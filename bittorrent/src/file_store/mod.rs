@@ -137,23 +137,23 @@ impl FileStore {
             let file_index = (index - file.start_piece) as i64;
             // The offset might be negative here if the piece starts before the file
             let file_offset = file_index * self.avg_piece_size as i64 - file.start_offset as i64;
-            // Where should the writing start from (taking into account the already written parts)
-            // NOTE: the write head should never be negative since we loop across all files in order
-            // that are part of the piece. We should thus have already written the relevant parts
-            // of the subpiece from the previous files to ensure we start at minimum on 0
-            let current_write_head = file_offset + piece_cursor as i64;
-            assert!(current_write_head >= 0);
-            let current_write_head = current_write_head as usize;
+            // Where should the writing/reading start from (taking into account the already r/w parts)
+            // NOTE: the r/w head should never be negative since we loop across all files in order
+            // that are part of the piece. We should thus have already r/w the relevant parts
+            // of the piece from the previous files to ensure we start at minimum on 0
+            let current_file_cursor = file_offset + piece_cursor as i64;
+            assert!(current_file_cursor >= 0);
+            let current_file_cursor = current_file_cursor as usize;
             // if we are past this file, move on to the next
-            if current_write_head >= file.file_handle.len() {
+            if current_file_cursor >= file.file_handle.len() {
                 continue;
             }
             let max_possible_operation_length =
-                (file.file_handle.len() - current_write_head).min(piece_len - piece_cursor);
+                (file.file_handle.len() - current_file_cursor).min(piece_len - piece_cursor);
             pending_disk_operations.push(DiskOp {
                 fd: file.file_handle.as_fd(),
                 piece_idx: index,
-                file_offset: current_write_head,
+                file_offset: current_file_cursor,
                 buffer_offset: piece_cursor,
                 operation_len: max_possible_operation_length,
                 op_type,
