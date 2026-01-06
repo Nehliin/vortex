@@ -438,17 +438,20 @@ impl<'scope, 'state: 'scope> EventLoop {
                             io_event.event_data_idx,
                             event
                         );
-                        let buffer_idx = event.buffer.take();
-                        if let Err(err) =
-                            self.event_handler(&mut sq, io_event, &mut state_ref, scope)
-                        {
-                            log::error!("Error handling event: {err}");
-                        }
                         // time to return any potential write buffers
-                        if let Some(buffer) = buffer_idx {
+                        if let Some(buffer) = event.buffer.take() {
                             // SAFETY: All Buffers are dropped when the write operations
                             // are sent to io_uring
                             self.write_pool.return_buffer(buffer);
+                        }
+                        if let Err(err) = self.event_handler(
+                            &mut sq,
+                            io_event,
+                            &mut state_ref,
+                            &mut event_tx,
+                            scope,
+                        ) {
+                            log::error!("Error handling event: {err}");
                         }
                     } else {
                         let err = io_event.result.unwrap_err();
