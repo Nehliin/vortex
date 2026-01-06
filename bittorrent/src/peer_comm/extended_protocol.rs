@@ -74,7 +74,7 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef, config: &Config) -> Pee
     if let Some(listener_port) = state_ref.listener_port {
         handshake.insert("p", bt_bencode::value::to_value(listener_port).unwrap());
     }
-    let is_complete = state_ref.state().map_or(false, |state| state.is_complete);
+    let is_complete = state_ref.state().is_some_and(|state| state.is_complete);
     if let Some(metadata) = state_ref.metadata() {
         let metadata_size = metadata.construct_info().encode().len();
         handshake.insert(

@@ -680,6 +680,7 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
         self.torrent.as_mut()
     }
 
+    #[allow(clippy::borrowed_box)]
     pub fn metadata(&'e_iter mut self) -> Option<&'state Box<TorrentMetadata>> {
         self.full.get()
     }
