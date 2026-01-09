@@ -274,7 +274,6 @@ impl InitializedState {
         if !self.is_complete && self.piece_selector.completed_all() {
             log::info!("Torrent complete!");
             self.is_complete = true;
-            // send later
             if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
                 log::error!("Torrent completion event missed");
             }
@@ -336,10 +335,7 @@ impl InitializedState {
                 self.piece_selector
                     .mark_not_downloaded(completed_piece.index);
                 // deallocate piece peer peer
-                // TODO: disconnect, there also might be a minimal chance of a race
-                // condition here where the connection id is replaced (by disconnect +
-                // new connection so that the wrong peer is marked) but this should be
-                // EXTREMELY rare
+                // TODO: disconnect
                 log::error!("Piece hash didn't match expected hash!");
                 self.piece_selector
                     .mark_not_allocated(completed_piece.index as i32, completed_piece.conn_id);
