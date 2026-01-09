@@ -32,6 +32,9 @@ pub enum DiskOpType {
     Read {
         // Connection that triggered the read
         connection_idx: ConnectionId,
+        // Offset in the piece we want to read
+        // this is only used to propagate the information
+        // to the event so the correct subpiece can be returned
         piece_offset: i32,
     },
 }
