@@ -201,7 +201,10 @@ pub fn disk_operation<Q: SubmissionQueue>(
                 .build()
                 .user_data(event_id.data().as_ffi())
         }
-        DiskOpType::Read { connection_idx, piece_offset } => {
+        DiskOpType::Read {
+            connection_idx,
+            piece_offset,
+        } => {
             let read_ptr = unsafe {
                 disk_op
                     .buffer
