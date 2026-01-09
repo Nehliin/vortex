@@ -133,7 +133,11 @@ impl FileStore {
             .files
             .iter()
             .filter(|file| file.start_piece <= index && index <= file.end_piece);
-        let mut piece_cursor: usize = 0;
+        // Take offset into account when calculating impacted files
+        let mut piece_cursor: usize = match op_type {
+            DiskOpType::Write => 0,
+            DiskOpType::Read { piece_offset, .. } => piece_offset as usize,
+        };
         let buffer = Rc::new(data);
         for file in files {
             // Where in the _file_ does the piece start

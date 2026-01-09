@@ -2868,7 +2868,7 @@ fn request_message_queues_disk_reads() {
             scope,
         );
 
-        // After receiving the request, a disk read per file that overlaps the should be
+        // After receiving the request, a disk read per file that overlaps the subpiece should be
         // triggered. That's 3 for this test data setup
         assert_eq!(pending_disk_operations.len(), 3);
         for disk_op in pending_disk_operations.iter() {
@@ -2895,7 +2895,7 @@ fn request_message_queues_disk_reads() {
             scope,
         );
 
-        assert_eq!(pending_disk_operations.len(), 3);
+        assert_eq!(pending_disk_operations.len(), 1);
         for disk_op in pending_disk_operations.iter() {
             assert_eq!(disk_op.piece_idx, 0);
             assert!(matches!(
@@ -2920,7 +2920,7 @@ fn request_message_queues_disk_reads() {
             scope,
         );
 
-        // Only one file overlaps with this piece
+        // Only one file overlaps with this piece and subpiece
         assert_eq!(pending_disk_operations.len(), 1);
         let disk_op = &pending_disk_operations[0];
         assert_eq!(disk_op.piece_idx, 1);
