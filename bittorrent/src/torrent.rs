@@ -542,6 +542,12 @@ impl InitializedState {
     }
 }
 
+impl Drop for InitializedState {
+    fn drop(&mut self) {
+        self.piece_buffer_pool.stop_tracking();
+    }
+}
+
 /// Current state of the torrent
 pub struct State {
     pub(crate) info_hash: [u8; 20],
