@@ -27,7 +27,12 @@ use common::{
 #[test]
 fn chained_seeding() {
     init_test_environment();
-
+    // ensure panics result in test failures
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        prev_hook(info);
+        std::process::abort();
+    }));
     // Generate test files
     let test_files: HashMap<String, Vec<u8>> = [
         (
