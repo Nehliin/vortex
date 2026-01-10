@@ -1,26 +1,26 @@
+use std::sync::{Arc, atomic::AtomicBool};
+
 use bitvec::vec::BitVec;
 use bytes::BufMut;
 
 use crate::buf_ring::AnonymousMmap;
-
-pub struct BufferPool {
-    free: BitVec,
-    buffer_size: usize,
-    pool: Vec<Option<AnonymousMmap>>,
-}
 
 #[derive(Debug)]
 pub struct Buffer {
     index: usize,
     inner: Option<AnonymousMmap>,
     cursor: usize,
+    // If the pool is still alive we should check that buffers are returned properly
+    // if it's been droppped we can ignore that.
+    pool_alive: Arc<AtomicBool>,
+    // indicates if the buffer has been returned to the pool
     #[cfg(feature = "metrics")]
     time_taken: std::time::Instant,
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        if self.inner.is_some() {
+        if self.inner.is_some() && self.pool_alive.load(std::sync::atomic::Ordering::Acquire) {
             panic!("Buffer must be returned to the pool before being dropped!");
         }
     }
@@ -33,6 +33,22 @@ impl Buffer {
         // SAFETY: inner is only None after returned to the pool.
         // It's only used to track if buffers are actually returned
         unsafe { &self.inner.as_ref().unwrap_unchecked()[..self.cursor] }
+    }
+
+    /// Returns a mutable slice of the whole buffer
+    #[inline]
+    pub fn raw_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: inner is only None after returned to the pool.
+        // It's only used to track if buffers are actually returned
+        unsafe { self.inner.as_mut().unwrap_unchecked() }
+    }
+
+    /// Returns a slice of the whole buffer
+    #[inline]
+    pub fn raw_slice(&self) -> &[u8] {
+        // SAFETY: inner is only None after returned to the pool.
+        // It's only used to track if buffers are actually returned
+        unsafe { self.inner.as_ref().unwrap_unchecked() }
     }
 }
 
@@ -57,6 +73,13 @@ unsafe impl BufMut for Buffer {
     }
 }
 
+pub struct BufferPool {
+    free: BitVec,
+    buffer_size: usize,
+    alive: Arc<AtomicBool>,
+    pool: Vec<Option<AnonymousMmap>>,
+}
+
 impl BufferPool {
     pub fn new(entries: usize, buf_size: usize) -> Self {
         let mut pool = Vec::with_capacity(entries);
@@ -69,6 +92,7 @@ impl BufferPool {
             free: BitVec::repeat(true, entries),
             buffer_size: buf_size,
             pool,
+            alive: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -82,6 +106,7 @@ impl BufferPool {
                         .take()
                         .expect("Free list out of sync with buffer pool"),
                 ),
+                pool_alive: self.alive.clone(),
                 cursor: 0,
                 #[cfg(feature = "metrics")]
                 time_taken: std::time::Instant::now(),
@@ -106,6 +131,11 @@ impl BufferPool {
         self.pool.len()
     }
 
+    pub fn stop_tracking(&mut self) {
+        self.alive
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn return_buffer(&mut self, mut buffer: Buffer) {
         #[cfg(feature = "metrics")]
         {
@@ -115,6 +145,12 @@ impl BufferPool {
         }
         self.free.set(buffer.index, true);
         self.pool[buffer.index] = buffer.inner.take();
+    }
+}
+
+impl Drop for BufferPool {
+    fn drop(&mut self) {
+        self.stop_tracking();
     }
 }
 

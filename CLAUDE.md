@@ -26,7 +26,7 @@ The bittorrent crate uses an event-driven architecture with io-uring for high-pe
 cargo build
 
 # Run the unit tests for the protocol logic
-cargo test --package vortex-bittorrent -- peer_comm::tests
+cargo nextest run peer_comm
 
 # Run all tests including integration tests (requires Docker/Podman for Transmission containers)
 just test

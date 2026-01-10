@@ -175,7 +175,7 @@ fn main() -> io::Result<()> {
 
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     let id = PeerId::generate();
-    let metadata = state.as_ref().state().map(|state| state.0.metadata.clone());
+    let metadata = state.as_ref().metadata().cloned();
     let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
 

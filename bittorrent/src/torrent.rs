@@ -8,10 +8,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::piece_selector::{CompletedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece};
 use crate::{
+    buf_pool::{Buffer, BufferPool},
     event_loop::{ConnectionId, EventLoop},
+    file_store::DiskOpType,
     peer_comm::peer_protocol::PeerId,
+};
+use crate::{
+    file_store::DiskOp,
+    piece_selector::{DownloadedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece},
 };
 use crate::{file_store::FileStore, peer_connection::PeerConnection};
 use ahash::HashSetExt;
@@ -214,30 +219,34 @@ pub struct InitializedState {
     pub config: Config,
     pub ticks_to_recalc_unchoke: u32,
     pub ticks_to_recalc_optimistic_unchoke: u32,
-    pub completed_piece_rc: Receiver<CompletedPiece>,
-    pub completed_piece_tx: Sender<CompletedPiece>,
+    pub downloaded_piece_rc: Receiver<DownloadedPiece>,
+    pub downloaded_piece_tx: Sender<DownloadedPiece>,
     pub pieces: Vec<Option<Piece>>,
+    pub file_store: FileStore,
+    pub piece_buffer_pool: BufferPool,
     pub is_complete: bool,
 }
 
 impl InitializedState {
-    pub fn new(torrent: &lava_torrent::torrent::v1::Torrent, config: Config) -> Self {
-        let mut pieces = Vec::with_capacity(torrent.pieces.len());
-        for _ in 0..torrent.pieces.len() {
+    pub fn new(root: &Path, metadata: &TorrentMetadata, config: Config) -> io::Result<Self> {
+        let mut pieces = Vec::with_capacity(metadata.pieces.len());
+        for _ in 0..metadata.pieces.len() {
             pieces.push(None);
         }
         let (tx, rc) = std::sync::mpsc::channel();
-        Self {
-            piece_selector: PieceSelector::new(torrent),
+        Ok(Self {
+            piece_selector: PieceSelector::new(metadata),
             num_unchoked: 0,
             config,
             ticks_to_recalc_unchoke: config.num_ticks_before_unchoke_recalc,
             ticks_to_recalc_optimistic_unchoke: config.num_ticks_before_optimistic_unchoke_recalc,
-            completed_piece_rc: rc,
-            completed_piece_tx: tx,
+            downloaded_piece_rc: rc,
+            downloaded_piece_tx: tx,
             pieces,
             is_complete: false,
-        }
+            piece_buffer_pool: BufferPool::new(256, metadata.piece_length as usize),
+            file_store: FileStore::new(root, metadata)?,
+        })
     }
 
     #[allow(dead_code)]
@@ -253,104 +262,97 @@ impl InitializedState {
         self.pieces.len()
     }
 
-    // TODO: Put this in the event loop directly instead when that is easier to test
-    pub(crate) fn update_torrent_status(
+    pub(crate) fn complete_piece(
         &mut self,
+        piece_idx: i32,
         connections: &mut SlotMap<ConnectionId, PeerConnection>,
         event_tx: &mut Producer<'_, TorrentEvent>,
+        piece_buffer: Buffer,
     ) {
-        while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
-            match completed_piece.hash_matched {
-                Ok(hash_matched) => {
-                    if hash_matched {
-                        self.piece_selector.mark_complete(completed_piece.index);
-                        if !self.is_complete && self.piece_selector.completed_all() {
-                            log::info!("Torrent complete!");
-                            self.is_complete = true;
-                            if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
-                                log::error!("Torrent completion event missed");
-                            }
-                            // We are no longer interestead in any of the
-                            // peers
-                            for (_, peer) in connections.iter_mut() {
-                                peer.not_interested(false);
-                                // If the peer is upload only and
-                                // we are upload only there is no reason
-                                // to stay connected
-                                if peer.is_upload_only {
-                                    peer.pending_disconnect =
-                                        Some(DisconnectReason::RedundantConnection);
-                                }
-                                // Notify all extensions that the torrent completed
-                                for (_, extension) in peer.extensions.iter_mut() {
-                                    extension.on_torrent_complete(&mut peer.outgoing_msgs_buffer);
-                                }
-                            }
-                        }
-                        for (conn_id, peer) in connections.iter_mut() {
-                            if let Some(bitfield) =
-                                self.piece_selector.interesting_peer_pieces(conn_id)
-                                && !bitfield.any()
-                                && peer.is_interesting
-                                && peer.queued.is_empty()
-                                && peer.inflight.is_empty()
-                            {
-                                // We are no longer interestead in this peer
-                                peer.not_interested(false);
-                                // if it's upload only we can close the
-                                // connection since it will never download from
-                                // us
-                                if peer.is_upload_only {
-                                    peer.pending_disconnect =
-                                        Some(DisconnectReason::RedundantConnection);
-                                }
-                            }
-                            peer.have(completed_piece.index as i32, false);
-                        }
-                        log::debug!("Piece {} completed!", completed_piece.index);
-                    } else {
-                        // Only need to mark this as not hashing when it fails
-                        // since otherwise it will be marked as completed and this is moot
-                        self.piece_selector.mark_not_hashing(completed_piece.index);
-                        // TODO: disconnect, there also might be a minimal chance of a race
-                        // condition here where the connection id is replaced (by disconnect +
-                        // new connection so that the wrong peer is marked) but this should be
-                        // EXTREMELY rare
-                        log::error!("Piece hash didn't match expected hash!");
-                        self.piece_selector.mark_not_allocated(
-                            completed_piece.index as i32,
-                            completed_piece.conn_id,
-                        );
-                    }
+        self.piece_buffer_pool.return_buffer(piece_buffer);
+        self.piece_selector.mark_complete(piece_idx as usize);
+        if !self.is_complete && self.piece_selector.completed_all() {
+            log::info!("Torrent complete!");
+            self.is_complete = true;
+            if event_tx.enqueue(TorrentEvent::TorrentComplete).is_err() {
+                log::error!("Torrent completion event missed");
+            }
+            // We are no longer interestead in any of the
+            // peers
+            for (_, peer) in connections.iter_mut() {
+                peer.not_interested(false);
+                // If the peer is upload only and
+                // we are upload only there is no reason
+                // to stay connected
+                if peer.is_upload_only {
+                    peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
                 }
-                Err(err) => {
-                    log::error!(
-                        "Failed to sync and hash piece: {} Error: {err}",
-                        completed_piece.index
-                    );
+                // Notify all extensions that the torrent completed
+                for (_, extension) in peer.extensions.iter_mut() {
+                    extension.on_torrent_complete(&mut peer.outgoing_msgs_buffer);
                 }
+            }
+        }
+        for (conn_id, peer) in connections.iter_mut() {
+            if let Some(bitfield) = self.piece_selector.interesting_peer_pieces(conn_id)
+                && !bitfield.any()
+                && peer.is_interesting
+                && peer.queued.is_empty()
+                && peer.inflight.is_empty()
+            {
+                // We are no longer interestead in this peer
+                peer.not_interested(false);
+                // if it's upload only we can close the
+                // connection since it will never download from
+                // us
+                if peer.is_upload_only {
+                    peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
+                }
+            }
+            peer.have(piece_idx, false);
+        }
+        log::debug!("Piece {piece_idx} completed!");
+    }
+
+    // TODO: Put this in the event loop directly instead when that is easier to test
+    pub(crate) fn queue_disk_write_for_downloaded_pieces(
+        &mut self,
+        pending_disk_operations: &mut Vec<DiskOp>,
+    ) {
+        while let Ok(completed_piece) = self.downloaded_piece_rc.try_recv() {
+            if completed_piece.hash_matched {
+                let piece_len = self.piece_selector.piece_len(completed_piece.index as i32);
+                self.file_store.queue_piece_disk_operation(
+                    completed_piece.index as i32,
+                    completed_piece.buffer,
+                    piece_len as usize,
+                    DiskOpType::Write,
+                    pending_disk_operations,
+                );
+            } else {
+                // Only need to mark this as not downloaded when it fails
+                // since otherwise it will be marked as completed and this is moot
+                self.piece_selector
+                    .mark_not_downloaded(completed_piece.index);
+                // deallocate piece peer peer
+                // TODO: disconnect
+                log::error!("Piece hash didn't match expected hash!");
+                self.piece_selector
+                    .mark_not_allocated(completed_piece.index as i32, completed_piece.conn_id);
             }
         }
     }
 
     // Allocates a piece and increments the piece ref count
-    pub fn allocate_piece(
-        &mut self,
-        index: i32,
-        conn_id: ConnectionId,
-        file_store: &FileStore,
-    ) -> VecDeque<Subpiece> {
+    pub fn allocate_piece(&mut self, index: i32, conn_id: ConnectionId) -> VecDeque<Subpiece> {
         log::debug!("Allocating piece: conn_id: {conn_id:?}, index: {index}");
         self.piece_selector.mark_allocated(index, conn_id);
         match &mut self.pieces[index as usize] {
             Some(allocated_piece) => allocated_piece.allocate_remaining_subpieces(),
             None => {
                 let length = self.piece_selector.piece_len(index);
-                // SAFETY: There only exist a single piece per index in the torrent_state
-                // piece vector which guarantees that there can never be two concurrent writable
-                // piece views for the same index
-                let piece_view = unsafe { file_store.writable_piece_view(index).unwrap() };
-                let mut piece = Piece::new(index, length, piece_view);
+                let buffer = self.piece_buffer_pool.get_buffer();
+                let mut piece = Piece::new(index, length, buffer);
                 let subpieces = piece.allocate_remaining_subpieces();
                 self.pieces[index as usize] = Some(piece);
                 subpieces
@@ -367,14 +369,14 @@ impl InitializedState {
             .update_peer_piece_intrest(conn_id, index as usize);
         // The piece might have been mid hashing when a timeout is received
         // (two separate peer) which causes to be completed whilst another peer
-        // tried to download it. It's fine (TODO: confirm)
-        if let Some(piece) = self.pieces[index as usize].as_mut() {
-            // Will we reach 0 in the ref count?
-            if piece.ref_count == 1 {
-                log::debug!("marked as not allocated: conn_id: {conn_id:?}, index: {index}");
-                self.piece_selector.mark_not_allocated(index, conn_id);
-            }
-            piece.ref_count = piece.ref_count.saturating_sub(1)
+        // tried to download it. It's fine
+        if let Some(piece) = self.pieces[index as usize].take_if(|piece| {
+            piece.ref_count = piece.ref_count.saturating_sub(1);
+            piece.ref_count == 0
+        }) {
+            log::debug!("Marked as not allocated: conn_id: {conn_id:?}, index: {index}");
+            self.piece_buffer_pool.return_buffer(piece.into_buffer());
+            self.piece_selector.mark_not_allocated(index, conn_id);
         }
     }
 
@@ -536,9 +538,10 @@ impl InitializedState {
     }
 }
 
-pub struct FileAndMetadata {
-    pub file_store: FileStore,
-    pub metadata: Box<TorrentMetadata>,
+impl Drop for InitializedState {
+    fn drop(&mut self) {
+        self.piece_buffer_pool.stop_tracking();
+    }
 }
 
 /// Current state of the torrent
@@ -548,7 +551,7 @@ pub struct State {
     // TODO: Consider checking this is accessible at construction
     root: PathBuf,
     torrent_state: Option<InitializedState>,
-    file: OnceCell<FileAndMetadata>,
+    file: OnceCell<Box<TorrentMetadata>>,
     pub(crate) config: Config,
 }
 
@@ -590,31 +593,24 @@ impl State {
         root: PathBuf,
         config: Config,
     ) -> io::Result<Self> {
-        let file_store = FileStore::new(&root, &metadata)?;
-        let mut initialized_state = InitializedState::new(&metadata, config);
+        let mut initialized_state = InitializedState::new(&root, &metadata, config)?;
+        let file_store = &initialized_state.file_store;
         let completed_pieces: Box<[bool]> = metadata
             .pieces
             .as_slice()
             .par_iter()
             .enumerate()
-            .map(|(idx, hash)| {
-                // SAFETY: The filestore we are reading from is created above and thus there
-                // should not exist any existing writable_piece_views. NOTE: this isn't 100%
-                // guraranteed since someone else could be mmapping the file but it's not much
-                // we can do about that
-                match unsafe { file_store.readable_piece_view(idx as i32) } {
-                    Ok(readable_view) => {
-                        // Since we do not sync it should never panic
-                        readable_view.check_hash(hash, &file_store, false).unwrap()
-                    }
+            .map(
+                |(idx, hash)| match file_store.check_piece_hash_sync(idx as i32, hash) {
+                    Ok(is_valid) => is_valid,
                     Err(err) => {
                         if err.kind() != io::ErrorKind::NotFound {
-                            panic!("Unexpected error reading file {err}");
+                            log::warn!("Error checking piece {idx}: {err}");
                         }
                         false
                     }
-                }
-            })
+                },
+            )
             .collect();
         let completed_pieces: BitVec<u8, Msb0> = completed_pieces.into_iter().collect();
         let completed_pieces: BitBox<u8, Msb0> = completed_pieces.into_boxed_bitslice();
@@ -632,10 +628,7 @@ impl State {
             root,
             listener_port: None,
             torrent_state: Some(initialized_state),
-            file: OnceCell::from(FileAndMetadata {
-                file_store,
-                metadata: Box::new(metadata),
-            }),
+            file: OnceCell::from(Box::new(metadata)),
             config,
         })
     }
@@ -644,7 +637,6 @@ impl State {
     pub fn inprogress(
         info_hash: [u8; 20],
         root: PathBuf,
-        file_store: FileStore,
         metadata: lava_torrent::torrent::v1::Torrent,
         state: InitializedState,
         config: Config,
@@ -654,10 +646,7 @@ impl State {
             root,
             listener_port: None,
             torrent_state: Some(state),
-            file: OnceCell::from(FileAndMetadata {
-                file_store,
-                metadata: Box::new(metadata),
-            }),
+            file: OnceCell::from(Box::new(metadata)),
             config,
         }
     }
@@ -674,12 +663,13 @@ impl State {
     }
 }
 
+// is this even needed?
 pub struct StateRef<'state> {
     info_hash: [u8; 20],
     root: &'state Path,
     pub listener_port: &'state Option<u16>,
     torrent: &'state mut Option<InitializedState>,
-    full: &'state OnceCell<FileAndMetadata>,
+    full: &'state OnceCell<Box<TorrentMetadata>>,
     pub config: &'state Config,
 }
 
@@ -688,16 +678,13 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
         &self.info_hash
     }
 
-    pub fn state(
-        &'e_iter mut self,
-    ) -> Option<(&'state FileAndMetadata, &'e_iter mut InitializedState)> {
-        if let Some(f) = self.full.get() {
-            // SAFETY: If full has been initialized the torrent must have been initialized
-            // as well
-            unsafe { Some((f, self.torrent.as_mut().unwrap_unchecked())) }
-        } else {
-            None
-        }
+    pub fn state(&'e_iter mut self) -> Option<&'e_iter mut InitializedState> {
+        self.torrent.as_mut()
+    }
+
+    #[allow(clippy::borrowed_box)]
+    pub fn metadata(&'e_iter mut self) -> Option<&'state Box<TorrentMetadata>> {
+        self.full.get()
     }
 
     #[inline]
@@ -709,12 +696,9 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
         if self.is_initialzied() {
             return Err(io::Error::other("State initialized twice"));
         }
-        *self.torrent = Some(InitializedState::new(&metadata, *self.config));
+        *self.torrent = Some(InitializedState::new(self.root, &metadata, *self.config)?);
         self.full
-            .set(FileAndMetadata {
-                file_store: FileStore::new(self.root, &metadata)?,
-                metadata: Box::new(metadata),
-            })
+            .set(Box::new(metadata))
             .map_err(|_e| io::Error::other("State initialized twice"))?;
         Ok(())
     }

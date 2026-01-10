@@ -18,6 +18,7 @@ use crate::{
     buf_pool::Buffer,
     buf_ring::Bgid,
     event_loop::{ConnectionId, EventData, EventId, EventType},
+    file_store::{DiskOp, DiskOpType},
 };
 
 pub trait SubmissionQueue {
@@ -170,6 +171,66 @@ pub fn write<Q: SubmissionQueue>(
         .build()
         .user_data(write_event_id.data().as_ffi());
     sq.push(write_op);
+}
+
+pub fn disk_operation<Q: SubmissionQueue>(
+    events: &mut SlotMap<EventId, EventData>,
+    sq: &mut BackloggedSubmissionQueue<Q>,
+    disk_op: DiskOp,
+    inflight_disk_ops: &mut usize,
+) {
+    let op = match disk_op.op_type {
+        DiskOpType::Write => {
+            let write_ptr = unsafe {
+                disk_op
+                    .buffer
+                    .raw_slice()
+                    .as_ptr()
+                    .add(disk_op.buffer_offset)
+            };
+            let write_len = disk_op.operation_len;
+            let event_id = events.insert(EventData {
+                typ: EventType::DiskWrite {
+                    data: disk_op.buffer,
+                    piece_idx: disk_op.piece_idx,
+                },
+                buffer: None,
+            });
+            opcode::Write::new(types::Fd(disk_op.fd), write_ptr, write_len as u32)
+                .offset(disk_op.file_offset as u64)
+                .build()
+                .user_data(event_id.data().as_ffi())
+        }
+        DiskOpType::Read {
+            connection_idx,
+            piece_offset,
+        } => {
+            let read_ptr = unsafe {
+                disk_op
+                    .buffer
+                    .raw_slice()
+                    .as_ptr()
+                    .add(disk_op.buffer_offset)
+            };
+            let read_len = disk_op.operation_len;
+            let event_id = events.insert(EventData {
+                typ: EventType::DiskRead {
+                    data: disk_op.buffer,
+                    piece_idx: disk_op.piece_idx,
+                    connection_idx,
+                    piece_offset,
+                },
+                // TODO: consider using this instead
+                buffer: None,
+            });
+            opcode::Read::new(types::Fd(disk_op.fd), read_ptr as *mut _, read_len as u32)
+                .offset(disk_op.file_offset as u64)
+                .build()
+                .user_data(event_id.data().as_ffi())
+        }
+    };
+    *inflight_disk_ops += 1;
+    sq.push(op);
 }
 
 // NOTE: Socket contains an OwnedFd which automatically closes

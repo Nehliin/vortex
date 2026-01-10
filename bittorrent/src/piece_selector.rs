@@ -8,10 +8,7 @@ use lava_torrent::torrent::v1::Torrent;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use slotmap::SecondaryMap;
 
-use crate::{
-    event_loop::ConnectionId,
-    file_store::{FileStore, ReadablePieceFileView, WritablePieceFileView},
-};
+use crate::{buf_pool::Buffer, event_loop::ConnectionId};
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -38,12 +35,12 @@ pub struct Subpiece {
 
 pub struct PieceSelector {
     //    strategy: T,
-    // Completed -> 1 completed 0 = not completed (global)
-    completed_pieces: BitBox<u8, Msb0>,
+    // Downloading -> 1 downloaded 0 = not downloaded (global)
+    downloaded_pieces: BitBox<u8, Msb0>,
     // Allocated -> 1 allocated 0 = not allocated (global)
     allocated_pieces: BitBox<u8, Msb0>,
-    // Hashing -> 1 is currently being hashed 0 = not hashing (global)
-    hashing_pieces: BitBox<u8, Msb0>,
+    // Completed -> 1 completed 0 = not completed (global)
+    completed_pieces: BitBox<u8, Msb0>,
     // These are all pieces the peer have that we have yet to complete
     // it should be kept up to date as the torrent is downloaded, completed
     // pieces are "turned off" and Have messages only set a bit if we do not already
@@ -69,9 +66,9 @@ impl PieceSelector {
             last_piece_length = piece_length;
         }
         Self {
-            completed_pieces,
+            downloaded_pieces: completed_pieces,
             allocated_pieces,
-            hashing_pieces,
+            completed_pieces: hashing_pieces,
             last_piece_length: last_piece_length as u32,
             piece_length: piece_length as u32,
             interesting_peer_pieces: Default::default(),
@@ -84,7 +81,8 @@ impl PieceSelector {
 
     pub(crate) fn set_completed_bitfield(&mut self, completed_pieces: BitBox<u8, Msb0>) {
         assert_eq!(self.completed_pieces.len(), completed_pieces.len());
-        self.completed_pieces = completed_pieces;
+        self.completed_pieces = completed_pieces.clone();
+        self.downloaded_pieces = completed_pieces;
     }
 
     // Returns index and if the peer is in endgame mode
@@ -94,7 +92,7 @@ impl PieceSelector {
         endgame_mode: &mut bool,
     ) -> Option<i32> {
         let interesting_pieces = self.interesting_peer_pieces.get(connection_id)?;
-        let pickable = !self.hashing_pieces.clone() & interesting_pieces;
+        let pickable = !self.downloaded_pieces.clone() & interesting_pieces;
         // due to lifetime issues
         let first_pickable = pickable.first_one();
         let unallocated_pickable = !self.allocated_pieces.clone() & pickable;
@@ -109,11 +107,11 @@ impl PieceSelector {
         }
 
         let procentage_left =
-            self.completed_pieces.count_zeros() as f32 / self.completed_pieces.len() as f32;
+            self.downloaded_pieces.count_zeros() as f32 / self.downloaded_pieces.len() as f32;
         if procentage_left > 0.95 {
             for _ in 0..5 {
                 let index =
-                    (self.rng_gen.random::<f32>() * self.completed_pieces.len() as f32) as usize;
+                    (self.rng_gen.random::<f32>() * self.downloaded_pieces.len() as f32) as usize;
                 if unallocated_pickable[index] {
                     *endgame_mode = false;
                     return Some(index as i32);
@@ -155,7 +153,7 @@ impl PieceSelector {
         connection_id: ConnectionId,
         peer_pieces: BitBox<u8, Msb0>,
     ) -> bool {
-        let not_completed = !self.completed_pieces.clone();
+        let not_completed = !self.downloaded_pieces.clone();
         let interesting_pieces = peer_pieces & not_completed;
         let is_interesting = interesting_pieces.any();
         self.interesting_peer_pieces
@@ -169,7 +167,7 @@ impl PieceSelector {
         connection_id: ConnectionId,
         piece_index: usize,
     ) -> bool {
-        let is_interesting = !self.completed_pieces[piece_index];
+        let is_interesting = !self.downloaded_pieces[piece_index];
         let entry = self
             .interesting_peer_pieces
             .entry(connection_id)
@@ -178,7 +176,7 @@ impl PieceSelector {
             .and_modify(|pieces| pieces.set(piece_index, is_interesting))
             .or_insert_with(|| {
                 let mut all_pieces: BitBox<u8, Msb0> =
-                    BitVec::repeat(false, self.completed_pieces.len()).into();
+                    BitVec::repeat(false, self.downloaded_pieces.len()).into();
                 all_pieces.set(piece_index, is_interesting);
                 all_pieces
             });
@@ -196,6 +194,7 @@ impl PieceSelector {
     #[inline]
     pub fn mark_complete(&mut self, index: usize) {
         assert!(!self.completed_pieces[index]);
+        assert!(self.downloaded_pieces[index]);
         self.completed_pieces.set(index, true);
         self.allocated_pieces.set(index, false);
         // The piece is no longer interesting if we've completed it
@@ -205,17 +204,17 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn mark_hashing(&mut self, index: usize) {
+    pub fn mark_downloaded(&mut self, index: usize) {
+        assert!(!self.downloaded_pieces[index]);
         assert!(!self.completed_pieces[index]);
-        assert!(!self.hashing_pieces[index]);
-        self.hashing_pieces.set(index, true);
+        self.downloaded_pieces.set(index, true);
     }
 
     #[inline]
-    pub fn mark_not_hashing(&mut self, index: usize) {
+    pub fn mark_not_downloaded(&mut self, index: usize) {
+        assert!(self.downloaded_pieces[index]);
         assert!(!self.completed_pieces[index]);
-        assert!(self.hashing_pieces[index]);
-        self.hashing_pieces.set(index, false);
+        self.downloaded_pieces.set(index, false);
     }
 
     #[inline]
@@ -246,18 +245,18 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn completed_clone(&self) -> BitBox<u8, Msb0> {
-        self.completed_pieces.clone()
+    pub fn downloaded_clone(&self) -> BitBox<u8, Msb0> {
+        self.downloaded_pieces.clone()
     }
 
     #[inline]
-    pub fn has_completed(&self, index: usize) -> bool {
+    pub fn has_downloaded(&self, index: usize) -> bool {
+        self.downloaded_pieces[index]
+    }
+
+    #[inline]
+    pub fn is_complete(&self, index: usize) -> bool {
         self.completed_pieces[index]
-    }
-
-    #[inline]
-    pub fn is_hashing(&self, index: usize) -> bool {
-        self.hashing_pieces[index]
     }
 
     #[inline]
@@ -277,7 +276,7 @@ impl PieceSelector {
 
     #[inline]
     pub fn piece_len(&self, index: i32) -> u32 {
-        if index == (self.completed_pieces.len() as i32 - 1) {
+        if index == (self.downloaded_pieces.len() as i32 - 1) {
             self.last_piece_length
         } else {
             self.piece_length
@@ -296,10 +295,11 @@ impl PieceSelector {
 }
 
 #[derive(Debug)]
-pub struct CompletedPiece {
+pub struct DownloadedPiece {
     pub index: usize,
     pub conn_id: ConnectionId,
-    pub hash_matched: std::io::Result<bool>,
+    pub hash_matched: bool,
+    pub buffer: Buffer,
 }
 
 #[derive(Debug)]
@@ -309,12 +309,13 @@ pub struct Piece {
     // Contains only completed subpieces
     pub completed_subpieces: BitBox,
     pub last_subpiece_length: i32,
-    pub piece_view: WritablePieceFileView,
+    // Contains the piece data, will be sized as like the average piece size
+    pub piece_data: Buffer,
     pub ref_count: u8,
 }
 
 impl Piece {
-    pub fn new(index: i32, lenght: u32, piece_view: WritablePieceFileView) -> Self {
+    pub fn new(index: i32, lenght: u32, piece_view: Buffer) -> Self {
         assert!(lenght > 0, "Piece lenght must be non zero");
         let last_subpiece_length = if lenght as i32 % SUBPIECE_SIZE == 0 {
             SUBPIECE_SIZE
@@ -328,7 +329,7 @@ impl Piece {
             index,
             completed_subpieces,
             last_subpiece_length,
-            piece_view,
+            piece_data: piece_view,
             ref_count: 0,
         }
     }
@@ -359,11 +360,11 @@ impl Piece {
         deque
     }
 
-    pub fn into_readable(self) -> ReadablePieceFileView {
-        self.piece_view.into_readable()
+    pub fn into_buffer(self) -> Buffer {
+        self.piece_data
     }
 
-    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8], file_store: &FileStore) {
+    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
@@ -377,8 +378,8 @@ impl Piece {
         } else {
             debug_assert_eq!(data.len() as i32, SUBPIECE_SIZE);
         }
-        self.piece_view
-            .write_subpiece(begin as usize, data, file_store);
+        let begin = begin as usize;
+        self.piece_data.raw_mut_slice()[begin..(begin + data.len())].copy_from_slice(data);
         self.completed_subpieces.set(subpiece_index as usize, true);
     }
 
