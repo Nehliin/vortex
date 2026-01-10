@@ -136,7 +136,7 @@ impl Torrent {
     /// consumer of the `event_tx` spsc channel.
     pub fn start(
         &mut self,
-        event_tx: Producer<TorrentEvent, 512>,
+        event_tx: Producer<TorrentEvent>,
         command_rc: Receiver<Command>,
         listener: TcpListener,
     ) -> Result<(), Error> {
@@ -257,7 +257,7 @@ impl InitializedState {
     pub(crate) fn update_torrent_status(
         &mut self,
         connections: &mut SlotMap<ConnectionId, PeerConnection>,
-        event_tx: &mut Producer<'_, TorrentEvent, 512>,
+        event_tx: &mut Producer<'_, TorrentEvent>,
     ) {
         while let Ok(completed_piece) = self.completed_piece_rc.try_recv() {
             match completed_piece.hash_matched {

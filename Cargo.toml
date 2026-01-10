@@ -18,8 +18,8 @@ env_logger = "0.11"
 lava_torrent = "0.11"
 thiserror = "2"
 sha1 = "0.10"
-heapless = "0.8"
-metrics-exporter-prometheus = "0.17"
+heapless = "0.9"
+metrics-exporter-prometheus = "0.18"
 
 [profile.release]
 overflow-checks = true
