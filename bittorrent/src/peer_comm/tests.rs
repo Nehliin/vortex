@@ -84,7 +84,7 @@ fn simulate_disk_write_completion(
     torrent_state: &mut InitializedState,
     pending_disk_operations: &mut Vec<DiskOp>,
     connections: &mut SlotMap<ConnectionId, PeerConnection>,
-    event_tx: &mut Producer<'_, TorrentEvent, 512>,
+    event_tx: &mut Producer<'_, TorrentEvent>,
     expected_pieces: &[i32],
 ) {
     // Queue disk writes for downloaded pieces

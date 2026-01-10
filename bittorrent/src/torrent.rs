@@ -266,7 +266,7 @@ impl InitializedState {
         &mut self,
         piece_idx: i32,
         connections: &mut SlotMap<ConnectionId, PeerConnection>,
-        event_tx: &mut Producer<'_, TorrentEvent, 512>,
+        event_tx: &mut Producer<'_, TorrentEvent>,
         piece_buffer: Buffer,
     ) {
         self.piece_buffer_pool.return_buffer(piece_buffer);

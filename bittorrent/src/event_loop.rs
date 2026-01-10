@@ -724,7 +724,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         sq: &mut BackloggedSubmissionQueue<Q>,
         io_event: RawIoEvent,
         state: &mut StateRef<'state>,
-        event_tx: &mut Producer<TorrentEvent, 512>,
+        event_tx: &mut Producer<TorrentEvent>,
         scope: &Scope<'scope>,
     ) -> io::Result<()> {
         let ret = match io_event.result {
