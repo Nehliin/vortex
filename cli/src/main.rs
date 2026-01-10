@@ -9,7 +9,7 @@ use std::{
 
 use clap::{Args, Parser};
 use crossbeam_channel::{Receiver, Sender, bounded, select, tick};
-use heapless::{HistoryBuffer, spsc::Consumer};
+use heapless::{HistoryBuf, spsc::Consumer, spsc::Queue};
 use human_bytes::human_bytes;
 use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -121,7 +121,7 @@ fn main() -> io::Result<()> {
         .target(env_logger::Target::Pipe(target))
         .filter_level(log::LevelFilter::Debug)
         .init();
-    let builder = PrometheusBuilder::new();
+    let builder = PrometheusBuilder::new().with_recommended_naming(true);
     builder.install().unwrap();
 
     let cli = Cli::parse();
@@ -168,7 +168,7 @@ fn main() -> io::Result<()> {
 
     let info_hash_id = Id::from_bytes(state.info_hash()).unwrap();
 
-    let mut event_q = heapless::spsc::Queue::new();
+    let mut event_q: Queue<TorrentEvent, 512> = heapless::spsc::Queue::new();
 
     let (command_tx, command_rc) = std::sync::mpsc::sync_channel(256);
     let (event_tx, event_rc) = event_q.split();
@@ -196,11 +196,11 @@ fn main() -> io::Result<()> {
 
 struct VortexApp<'queue> {
     cmd_tx: SyncSender<Command>,
-    event_rc: Consumer<'queue, TorrentEvent, 512>,
+    event_rc: Consumer<'queue, TorrentEvent>,
     should_exit: bool,
     start_time: Instant,
-    total_download_throughput: Box<HistoryBuffer<(f64, f64), 256>>,
-    total_upload_throughput: Box<HistoryBuffer<(f64, f64), 256>>,
+    total_download_throughput: Box<HistoryBuf<(f64, f64), 256>>,
+    total_upload_throughput: Box<HistoryBuf<(f64, f64), 256>>,
     pieces_completed: usize,
     num_connections: usize,
     num_unchoked: usize,
@@ -215,7 +215,7 @@ struct VortexApp<'queue> {
 impl<'queue> VortexApp<'queue> {
     fn new(
         cmd_tx: SyncSender<Command>,
-        event_rc: Consumer<'queue, TorrentEvent, 512>,
+        event_rc: Consumer<'queue, TorrentEvent>,
         shutdown_signal_tx: Sender<()>,
         metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
         root: PathBuf,
@@ -226,8 +226,8 @@ impl<'queue> VortexApp<'queue> {
             should_exit: false,
             start_time: Instant::now(),
             pieces_completed: 0,
-            total_download_throughput: Box::new(HistoryBuffer::new()),
-            total_upload_throughput: Box::new(HistoryBuffer::new()),
+            total_download_throughput: Box::new(HistoryBuf::new()),
+            total_upload_throughput: Box::new(HistoryBuf::new()),
             num_connections: 0,
             num_unchoked: 0,
             metadata_spinner_state: Default::default(),
@@ -419,7 +419,7 @@ impl<'queue> VortexApp<'queue> {
 
 fn render_througput_graph(
     name: &str,
-    data: &HistoryBuffer<(f64, f64), 256>,
+    data: &HistoryBuf<(f64, f64), 256>,
     area: Rect,
     buf: &mut Buffer,
 ) {

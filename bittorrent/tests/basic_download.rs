@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use heapless::spsc;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
 
@@ -41,7 +42,7 @@ fn basic_seeded_download() {
 
     let download_time = Instant::now();
     let (command_tx, command_rc) = std::sync::mpsc::sync_channel(64);
-    let mut event_q = heapless::spsc::Queue::new();
+    let mut event_q: spsc::Queue<TorrentEvent, 512> = spsc::Queue::new();
 
     let (event_tx, mut event_rc) = event_q.split();
 

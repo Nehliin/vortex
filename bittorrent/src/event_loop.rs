@@ -322,7 +322,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         &mut self,
         mut ring: IoUring,
         state: &'state mut State,
-        mut event_tx: Producer<TorrentEvent, 512>,
+        mut event_tx: Producer<TorrentEvent>,
         mut command_rc: Receiver<Command>,
         listener: TcpListener,
     ) -> Result<(), Error> {
@@ -937,7 +937,7 @@ fn report_tick_metrics(
     peer_metrics: Vec<PeerMetrics>,
     _pending_connections: &HashSet<SockAddr>,
     num_connections: usize,
-    event_tx: &mut Producer<TorrentEvent, 512>,
+    event_tx: &mut Producer<TorrentEvent>,
 ) {
     let mut pieces_completed = 0;
     let mut pieces_allocated = 0;
@@ -984,7 +984,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
     connections: &mut SlotMap<ConnectionId, PeerConnection>,
     pending_connections: &HashSet<SockAddr>,
     torrent_state: &mut StateRef<'state>,
-    event_tx: &mut Producer<TorrentEvent, 512>,
+    event_tx: &mut Producer<TorrentEvent>,
 ) {
     log::info!("Tick!: {}", tick_delta.as_secs_f32());
     if let Some((_, torrent_state)) = torrent_state.state() {

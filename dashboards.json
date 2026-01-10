@@ -78,27 +78,117 @@
             ]
           }
         },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "buffer_lifetime_ms{quantile=\"0.999\"}",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Buffer pool lifetime p 999 ms",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "der4co44rndogd"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
         "overrides": [
           {
-            "__systemRef": "hideSeriesFrom",
             "matcher": {
-              "id": "byNames",
-              "options": {
-                "mode": "exclude",
-                "names": [
-                  "allocated"
-                ],
-                "prefix": "All except:",
-                "readOnly": true
-              }
+              "id": "byName",
+              "options": "{__name__=\"peer_connect_attempts\", instance=\"host.containers.internal:9000\", job=\"vortex\"}"
             },
             "properties": [
               {
-                "id": "custom.hideFrom",
+                "id": "custom.lineStyle",
                 "value": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": true
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
                 }
               }
             ]
@@ -108,8 +198,137 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 0
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "peer_connect_attempts_total",
+          "legendFormat": "connect_attempts",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "editorMode": "code",
+          "expr": "peer_connect_timeout_total",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "timeouts",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "editorMode": "code",
+          "expr": "peer_connect_success_total",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "success",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "expr": "",
+          "hide": false,
+          "instant": false,
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Connection success ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "der4co44rndogd"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
       },
       "id": 12,
       "options": {
@@ -216,34 +435,15 @@
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "{__name__=\"peer_connect_attempts\", instance=\"host.containers.internal:9000\", job=\"vortex\"}"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "dash": [
-                    10,
-                    10
-                  ],
-                  "fill": "dash"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 0
+        "y": 8
       },
-      "id": 7,
+      "id": 3,
       "options": {
         "legend": {
           "calcs": [],
@@ -260,51 +460,18 @@
       "pluginVersion": "12.0.2",
       "targets": [
         {
+          "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "peer_connect_attempts",
-          "legendFormat": "connect_attempts",
+          "expr": "rtt{quantile=\"0.95\", job=\"vortex\"}",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "legendFormat": "{{peer_id}}",
           "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "eek7csbvj1l34d"
-          },
-          "editorMode": "code",
-          "expr": "peer_connect_timeout",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "timeouts",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "eek7csbvj1l34d"
-          },
-          "editorMode": "code",
-          "expr": "peer_connect_success",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "success",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "eek7csbvj1l34d"
-          },
-          "expr": "",
-          "hide": false,
-          "instant": false,
-          "range": true,
-          "refId": "D"
+          "refId": "A",
+          "useBackend": false
         }
       ],
-      "title": "Connection success ratio",
+      "title": "RTT p95",
       "type": "timeseries"
     },
     {
@@ -395,7 +562,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 16
       },
       "id": 11,
       "options": {
@@ -426,199 +593,6 @@
         }
       ],
       "title": "disk write time p 0.99",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "der4co44rndogd"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 8
-      },
-      "id": 3,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.0.2",
-      "targets": [
-        {
-          "disableTextWrap": false,
-          "editorMode": "code",
-          "expr": "rtt{quantile=\"0.95\", job=\"vortex\"}",
-          "fullMetaSearch": false,
-          "includeNullMetadata": true,
-          "legendFormat": "{{peer_id}}",
-          "range": true,
-          "refId": "A",
-          "useBackend": false
-        }
-      ],
-      "title": "RTT p95",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "der4co44rndogd"
-      },
-      "description": "total number of wait time hits",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 16
-      },
-      "id": 10,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.0.2",
-      "targets": [
-        {
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "cqe_wait_time_hit",
-          "fullMetaSearch": false,
-          "includeNullMetadata": true,
-          "legendFormat": "total cqe_wait_time_hit",
-          "range": true,
-          "refId": "A",
-          "useBackend": false
-        }
-      ],
-      "title": "CQE wait time hit",
       "type": "timeseries"
     },
     {
@@ -838,6 +812,7 @@
         "type": "prometheus",
         "uid": "der4co44rndogd"
       },
+      "description": "total number of wait time hits",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -890,32 +865,7 @@
             ]
           }
         },
-        "overrides": [
-          {
-            "__systemRef": "hideSeriesFrom",
-            "matcher": {
-              "id": "byNames",
-              "options": {
-                "mode": "exclude",
-                "names": [
-                  "{__name__=\"graceful_disconnect\", instance=\"host.containers.internal:9000\", job=\"vortex\"}"
-                ],
-                "prefix": "All except:",
-                "readOnly": true
-              }
-            },
-            "properties": [
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": true
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -923,7 +873,7 @@
         "x": 0,
         "y": 24
       },
-      "id": 9,
+      "id": 10,
       "options": {
         "legend": {
           "calcs": [],
@@ -942,33 +892,16 @@
         {
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "graceful_disconnect",
+          "expr": "cqe_wait_time_hit_total",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
-          "legendFormat": "__auto",
+          "legendFormat": "total cqe_wait_time_hit",
           "range": true,
           "refId": "A",
           "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "der4co44rndogd"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "disconnects",
-          "fullMetaSearch": false,
-          "hide": false,
-          "includeNullMetadata": true,
-          "instant": false,
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "B",
-          "useBackend": false
         }
       ],
-      "title": "Graceful disconnects",
+      "title": "CQE wait time hit",
       "type": "timeseries"
     },
     {
@@ -1130,7 +1063,32 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "__systemRef": "hideSeriesFrom",
+            "matcher": {
+              "id": "byNames",
+              "options": {
+                "mode": "exclude",
+                "names": [
+                  "{__name__=\"graceful_disconnect\", instance=\"host.containers.internal:9000\", job=\"vortex\"}"
+                ],
+                "prefix": "All except:",
+                "readOnly": true
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -1138,7 +1096,7 @@
         "x": 0,
         "y": 32
       },
-      "id": 8,
+      "id": 9,
       "options": {
         "legend": {
           "calcs": [],
@@ -1155,40 +1113,35 @@
       "pluginVersion": "12.0.2",
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "peer_handshake_attempt",
-          "legendFormat": "attempts",
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "graceful_disconnect_total",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "legendFormat": "__auto",
           "range": true,
-          "refId": "A"
+          "refId": "A",
+          "useBackend": false
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "eek7csbvj1l34d"
+            "uid": "der4co44rndogd"
           },
-          "editorMode": "code",
-          "expr": "peer_handshake_timeout",
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "disconnects_total",
+          "fullMetaSearch": false,
           "hide": false,
+          "includeNullMetadata": true,
           "instant": false,
           "legendFormat": "__auto",
           "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "eek7csbvj1l34d"
-          },
-          "editorMode": "code",
-          "expr": "peer_handshake_success",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "success",
-          "range": true,
-          "refId": "C"
+          "refId": "B",
+          "useBackend": false
         }
       ],
-      "title": "Handshake success ratio",
+      "title": "Graceful disconnects",
       "type": "timeseries"
     },
     {
@@ -1253,8 +1206,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 40
+        "x": 12,
+        "y": 32
       },
       "id": 5,
       "options": {
@@ -1345,6 +1298,124 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "peer_handshake_attempt_total",
+          "legendFormat": "attempts",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "editorMode": "code",
+          "expr": "peer_handshake_timeout_total",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eek7csbvj1l34d"
+          },
+          "editorMode": "code",
+          "expr": "peer_handshake_success_total",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "success",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Handshake success ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "der4co44rndogd"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
             "lineStyle": {
               "fill": "solid"
             },
@@ -1401,8 +1472,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 48
+        "x": 12,
+        "y": 40
       },
       "id": 4,
       "options": {
@@ -1515,7 +1586,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 56
+        "y": 48
       },
       "id": 2,
       "options": {
@@ -1564,5 +1635,5 @@
   "timezone": "browser",
   "title": "Throughput",
   "uid": "eebvxemmfqh34d",
-  "version": 15
+  "version": 20
 }

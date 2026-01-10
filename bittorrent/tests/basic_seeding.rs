@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use heapless::spsc;
 use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
 
 use common::{
@@ -76,7 +77,7 @@ fn basic_seeding() {
     std::thread::scope(|s| {
         // Seeder thread
         let seeder_handle = s.spawn(move || {
-            let mut seeder_event_q = heapless::spsc::Queue::new();
+            let mut seeder_event_q: spsc::Queue<TorrentEvent, 512> = spsc::Queue::new();
             let (seeder_event_tx, mut seeder_event_rc) = seeder_event_q.split();
 
             let seeder_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -129,7 +130,7 @@ fn basic_seeding() {
 
         // Downloader thread
         let downloader_handle = s.spawn(move || {
-            let mut downloader_event_q = heapless::spsc::Queue::new();
+            let mut downloader_event_q: spsc::Queue<TorrentEvent, 512> = spsc::Queue::new();
             let (downloader_event_tx, mut downloader_event_rc) = downloader_event_q.split();
 
             let downloader_listener = TcpListener::bind("127.0.0.1:0").unwrap();

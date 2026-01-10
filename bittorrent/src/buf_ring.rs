@@ -116,10 +116,11 @@ impl BufferRing {
         // it is unregistered. The backing store is an AnonymousMmap which remains valid until it
         // is dropped which in this case, is when Self is dropped.
         let res = unsafe {
-            submitter.register_buf_ring(
+            submitter.register_buf_ring_with_flags(
                 self.ring_memory.addr.as_ptr() as _,
                 self.entries as u16,
                 self.bgid,
+                0,
             )
         };
 

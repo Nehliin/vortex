@@ -15,15 +15,13 @@ log = { workspace = true }
 env_logger = { workspace = true }
 vortex-bittorrent = { path = "../bittorrent", features = ["metrics"] }
 heapless = { workspace = true }
-tikv-jemallocator = "0.5"
-mainline = { git = "https://github.com/Nehliin/mainline.git", branch = "feature-gate", default-features = false, features = ["node"]}
+tikv-jemallocator = "0.6"
+mainline = { version = "6", default-features = false, features = ["node"]}
 metrics-exporter-prometheus = { workspace = true }
 clap = { version = "4.5.39", features = ["derive"] }
 crossbeam-channel = "0.5.15"
-# ratatui uses all default feature
-#crossterm = "0.29.0"
-ratatui = "0.29.0"
+ratatui = "0.30.0"
 human_bytes = "0.4.3"
 humantime = "2.2"
-throbber-widgets-tui = "0.8.0"
+throbber-widgets-tui = "0.10.0"
 
