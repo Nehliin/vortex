@@ -2,7 +2,6 @@
 multiple-versions = "deny"
 deny = [
     { name = "openssl" }, # just no
-    { name = "async-std" },  #  this is tokio based
     { name = "socket" }, # socket2 should be used 
 
     # deprecated/abandoned
@@ -17,9 +16,10 @@ skip = [
     { name = "thiserror-impl" },
     { name = "thiserror" },
     { name = "smallvec", version = "2.0.0-alpha.10" },
+    { name = "digest", version = "*" },
+    { name = "crypto-common", version = "*" },
+    { name = "block-buffer", version = "*" },
     { name = "itertools", version = "*" },
-    { name = "lru", version = "*" },
-    { name = "unicode-width", version = "*" },
 ]
 # Going to be removed regardless
 skip-tree = [{name = "tokio-uring"}, {name = "rand"}]
