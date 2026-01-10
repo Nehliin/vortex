@@ -9,7 +9,7 @@ use std::{
 
 use clap::{Args, Parser};
 use crossbeam_channel::{Receiver, Sender, bounded, select, tick};
-use heapless::{HistoryBuf, spsc::Queue, spsc::Consumer};
+use heapless::{HistoryBuf, spsc::Consumer, spsc::Queue};
 use human_bytes::human_bytes;
 use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;

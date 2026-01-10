@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use heapless::spsc;
 use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
 
 use common::{
@@ -117,7 +118,7 @@ fn chained_seeding() {
     std::thread::scope(|s| {
         // Seeder thread (Peer 1)
         let seeder_handle = s.spawn(move || {
-            let mut seeder_event_q = heapless::spsc::Queue::new();
+            let mut seeder_event_q: spsc::Queue<TorrentEvent, 512> = spsc::Queue::new();
             let (seeder_event_tx, mut seeder_event_rc) = seeder_event_q.split();
 
             let seeder_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -171,7 +172,7 @@ fn chained_seeding() {
 
         // Middle peer thread (Peer 2)
         let middle_handle = s.spawn(move || {
-            let mut middle_event_q = heapless::spsc::Queue::new();
+            let mut middle_event_q: spsc::Queue<TorrentEvent, 512> = spsc::Queue::new();
             let (middle_event_tx, mut middle_event_rc) = middle_event_q.split();
 
             let middle_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -239,7 +240,7 @@ fn chained_seeding() {
 
         // Leecher thread (Peer 3)
         let leecher_handle = s.spawn(move || {
-            let mut leecher_event_q = heapless::spsc::Queue::new();
+            let mut leecher_event_q: spsc::Queue<TorrentEvent, 512> = spsc::Queue::new();
             let (leecher_event_tx, mut leecher_event_rc) = leecher_event_q.split();
 
             let leecher_listener = TcpListener::bind("127.0.0.1:0").unwrap();
