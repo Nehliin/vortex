@@ -334,6 +334,7 @@ impl InitializedState {
                 // since otherwise it will be marked as completed and this is moot
                 self.piece_selector
                     .mark_not_downloaded(completed_piece.index);
+                self.piece_buffer_pool.return_buffer(completed_piece.buffer);
                 // deallocate piece peer peer
                 // TODO: disconnect
                 log::error!("Piece hash didn't match expected hash!");
