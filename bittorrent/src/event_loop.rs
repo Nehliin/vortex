@@ -51,6 +51,7 @@ pub enum EventType {
     Write {
         socket: Socket,
         addr: SockAddr,
+        expected_write: usize,
     },
     Recv {
         socket: Socket,
@@ -165,7 +166,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
         libc::ECONNRESET => {
             let event = events.remove(event_data_idx).unwrap();
             match event.typ {
-                EventType::Write { socket, addr } | EventType::Recv { socket, addr } => {
+                EventType::Write { socket, addr, .. } | EventType::Recv { socket, addr } => {
                     log::error!(
                         "[{}] Connection reset before handshake completed",
                         addr.as_socket().unwrap()
@@ -188,7 +189,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
         libc::EPIPE => {
             let event = events.remove(event_data_idx).unwrap();
             match event.typ {
-                EventType::Write { socket, addr } => {
+                EventType::Write { socket, addr, .. } => {
                     log::warn!(
                         "[{}] Attempted to write to closed connection",
                         addr.as_socket().unwrap()
@@ -243,7 +244,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                 let err_str = format!("Unhandled error code: {err}, event type: {event:?}");
                 match event.typ {
                     EventType::Connect { socket, addr }
-                    | EventType::Write { socket, addr }
+                    | EventType::Write { socket, addr, .. }
                     | EventType::Recv { socket, addr } => {
                         log::error!("[{}] {err_str}", addr.as_socket().unwrap());
                         io_utils::close_socket(sq, socket, None, events);
@@ -532,13 +533,26 @@ impl<'scope, 'state: 'scope> EventLoop {
                     }
                 }
 
-                for (conn_id, connection) in self.connections.iter_mut().filter(|(_, conn)| {
-                    // The connection must have something to send and also not have anything
-                    // already inflight since that risks interleaved writes.
-                    // TODO: Add metrics for stalled writes to there being inflight requests
-                    // already
-                    !conn.outgoing_msgs_buffer.is_empty() && !conn.network_write_inflight
-                }) {
+                for (conn_id, connection) in self
+                    .connections
+                    .iter_mut()
+                    .filter(|(_, conn)| {
+                        // The connection must have something to send
+                        !conn.outgoing_msgs_buffer.is_empty()
+                    })
+                    .filter(|(_, conn)| {
+                        // The connection may not have anything inflight, it can cause
+                        // interleaved writes under high load.
+                        #[cfg(feature = "metrics")]
+                        {
+                            if conn.network_write_inflight {
+                                let counter = metrics::counter!("network_write_blocked");
+                                counter.increment(1);
+                            }
+                        }
+                        !conn.network_write_inflight
+                    })
+                {
                     if let ConnectionState::Connected(socket) = &connection.connection_state {
                         let mut buffers = Vec::new();
                         let mut current_buffer = self.write_pool.get_buffer();
@@ -787,34 +801,47 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                 self.write_handshake(sq, *state.info_hash(), socket, addr);
             }
-            EventType::Write { socket, addr } => {
-                let fd = socket.as_raw_fd();
-                log::debug!(
-                    "Wrote to unestablsihed connection: {}",
-                    addr.as_socket().expect("must be AF_INET")
-                );
-                let old = self.events.remove(io_event.event_data_idx).unwrap();
-                debug_assert!(matches!(old.typ, EventType::Dummy));
-                let read_event_id = self.events.insert(EventData {
-                    typ: EventType::Recv { socket, addr },
-                    buffers: None,
-                });
-                // Write is only used for unestablished connections aka when doing handshake
-                #[cfg(feature = "metrics")]
-                {
-                    let handshake_counter = metrics::counter!("peer_handshake_attempt");
-                    handshake_counter.increment(1);
+            EventType::Write {
+                socket,
+                addr,
+                expected_write,
+            } => {
+                if ret as usize == expected_write {
+                    let fd = socket.as_raw_fd();
+                    log::debug!(
+                        "Wrote to unestablsihed connection: {}",
+                        addr.as_socket().expect("must be AF_INET")
+                    );
+                    let old = self.events.remove(io_event.event_data_idx).unwrap();
+                    debug_assert!(matches!(old.typ, EventType::Dummy));
+                    let read_event_id = self.events.insert(EventData {
+                        typ: EventType::Recv { socket, addr },
+                        buffers: None,
+                    });
+                    // Write is only used for unestablished connections aka when doing handshake
+                    #[cfg(feature = "metrics")]
+                    {
+                        let handshake_counter = metrics::counter!("peer_handshake_attempt");
+                        handshake_counter.increment(1);
+                    }
+                    // Multishot isn't used here to simplify error handling
+                    // when the read is invalid or otherwise doesn't lead to
+                    // a full connection which does have graceful shutdown mechanisms
+                    io_utils::recv(
+                        sq,
+                        read_event_id,
+                        fd,
+                        self.read_ring.bgid(),
+                        &HANDSHAKE_TIMEOUT,
+                    );
+                } else {
+                    // We don't deal with partial writes for handshakes, it should never happen
+                    log::error!(
+                        "Failed to write to unestablished connection: {}",
+                        addr.as_socket().expect("must be AF_INET")
+                    );
+                    io_utils::close_socket(sq, socket, None, &mut self.events);
                 }
-                // Multishot isn't used here to simplify error handling
-                // when the read is invalid or otherwise doesn't lead to
-                // a full connection which does have graceful shutdown mechanisms
-                io_utils::recv(
-                    sq,
-                    read_event_id,
-                    fd,
-                    self.read_ring.bgid(),
-                    &HANDSHAKE_TIMEOUT,
-                );
             }
             EventType::DiskWrite { data, piece_idx } => {
                 self.events.remove(io_event.event_data_idx);
@@ -872,8 +899,8 @@ impl<'scope, 'state: 'scope> EventLoop {
                 let connection = &mut self.connections[connection_idx];
                 connection.on_network_write(bytes_written);
                 if bytes_written < expected_written {
-                    log::error!(
-                        "[PeerId: {}] Partial write {bytes_written}, expected {expected_written}",
+                    log::warn!(
+                        "[PeerId: {}] Partial write {bytes_written}, expected {expected_written}, TCP send buffer is most likely full",
                         connection.peer_id,
                     );
                     if let ConnectionState::Connected(socket) = &connection.connection_state {

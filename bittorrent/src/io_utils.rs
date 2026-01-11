@@ -202,7 +202,11 @@ pub fn write<Q: SubmissionQueue>(
     let buffer_ptr = buffer_slice.as_ptr();
     let buffer_len = buffer_slice.len();
     let write_event_id = events.insert(EventData {
-        typ: EventType::Write { socket, addr },
+        typ: EventType::Write {
+            socket,
+            addr,
+            expected_write: buffer_len,
+        },
         buffers: Some(vec![buffer]),
     });
     let write_op = opcode::Write::new(types::Fd(fd), buffer_ptr, buffer_len as u32)
