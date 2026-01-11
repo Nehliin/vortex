@@ -237,6 +237,22 @@ pub struct PeerConnection {
     pub accept_fast_pieces: Vec<i32>,
     // TODO improve
     pub pre_meta_have_msgs: Vec<PeerMessage>,
+    // Is there an inflight network write operation?
+    // If so we need to wait for it to complete before
+    // starting a new one otherwise we risk interleaved writes
+    // when the TCP send buffer is full.
+    // Imagine the following scenario:
+    // 1. Message A is encoded into buffer A
+    // 2. Message B is encoded into buffer B
+    // 3. Both are sent as a single vectored write to the kernel.
+    // 4. Message C is encoded into buffer C
+    // 5. C is also sent to the kernel
+    // 6. #3 completes but only a portion of A+B has been written
+    // due to the send buffer being full.
+    // 7. C completes normally <- The receiver will see corrupted data of the following form:
+    // Messag A + Partial B + C (which gets intepreted as part of B due to length prefixed
+    // messages)
+    pub network_write_inflight: bool,
 }
 
 impl<'scope, 'f_store: 'scope> PeerConnection {
@@ -280,6 +296,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             allowed_fast_pieces: Default::default(),
             accept_fast_pieces: Default::default(),
             pre_meta_have_msgs: Default::default(),
+            network_write_inflight: false,
         }
     }
 

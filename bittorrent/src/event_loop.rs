@@ -56,8 +56,10 @@ pub enum EventType {
         socket: Socket,
         addr: SockAddr,
     },
-    ConnectedWrite {
+    ConnectedWriteV {
         connection_idx: ConnectionId,
+        // References to the buffers used in the vectored writes
+        iovecs: Vec<libc::iovec>,
     },
     ConnectedRecv {
         connection_idx: ConnectionId,
@@ -94,7 +96,7 @@ new_key_type! {
 #[derive(Debug)]
 pub struct EventData {
     pub typ: EventType,
-    pub buffer: Option<Buffer>,
+    pub buffers: Option<Vec<Buffer>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -172,7 +174,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                     io_utils::close_socket(sq, socket, None, events);
                 }
                 EventType::ConnectedRecv { connection_idx }
-                | EventType::ConnectedWrite { connection_idx } => {
+                | EventType::ConnectedWriteV { connection_idx, .. } => {
                     // Don't worry about this if we've already removed the connection
                     if let Some(connection) = connections.get_mut(connection_idx) {
                         log::error!("Peer [{}] Connection reset", connection.peer_id);
@@ -194,7 +196,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                     assert!(pending_connections.remove(&addr));
                     io_utils::close_socket(sq, socket, None, events);
                 }
-                EventType::ConnectedWrite { connection_idx } => {
+                EventType::ConnectedWriteV { connection_idx, .. } => {
                     if let Some(connection) = connections.get_mut(connection_idx) {
                         log::error!(
                             "Peer [{}] EPIPE received when writing to connection",
@@ -246,7 +248,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         log::error!("[{}] {err_str}", addr.as_socket().unwrap());
                         io_utils::close_socket(sq, socket, None, events);
                     }
-                    EventType::ConnectedWrite { connection_idx }
+                    EventType::ConnectedWriteV { connection_idx, .. }
                     | EventType::ConnectedRecv { connection_idx } => {
                         if let Some(connection) = connections.get_mut(connection_idx) {
                             log::error!("Peer [{}] unhandled error: {err}", connection.peer_id);
@@ -479,20 +481,25 @@ impl<'scope, 'state: 'scope> EventLoop {
                             io_event.event_data_idx,
                             event
                         );
-                        // time to return any potential write buffers
-                        if let Some(buffer) = event.buffer.take() {
-                            // SAFETY: All Buffers are dropped when the write operations
-                            // are sent to io_uring
-                            self.write_pool.return_buffer(buffer);
-                        }
+                        // Buffers must be provided to the event handler here
+                        // so that partial writes can reschedule writes with
+                        // the same buffer
+                        let mut maybe_buffers = event.buffers.take();
                         if let Err(err) = self.event_handler(
                             &mut sq,
                             io_event,
+                            &mut maybe_buffers,
                             &mut state_ref,
                             &mut event_tx,
                             scope,
                         ) {
                             log::error!("Error handling event: {err}");
+                        }
+                        // Now it's time to return any potential write buffers
+                        if let Some(buffers) = maybe_buffers {
+                            for buffer in buffers {
+                                self.write_pool.return_buffer(buffer);
+                            }
                         }
                     } else {
                         let err = io_event.result.unwrap_err();
@@ -525,41 +532,40 @@ impl<'scope, 'state: 'scope> EventLoop {
                     }
                 }
 
-                for (conn_id, connection) in self
-                    .connections
-                    .iter_mut()
-                    .filter(|(_, conn)| !conn.outgoing_msgs_buffer.is_empty())
-                {
+                for (conn_id, connection) in self.connections.iter_mut().filter(|(_, conn)| {
+                    // The connection must have something to send and also not have anything
+                    // already inflight since that risks interleaved writes.
+                    // TODO: Add metrics for stalled writes to there being inflight requests
+                    // already
+                    !conn.outgoing_msgs_buffer.is_empty() && !conn.network_write_inflight
+                }) {
                     if let ConnectionState::Connected(socket) = &connection.connection_state {
-                        let mut buffer = self.write_pool.get_buffer();
+                        let mut buffers = Vec::new();
+                        let mut current_buffer = self.write_pool.get_buffer();
                         let conn_fd = socket.as_raw_fd();
                         let mut ordered = false;
                         for msg in connection.outgoing_msgs_buffer.iter() {
                             let size = msg.message.encoded_size();
                             // If any massage is ordered make the whole socket write ordered
                             ordered |= msg.ordered;
-                            if buffer.remaining_mut() >= size {
-                                msg.message.encode(&mut buffer);
+                            if current_buffer.remaining_mut() >= size {
+                                msg.message.encode(&mut current_buffer);
                             } else {
-                                // Buffer is full, flush this one and fetch a new one
-                                io_utils::write_to_connection(
-                                    conn_id,
-                                    conn_fd,
-                                    &mut self.events,
-                                    &mut sq,
-                                    buffer,
-                                    ordered,
-                                );
-                                buffer = self.write_pool.get_buffer();
-                                msg.message.encode(&mut buffer);
+                                // Buffer is full, get a new one
+                                buffers.push(current_buffer);
+                                current_buffer = self.write_pool.get_buffer();
+                                msg.message.encode(&mut current_buffer);
                             }
                         }
-                        io_utils::write_to_connection(
+                        buffers.push(current_buffer);
+                        connection.network_write_inflight = true;
+                        io_utils::writev_to_connection(
                             conn_id,
                             conn_fd,
                             &mut self.events,
                             &mut sq,
-                            buffer,
+                            buffers,
+                            0,
                             ordered,
                         );
                     }
@@ -582,7 +588,7 @@ impl<'scope, 'state: 'scope> EventLoop {
     fn setup_listener(&mut self, listener: TcpListener, ring: &mut IoUring) -> u16 {
         let event_idx: EventId = self.events.insert(EventData {
             typ: EventType::Accept,
-            buffer: None,
+            buffers: None,
         });
         let port = listener.local_addr().unwrap().port();
         let accept_op = opcode::AcceptMulti::new(types::Fd(listener.into_raw_fd()))
@@ -678,7 +684,7 @@ impl<'scope, 'state: 'scope> EventLoop {
 
         let event_idx = self.events.insert(EventData {
             typ: EventType::Connect { socket, addr },
-            buffer: None,
+            buffers: None,
         });
 
         let EventType::Connect { socket, addr } = &self.events[event_idx].typ else {
@@ -723,6 +729,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
         io_event: RawIoEvent,
+        write_buffers: &mut Option<Vec<Buffer>>,
         state: &mut StateRef<'state>,
         event_tx: &mut Producer<TorrentEvent>,
         scope: &Scope<'scope>,
@@ -790,7 +797,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 debug_assert!(matches!(old.typ, EventType::Dummy));
                 let read_event_id = self.events.insert(EventData {
                     typ: EventType::Recv { socket, addr },
-                    buffer: None,
+                    buffers: None,
                 });
                 // Write is only used for unestablished connections aka when doing handshake
                 #[cfg(feature = "metrics")]
@@ -854,9 +861,43 @@ impl<'scope, 'state: 'scope> EventLoop {
                 log::trace!("Cancel event completed");
                 self.events.remove(io_event.event_data_idx);
             }
-            EventType::ConnectedWrite { connection_idx: _ } => {
+            EventType::ConnectedWriteV {
+                connection_idx,
+                iovecs,
+            } => {
                 // TODO: add to metrics for writes?
                 self.events.remove(io_event.event_data_idx);
+                let expected_written = iovecs.iter().map(|io| io.iov_len).sum();
+                let bytes_written = ret as usize;
+                let connection = &mut self.connections[connection_idx];
+                connection.on_network_write(bytes_written);
+                if bytes_written < expected_written {
+                    log::error!(
+                        "[PeerId: {}] Partial write {bytes_written}, expected {expected_written}",
+                        connection.peer_id,
+                    );
+                    if let ConnectionState::Connected(socket) = &connection.connection_state {
+                        let buffer = write_buffers.take().unwrap();
+                        // Reschedule a write for the remaining data
+                        io_utils::writev_to_connection(
+                            connection.conn_id,
+                            socket.as_raw_fd(),
+                            &mut self.events,
+                            sq,
+                            buffer,
+                            // Offset from the already written data
+                            bytes_written,
+                            false,
+                        );
+                    } else {
+                        log::warn!(
+                            "[PeerId: {}] peer not connected when scheduling new write after a partial write",
+                            connection.peer_id,
+                        );
+                    }
+                } else {
+                    connection.network_write_inflight = false;
+                }
             }
             EventType::Recv { socket, addr } => {
                 let fd = socket.as_raw_fd();
@@ -911,7 +952,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                     typ: EventType::ConnectedRecv {
                         connection_idx: conn_id,
                     },
-                    buffer: None,
+                    buffers: None,
                 });
 
                 // The initial Recv might have contained more data
@@ -1045,7 +1086,7 @@ fn report_tick_metrics(
     state: &mut StateRef<'_>,
     peer_metrics: Vec<PeerMetrics>,
     _pending_connections: &HashSet<SockAddr>,
-    num_connections: usize,
+    _num_connections: usize,
     event_tx: &mut Producer<TorrentEvent>,
 ) {
     let mut pieces_completed = 0;
@@ -1071,7 +1112,7 @@ fn report_tick_metrics(
     #[cfg(feature = "metrics")]
     {
         let gauge = metrics::gauge!("num_connections");
-        gauge.set(num_connections as u32);
+        gauge.set(_num_connections as u32);
         let gauge = metrics::gauge!("num_pending_connections");
         gauge.set(_pending_connections.len() as u32);
     }
