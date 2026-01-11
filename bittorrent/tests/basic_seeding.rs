@@ -18,6 +18,8 @@ use common::{
     verify_downloaded_files,
 };
 
+const TIMEOUT: u64 = 40;
+
 #[test]
 fn basic_seeding() {
     init_test_environment();
@@ -41,9 +43,21 @@ fn basic_seeding() {
 
     // Create seeder directory with test files and build torrent metadata
     let (seeder_dir, metadata) = create_test_torrent(&test_files, &torrent_name, 16384);
+    let tmp_dir_path = seeder_dir.path().clone();
 
     // Create downloader directory (empty initially)
     let downloader_dir = TempDir::new(&format!("{}_downloader", torrent_name));
+    let downloader_path = downloader_dir.path().clone();
+
+    // TODO: Fix this in a better way
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // hacky clean up if a panic happens
+        std::fs::remove_dir_all(&tmp_dir_path).unwrap();
+        std::fs::remove_dir_all(&downloader_path).unwrap();
+        prev_hook(info);
+        std::process::abort();
+    }));
 
     // Set up seeder state with completed files
     let seeder_id = PeerId::generate();
@@ -74,58 +88,56 @@ fn basic_seeding() {
     let seeder_shutting_down = Arc::new(AtomicBool::new(false));
     let seeder_shutting_down_clone = seeder_shutting_down.clone();
 
+    let mut seeder_event_q: spsc::Queue<TorrentEvent, 512> = spsc::Queue::new();
+    let (seeder_event_tx, mut seeder_event_rc) = seeder_event_q.split();
+
     std::thread::scope(|s| {
+        s.spawn(move || {
+            let seeder_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            seeder_torrent
+                .start(seeder_event_tx, seeder_command_rc, seeder_listener)
+                .unwrap();
+        });
+
         // Seeder thread
         let seeder_handle = s.spawn(move || {
-            let mut seeder_event_q: spsc::Queue<TorrentEvent, 512> = spsc::Queue::new();
-            let (seeder_event_tx, mut seeder_event_rc) = seeder_event_q.split();
+            let mut saw_upload = false;
 
-            let seeder_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            std::thread::scope(|seeder_scope| {
-                seeder_scope.spawn(move || {
-                    seeder_torrent
-                        .start(seeder_event_tx, seeder_command_rc, seeder_listener)
-                        .unwrap();
-                });
+            loop {
+                if test_time.elapsed() >= Duration::from_secs(TIMEOUT) {
+                    panic!("Test timeout - seeding took too long");
+                }
 
-                let mut saw_upload = false;
-
-                loop {
-                    if test_time.elapsed() >= Duration::from_secs(60) {
-                        panic!("Test timeout - seeding took too long");
-                    }
-
-                    while let Some(event) = seeder_event_rc.dequeue() {
-                        match event {
-                            TorrentEvent::TorrentMetrics { peer_metrics, .. } => {
-                                for metrics in peer_metrics {
-                                    if metrics.upload_throughput > 0 {
-                                        log::info!(
-                                            "Seeder: Uploading at {} bytes/s",
-                                            metrics.upload_throughput
-                                        );
-                                        saw_upload = true;
-                                    }
+                while let Some(event) = seeder_event_rc.dequeue() {
+                    match event {
+                        TorrentEvent::TorrentMetrics { peer_metrics, .. } => {
+                            for metrics in peer_metrics {
+                                if metrics.upload_throughput > 0 {
+                                    log::info!(
+                                        "Seeder: Uploading at {} bytes/s",
+                                        metrics.upload_throughput
+                                    );
+                                    saw_upload = true;
                                 }
                             }
-                            TorrentEvent::ListenerStarted { port } => {
-                                log::info!("Seeder listener started on port {}", port);
-                                downloader_command_tx_clone
-                                    .send(Command::ConnectToPeers(vec![
-                                        format!("127.0.0.1:{}", port).parse().unwrap(),
-                                    ]))
-                                    .unwrap();
-                            }
-                            TorrentEvent::TorrentComplete | TorrentEvent::MetadataComplete(_) => {}
                         }
-                    }
-
-                    if seeder_shutting_down.load(Ordering::Acquire) {
-                        break;
+                        TorrentEvent::ListenerStarted { port } => {
+                            log::info!("Seeder listener started on port {}", port);
+                            downloader_command_tx_clone
+                                .send(Command::ConnectToPeers(vec![
+                                    format!("127.0.0.1:{}", port).parse().unwrap(),
+                                ]))
+                                .unwrap();
+                        }
+                        TorrentEvent::TorrentComplete | TorrentEvent::MetadataComplete(_) => {}
                     }
                 }
-                saw_upload
-            })
+
+                if seeder_shutting_down.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+            saw_upload
         });
 
         // Downloader thread
@@ -147,7 +159,7 @@ fn basic_seeding() {
                 });
 
                 loop {
-                    if test_time.elapsed() >= Duration::from_secs(40) {
+                    if test_time.elapsed() >= Duration::from_secs(TIMEOUT) {
                         panic!("Test timeout - download took too long");
                     }
 

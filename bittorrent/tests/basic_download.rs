@@ -4,21 +4,14 @@ use std::{
 };
 
 use heapless::spsc;
-use metrics_exporter_prometheus::PrometheusBuilder;
 use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
 
-use crate::common::TempDir;
+use crate::common::{TempDir, init_test_environment};
 mod common;
 
 #[test]
 fn basic_seeded_download() {
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Trace)
-        .init();
-    let builder = PrometheusBuilder::new();
-    if let Err(err) = builder.install() {
-        log::error!("failed installing PrometheusBuilder: {err}");
-    }
+    init_test_environment();
 
     let tmp_dir = TempDir::new("seeded_download_test");
     let tmp_dir_path = tmp_dir.path().clone();
