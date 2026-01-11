@@ -376,11 +376,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     pub fn send_piece(&mut self, index: i32, offset: i32, data: Bytes, ordered: bool) {
-        self.network_stats.upload_throughput += data.len() as u64;
-        if !self.is_choking {
-            self.network_stats.upload_since_unchoked += data.len() as u64;
-            self.network_stats.uploaded_in_last_round += data.len() as u64;
-        }
         self.outgoing_msgs_buffer.push(OutgoingMsg {
             message: PeerMessage::Piece {
                 index,
@@ -561,6 +556,15 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             upload_throughput: self.network_stats.prev_upload_throughput,
             endgame: self.endgame,
             snubbed: self.snubbed,
+        }
+    }
+
+    /// Called when a network write has occurred
+    pub fn on_network_write(&mut self, bytes_written: usize) {
+        self.network_stats.upload_throughput += bytes_written as u64;
+        if !self.is_choking {
+            self.network_stats.upload_since_unchoked += bytes_written as u64;
+            self.network_stats.uploaded_in_last_round += bytes_written as u64;
         }
     }
 
