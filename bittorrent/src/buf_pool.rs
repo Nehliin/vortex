@@ -61,6 +61,9 @@ unsafe impl BufMut for Buffer {
     }
 
     unsafe fn advance_mut(&mut self, cnt: usize) {
+        if cnt > self.remaining_mut() {
+            panic!("Not enugh space remaining in buffer");
+        }
         self.cursor += cnt
     }
 
