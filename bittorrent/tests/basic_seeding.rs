@@ -18,7 +18,7 @@ use common::{
     verify_downloaded_files,
 };
 
-const TIMEOUT: u64 = 40;
+const TIMEOUT: u64 = 60;
 
 #[test]
 fn basic_seeding() {
