@@ -18,8 +18,6 @@ use common::{
     verify_downloaded_files,
 };
 
-
-
 const TIMEOUT: u64 = 40;
 /// Test that verifies a 3-peer chain: Seeder → Middle → Leecher
 ///
