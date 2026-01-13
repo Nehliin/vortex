@@ -61,6 +61,8 @@ pub enum EventType {
         connection_idx: ConnectionId,
         // References to the buffers used in the vectored writes
         iovecs: Vec<libc::iovec>,
+        // Cumulative offset into the buffers (for partial write retries)
+        io_vec_offset: usize,
     },
     ConnectedRecv {
         connection_idx: ConnectionId,
@@ -891,6 +893,7 @@ impl<'scope, 'state: 'scope> EventLoop {
             EventType::ConnectedWriteV {
                 connection_idx,
                 iovecs,
+                io_vec_offset,
             } => {
                 // TODO: add to metrics for writes?
                 self.events.remove(io_event.event_data_idx);
@@ -905,15 +908,15 @@ impl<'scope, 'state: 'scope> EventLoop {
                     );
                     if let ConnectionState::Connected(socket) = &connection.connection_state {
                         let buffer = write_buffers.take().unwrap();
-                        // Reschedule a write for the remaining data
+                        // Reschedule a write for the remaining data using cumulative offset
+                        let new_offset = io_vec_offset + bytes_written;
                         io_utils::writev_to_connection(
                             connection.conn_id,
                             socket.as_raw_fd(),
                             &mut self.events,
                             sq,
                             buffer,
-                            // Offset from the already written data
-                            bytes_written,
+                            new_offset,
                             false,
                         );
                     } else {

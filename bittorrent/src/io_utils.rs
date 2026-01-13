@@ -133,7 +133,7 @@ pub fn writev_to_connection<Q: SubmissionQueue>(
     ordered: bool,
 ) {
     debug_assert!(io_vec_offset <= buffers.iter().map(|buf| buf.filled_slice().len()).sum());
-    let mut io_vec_offset = io_vec_offset as i64;
+    let mut remaining_offset = io_vec_offset as i64;
     let iovecs: Vec<libc::iovec> = buffers
         .iter()
         .map(|buf| buf.filled_slice())
@@ -141,11 +141,11 @@ pub fn writev_to_connection<Q: SubmissionQueue>(
             // Skip buffers that end before the offset
             // if the offset becomes negative we know the offset is inside of
             // the given buffer
-            io_vec_offset -= buf.len() as i64;
-            if io_vec_offset < 0 {
+            remaining_offset -= buf.len() as i64;
+            if remaining_offset < 0 {
                 // How much of the buffer wasn't skipped = remaining data in
                 // the buffer
-                let relevant_buffer_length = (-io_vec_offset) as usize;
+                let relevant_buffer_length = (-remaining_offset) as usize;
                 // Gives where in the buffer the write should start from
                 let buffer_offset = buf.len() - relevant_buffer_length;
                 let io_vec = libc::iovec {
@@ -153,7 +153,7 @@ pub fn writev_to_connection<Q: SubmissionQueue>(
                     iov_len: relevant_buffer_length,
                 };
                 // Reset so all other buffers are fully included
-                io_vec_offset = 0;
+                remaining_offset = 0;
                 Some(io_vec)
             } else {
                 None
@@ -167,6 +167,7 @@ pub fn writev_to_connection<Q: SubmissionQueue>(
         typ: EventType::ConnectedWriteV {
             connection_idx: conn_id,
             iovecs,
+            io_vec_offset,
         },
         buffers: Some(buffers),
     });
