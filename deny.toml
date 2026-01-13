@@ -21,8 +21,6 @@ skip = [
     { name = "block-buffer", version = "*" },
     { name = "itertools", version = "*" },
 ]
-# Going to be removed regardless
-skip-tree = [{name = "tokio-uring"}, {name = "rand"}]
 
 [advisories]
 unmaintained = "workspace"
