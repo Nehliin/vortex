@@ -19,17 +19,6 @@ bytes = "1.9"
 [workspace]
 members = ["."]
 
-#[[bin]]
-#name = "reorder_buffer_insert"
-#path = "fuzz_targets/reorder_buffer_insert.rs"
-#test = false
-#doc = false
-
-#[[bin]]
-#name = "reorder_buffer_remove"
-#path = "fuzz_targets/reorder_buffer_remove.rs"
-#test = false
-#doc = false
 
 [[bin]]
 name = "parse_peer_message"
