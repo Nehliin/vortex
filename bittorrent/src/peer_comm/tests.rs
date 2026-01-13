@@ -2773,7 +2773,7 @@ fn metadata_download_multiple_pieces() {
 }
 
 #[test]
-fn send_piece_updates_upload_throughput() {
+fn updates_upload_throughput() {
     let mut download_state = setup_seeding_test();
 
     rayon::in_place_scope(|_scope| {
@@ -2788,9 +2788,7 @@ fn send_piece_updates_upload_throughput() {
         assert_eq!(connections[key].network_stats.upload_throughput, 0);
         assert_eq!(connections[key].network_stats.prev_upload_throughput, 0);
 
-        // Send a piece directly
-        let data = bytes::Bytes::from(vec![0u8; SUBPIECE_SIZE as usize]);
-        connections[key].send_piece(0, 0, data, false);
+        connections[key].on_network_write(SUBPIECE_SIZE as usize);
 
         // After sending the piece, upload throughput should be tracked
         assert_eq!(
@@ -2798,9 +2796,7 @@ fn send_piece_updates_upload_throughput() {
             SUBPIECE_SIZE as u64
         );
 
-        // Send another piece
-        let data = bytes::Bytes::from(vec![0u8; SUBPIECE_SIZE as usize]);
-        connections[key].send_piece(0, SUBPIECE_SIZE, data, false);
+        connections[key].on_network_write(SUBPIECE_SIZE as usize);
 
         // Upload throughput should accumulate
         assert_eq!(

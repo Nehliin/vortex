@@ -18,7 +18,7 @@ use common::{
     verify_downloaded_files,
 };
 
-const TIMEOUT: u64 = 40;
+const TIMEOUT: u64 = 60;
 
 #[test]
 fn basic_seeding() {
@@ -26,12 +26,11 @@ fn basic_seeding() {
 
     // Generate test files
     let test_files: HashMap<String, Vec<u8>> = [
-        ("file1.txt".to_string(), b"Hello, World!".repeat(100)),
         (
             "file2.txt".to_string(),
             b"BitTorrent Test Data!".repeat(200),
         ),
-        ("subdir/file3.txt".to_string(), vec![42u8; 16384]),
+        ("subdir/file3.txt".to_string(), vec![42u8; 16384 * 5_000]),
     ]
     .into_iter()
     .collect();

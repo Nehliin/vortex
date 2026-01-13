@@ -121,30 +121,69 @@ impl<Q: SubmissionQueue> BackloggedSubmissionQueue<Q> {
     }
 }
 
-pub fn write_to_connection<Q: SubmissionQueue>(
+/// Writes the buffers from buffer_offset -> buffer end to the connection
+pub fn writev_to_connection<Q: SubmissionQueue>(
     conn_id: ConnectionId,
     fd: RawFd,
     events: &mut SlotMap<EventId, EventData>,
     sq: &mut BackloggedSubmissionQueue<Q>,
-    buffer: Buffer,
+    buffers: Vec<Buffer>,
+    // Offset in the buffer the write should start from
+    io_vec_offset: usize,
     ordered: bool,
 ) {
-    let buffer_slice = buffer.filled_slice();
-    assert!(!buffer_slice.is_empty());
-    let buffer_ptr = buffer_slice.as_ptr();
-    let buffer_len = buffer_slice.len();
+    debug_assert!(io_vec_offset <= buffers.iter().map(|buf| buf.filled_slice().len()).sum());
+    let mut remaining_offset = io_vec_offset as i64;
+    let iovecs: Vec<libc::iovec> = buffers
+        .iter()
+        .map(|buf| buf.filled_slice())
+        .filter_map(|buf| {
+            // Skip buffers that end before the offset
+            // if the offset becomes negative we know the offset is inside of
+            // the given buffer
+            remaining_offset -= buf.len() as i64;
+            if remaining_offset < 0 {
+                // How much of the buffer wasn't skipped = remaining data in
+                // the buffer
+                let relevant_buffer_length = (-remaining_offset) as usize;
+                // Gives where in the buffer the write should start from
+                let buffer_offset = buf.len() - relevant_buffer_length;
+                let io_vec = libc::iovec {
+                    iov_base: unsafe { buf.as_ptr().add(buffer_offset) as *mut _ },
+                    iov_len: relevant_buffer_length,
+                };
+                // Reset so all other buffers are fully included
+                remaining_offset = 0;
+                Some(io_vec)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let iovecs_len = iovecs.len();
+
     let event_id = events.insert(EventData {
-        typ: EventType::ConnectedWrite {
+        typ: EventType::ConnectedWriteV {
             connection_idx: conn_id,
+            iovecs,
+            io_vec_offset,
         },
-        buffer: Some(buffer),
+        buffers: Some(buffers),
     });
+
+    // Need a stable pointer to the iovec structure, that means
+    // the pointer after it's inserted in the event structure
+    let stable_iovec_ptr = match &events[event_id].typ {
+        EventType::ConnectedWriteV { iovecs, .. } => iovecs.as_ptr(),
+        _ => unreachable!(),
+    };
     let flags = if ordered {
         io_uring::squeue::Flags::IO_LINK
     } else {
         io_uring::squeue::Flags::empty()
     };
-    let write_op = opcode::Write::new(types::Fd(fd), buffer_ptr, buffer_len as u32)
+    let write_op = opcode::Writev::new(types::Fd(fd), stable_iovec_ptr, iovecs_len as u32)
         .build()
         .user_data(event_id.data().as_ffi())
         .flags(flags);
@@ -164,8 +203,12 @@ pub fn write<Q: SubmissionQueue>(
     let buffer_ptr = buffer_slice.as_ptr();
     let buffer_len = buffer_slice.len();
     let write_event_id = events.insert(EventData {
-        typ: EventType::Write { socket, addr },
-        buffer: Some(buffer),
+        typ: EventType::Write {
+            socket,
+            addr,
+            expected_write: buffer_len,
+        },
+        buffers: Some(vec![buffer]),
     });
     let write_op = opcode::Write::new(types::Fd(fd), buffer_ptr, buffer_len as u32)
         .build()
@@ -194,7 +237,7 @@ pub fn disk_operation<Q: SubmissionQueue>(
                     data: disk_op.buffer,
                     piece_idx: disk_op.piece_idx,
                 },
-                buffer: None,
+                buffers: None,
             });
             opcode::Write::new(types::Fd(disk_op.fd), write_ptr, write_len as u32)
                 .offset(disk_op.file_offset as u64)
@@ -221,7 +264,7 @@ pub fn disk_operation<Q: SubmissionQueue>(
                     piece_offset,
                 },
                 // TODO: consider using this instead
-                buffer: None,
+                buffers: None,
             });
             opcode::Read::new(types::Fd(disk_op.fd), read_ptr as *mut _, read_len as u32)
                 .offset(disk_op.file_offset as u64)
@@ -253,7 +296,7 @@ pub fn close_socket<Q: SubmissionQueue>(
     let fd = socket.into_raw_fd();
     let event_id = events.insert(EventData {
         typ: EventType::Cancel,
-        buffer: None,
+        buffers: None,
     });
 
     // If more events are received in the same cqe loop there might still linger events
@@ -266,7 +309,7 @@ pub fn close_socket<Q: SubmissionQueue>(
         typ: EventType::Close {
             maybe_connection_idx,
         },
-        buffer: None,
+        buffers: None,
     });
     let close_op = opcode::Close::new(types::Fd(fd))
         .build()
