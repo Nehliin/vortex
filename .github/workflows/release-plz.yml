@@ -1,0 +1,33 @@
+name: Release-plz
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'Nehliin' }}
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - &checkout
+        name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - &install-rust
+        name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
