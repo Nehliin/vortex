@@ -347,7 +347,7 @@ mod tests {
 
     fn create_buffer_with_data(data: &[u8]) -> Buffer {
         use crate::buf_pool::BufferPool;
-        let mut pool = BufferPool::new(1, data.len());
+        let mut pool = BufferPool::new("test", 1, data.len());
         let mut buffer = pool.get_buffer();
         buffer.raw_mut_slice()[..data.len()].copy_from_slice(data);
         unsafe { buffer.advance_mut(data.len()) };

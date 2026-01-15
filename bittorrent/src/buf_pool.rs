@@ -77,6 +77,7 @@ unsafe impl BufMut for Buffer {
 }
 
 pub struct BufferPool {
+    name: &'static str,
     free: BitVec,
     buffer_size: usize,
     alive: Arc<AtomicBool>,
@@ -84,7 +85,7 @@ pub struct BufferPool {
 }
 
 impl BufferPool {
-    pub fn new(entries: usize, buf_size: usize) -> Self {
+    pub fn new(name: &'static str, entries: usize, buf_size: usize) -> Self {
         let mut pool = Vec::with_capacity(entries);
         for _ in 0..entries {
             pool.push(Some(
@@ -92,6 +93,7 @@ impl BufferPool {
             ));
         }
         Self {
+            name,
             free: BitVec::repeat(true, entries),
             buffer_size: buf_size,
             pool,
@@ -143,7 +145,7 @@ impl BufferPool {
         #[cfg(feature = "metrics")]
         {
             use metrics::histogram;
-            let histogram = histogram!("buffer_lifetime_ms");
+            let histogram = histogram!("buffer_lifetime_ms", "pool_name" => self.name);
             histogram.record(buffer.time_taken.elapsed().as_millis() as u32);
         }
         self.free.set(buffer.index, true);
@@ -164,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_buffer_index() {
-        let mut pool = BufferPool::new(2, 1024);
+        let mut pool = BufferPool::new("test", 2, 1024);
         let buffer = pool.get_buffer();
         let index = buffer.index;
 
@@ -176,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_buffer_as_slice_initially_empty() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
         let buffer = pool.get_buffer();
 
         // Initial slice should be empty (cursor at 0)
@@ -187,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_buffer_remaining_mut() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
         let buffer = pool.get_buffer();
 
         // Should have full capacity available
@@ -198,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_buffer_write_and_advance() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
         let mut buffer = pool.get_buffer();
 
         // Write 100 bytes
@@ -213,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_buffer_multiple_writes() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
         let mut buffer = pool.get_buffer();
 
         // Write first 50 bytes
@@ -232,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_buffer_writes_persist() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
         let mut buffer = pool.get_buffer();
 
         // Write specific data
@@ -248,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_buffer_exact_capacity() {
-        let mut pool = BufferPool::new(1, 100);
+        let mut pool = BufferPool::new("test", 1, 100);
         let mut buffer = pool.get_buffer();
 
         // Write exact buffer size
@@ -261,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_buffer_chunk_mut() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
         let mut buffer = pool.get_buffer();
 
         // Write some data first
@@ -276,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_buffer_pool_reuse() {
-        let mut pool = BufferPool::new(2, 1024);
+        let mut pool = BufferPool::new("test", 2, 1024);
 
         // Get first buffer
         let buffer1 = pool.get_buffer();
@@ -294,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_buffer_pool_multiple_buffers() {
-        let mut pool = BufferPool::new(3, 512);
+        let mut pool = BufferPool::new("test", 3, 512);
 
         // Get buffers one at a time and collect their indices
         let buf1 = pool.get_buffer();
@@ -316,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_buffer_pool_pre_allocation() {
-        let mut pool = BufferPool::new(2, 256);
+        let mut pool = BufferPool::new("test", 2, 256);
 
         // Pool pre-allocates all buffers
         assert_eq!(pool.pool.len(), 2);
@@ -334,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_buffer_zero_length_write() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
         let mut buffer = pool.get_buffer();
 
         // Write zero bytes
@@ -346,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_buffer_interleaved_operations() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
         let mut buffer = pool.get_buffer();
 
         // Write, check as_slice, repeat
@@ -364,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_buffer_pool_growth() {
-        let mut pool = BufferPool::new(2, 256);
+        let mut pool = BufferPool::new("test", 2, 256);
 
         // Initial size is 2
         assert_eq!(pool.pool.len(), 2);
@@ -391,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_buffer_pool_multiple_growth_cycles() {
-        let mut pool = BufferPool::new(1, 64);
+        let mut pool = BufferPool::new("test", 1, 64);
 
         let mut buffers = Vec::new();
 
@@ -423,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_buffer_return_resets_cursor() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
 
         // Get buffer and write to it
         let mut buffer = pool.get_buffer();
@@ -446,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_buffer_pool_return_and_reuse_multiple() {
-        let mut pool = BufferPool::new(2, 512);
+        let mut pool = BufferPool::new("test", 2, 512);
 
         // Get two buffers
         let buf1 = pool.get_buffer();
@@ -473,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_buffer_pool_partial_return() {
-        let mut pool = BufferPool::new(3, 256);
+        let mut pool = BufferPool::new("test", 3, 256);
 
         // Get three buffers
         let buf1 = pool.get_buffer();
@@ -499,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_buffer_data_written_readable() {
-        let mut pool = BufferPool::new(1, 1024);
+        let mut pool = BufferPool::new("test", 1, 1024);
         let mut buffer = pool.get_buffer();
 
         // Write sequential data
@@ -519,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_buffer_pool_metrics_after_growth() {
-        let mut pool = BufferPool::new(2, 128);
+        let mut pool = BufferPool::new("test", 2, 128);
 
         assert_eq!(pool.free_buffers(), 2);
         assert_eq!(pool.total_buffers(), 2);

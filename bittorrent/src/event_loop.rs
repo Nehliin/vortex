@@ -345,6 +345,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         Self {
             events,
             write_pool: BufferPool::new(
+                "network_write",
                 config.write_buffer_pool_size,
                 config.network_write_buffer_size,
             ),
