@@ -70,6 +70,8 @@ pub enum EventType {
     DiskWrite {
         data: Rc<Buffer>,
         piece_idx: i32,
+        #[cfg(feature = "metrics")]
+        scheduled: Instant,
     },
     DiskRead {
         // Peer that requested the piece
@@ -79,6 +81,8 @@ pub enum EventType {
         piece_idx: i32,
         // Offset inside piece
         piece_offset: i32,
+        #[cfg(feature = "metrics")]
+        scheduled: Instant,
     },
     Cancel,
     Close {
@@ -268,7 +272,9 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         log::error!("{err_str}");
                         return Err(err);
                     }
-                    EventType::DiskWrite { data, piece_idx }
+                    EventType::DiskWrite {
+                        data, piece_idx, ..
+                    }
                     | EventType::DiskRead {
                         data, piece_idx, ..
                     } => {
@@ -846,11 +852,22 @@ impl<'scope, 'state: 'scope> EventLoop {
                     io_utils::close_socket(sq, socket, None, &mut self.events);
                 }
             }
-            EventType::DiskWrite { data, piece_idx } => {
+            EventType::DiskWrite {
+                data,
+                piece_idx,
+                #[cfg(feature = "metrics")]
+                scheduled,
+            } => {
                 self.events.remove(io_event.event_data_idx);
                 let state = state
                     .state()
                     .expect("must have initialized state before starting disk io");
+                #[cfg(feature = "metrics")]
+                {
+                    use metrics::histogram;
+                    let histogram = histogram!("disk_write_time_ms");
+                    histogram.record(scheduled.elapsed().as_millis() as u32);
+                }
                 if let Ok(buffer) = Rc::try_unwrap(data) {
                     // If we are here we have completed the piece
                     state.complete_piece(piece_idx, &mut self.connections, event_tx, buffer);
@@ -862,11 +879,19 @@ impl<'scope, 'state: 'scope> EventLoop {
                 piece_idx,
                 connection_idx,
                 piece_offset,
+                #[cfg(feature = "metrics")]
+                scheduled,
             } => {
                 self.events.remove(io_event.event_data_idx);
                 let state = state
                     .state()
                     .expect("must have initialized state before starting disk io");
+                #[cfg(feature = "metrics")]
+                {
+                    use metrics::histogram;
+                    let histogram = histogram!("disk_read_time_ms");
+                    histogram.record(scheduled.elapsed().as_millis() as u32);
+                }
                 if let Ok(buffer) = Rc::try_unwrap(data) {
                     let connection = &mut self.connections[connection_idx];
                     let start_idx = piece_offset as usize;
