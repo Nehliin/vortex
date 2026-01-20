@@ -244,7 +244,7 @@ impl InitializedState {
             downloaded_piece_tx: tx,
             pieces,
             is_complete: false,
-            piece_buffer_pool: BufferPool::new(256, metadata.piece_length as usize),
+            piece_buffer_pool: BufferPool::new("pieces", 256, metadata.piece_length as usize),
             file_store: FileStore::new(root, metadata)?,
         })
     }
