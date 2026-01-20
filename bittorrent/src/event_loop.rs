@@ -925,7 +925,10 @@ impl<'scope, 'state: 'scope> EventLoop {
                 self.events.remove(io_event.event_data_idx);
                 let expected_written = iovecs.iter().map(|io| io.iov_len).sum();
                 let bytes_written = ret as usize;
-                let connection = &mut self.connections[connection_idx];
+                let Some(connection) = self.connections.get_mut(connection_idx) else {
+                    log::warn!("Connection was lost after write was handled");
+                    return Ok(());
+                };
                 connection.on_network_write(bytes_written);
                 if bytes_written < expected_written {
                     log::warn!(
