@@ -16,14 +16,20 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
-    layout::{Alignment, Constraint, Flex, Layout},
+    layout::{Alignment, Constraint, Layout},
     prelude::{Buffer, Rect},
     style::{Color, Modifier, Style, Stylize, palette::tailwind},
     text::{Span, Text},
-    widgets::{Axis, Block, Borders, Chart, Clear, Dataset, Gauge, Row, Table, Widget},
+    widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, Row, Table, Widget},
 };
-use throbber_widgets_tui::ThrobberState;
 use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppState {
+    DownloadingMetadata,
+    Downloading,
+    Seeding,
+}
 
 use tikv_jemallocator::Jemalloc;
 
@@ -206,8 +212,7 @@ struct VortexApp<'queue> {
     num_unchoked: usize,
     metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
     root: PathBuf,
-    metadata_spinner_state: ThrobberState,
-    last_tick: Instant,
+    is_complete: bool,
     // Signal the other threads we they shutdown
     shutdown_signal_tx: Sender<()>,
 }
@@ -230,11 +235,20 @@ impl<'queue> VortexApp<'queue> {
             total_upload_throughput: Box::new(HistoryBuf::new()),
             num_connections: 0,
             num_unchoked: 0,
-            metadata_spinner_state: Default::default(),
-            last_tick: Instant::now(),
+            is_complete: false,
             metadata,
             root,
             shutdown_signal_tx,
+        }
+    }
+
+    fn state(&self) -> AppState {
+        if self.metadata.is_none() {
+            AppState::DownloadingMetadata
+        } else if self.is_complete {
+            AppState::Seeding
+        } else {
+            AppState::Downloading
         }
     }
 
@@ -257,16 +271,11 @@ impl<'queue> VortexApp<'queue> {
         frame.render_widget(self, frame.area());
     }
 
-    fn on_tick(&mut self) {
-        self.metadata_spinner_state.calc_next();
-    }
-
     fn handle_events(&mut self) -> io::Result<()> {
         while let Some(event) = self.event_rc.dequeue() {
             match event {
                 TorrentEvent::TorrentComplete => {
-                    //let elapsed = self.start_time.elapsed();
-                    self.shutdown();
+                    self.is_complete = true;
                 }
                 TorrentEvent::ListenerStarted { port: _ } => {
                     // Nothing to do here
@@ -315,10 +324,6 @@ impl<'queue> VortexApp<'queue> {
                 _ => {}
             };
         }
-        if self.last_tick.elapsed() >= Duration::from_millis(250) {
-            self.on_tick();
-            self.last_tick = Instant::now();
-        }
 
         Ok(())
     }
@@ -329,225 +334,260 @@ impl<'queue> VortexApp<'queue> {
         }
     }
 
-    fn render_throughput(&self, top: Rect, buf: &mut Buffer) {
-        let [upload_area, download_area] =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
+    fn render_progress_bar(&self, area: Rect, buf: &mut Buffer) {
+        let state = self.state();
+        let is_dimmed = state == AppState::DownloadingMetadata;
 
-        render_througput_graph(
-            "Download",
-            &self.total_download_throughput,
-            download_area,
-            buf,
-        );
-        render_througput_graph("Upload", &self.total_upload_throughput, upload_area, buf);
-    }
+        let (percent, label, gauge_color) = match state {
+            AppState::DownloadingMetadata => {
+                (0, "Downloading metadata...".to_string(), Color::Gray)
+            }
+            AppState::Seeding => (100, "Seeding".to_string(), Color::Cyan),
+            AppState::Downloading => {
+                if let Some(metadata) = &self.metadata {
+                    let pct = (100.0
+                        * (self.pieces_completed as f64 / metadata.pieces.len() as f64))
+                        as u16;
+                    let remaining =
+                        metadata.length - self.pieces_completed as i64 * metadata.piece_length;
 
-    fn render_completion(&self, bottom: Rect, buf: &mut Buffer) {
+                    let maybe_seconds_left = (remaining as u64).checked_div(
+                        self.total_download_throughput
+                            .recent()
+                            .map(|(_, throughput)| *throughput as u64)
+                            .unwrap_or_default(),
+                    );
+                    let lbl = if let Some(seconds_left) = maybe_seconds_left {
+                        let estimated_time_left =
+                            humantime::Duration::from(Duration::from_secs(seconds_left));
+                        format!("{pct}% (est {estimated_time_left} remaining)")
+                    } else {
+                        format!("{pct}%")
+                    };
+                    (pct, lbl, Color::Green)
+                } else {
+                    (0, "0%".to_string(), Color::Green)
+                }
+            }
+        };
+
+        let border_color = if is_dimmed {
+            tailwind::SLATE.c600
+        } else {
+            tailwind::SLATE.c200
+        };
+
         let block = Block::new()
             .borders(Borders::all())
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .fg(tailwind::SLATE.c200);
+            .fg(border_color);
 
-        if let Some(metadata) = &self.metadata {
-            let percent =
-                (100.0 * (self.pieces_completed as f64 / metadata.pieces.len() as f64)) as u16;
-            let remaining = metadata.length - self.pieces_completed as i64 * metadata.piece_length;
-
-            let maybe_seconds_left = (remaining as u64).checked_div(
-                self.total_download_throughput
-                    .recent()
-                    .map(|(_, throughput)| *throughput as u64)
-                    .unwrap_or_default(),
-            );
-            let label = if let Some(seconds_left) = maybe_seconds_left {
-                let estimated_time_left =
-                    humantime::Duration::from(Duration::from_secs(seconds_left));
-                format!("{percent}% (est {estimated_time_left} remaining)")
-            } else {
-                format!("{percent}%")
-            };
-
-            Gauge::default()
-                .block(block)
-                .gauge_style(Color::Green)
-                .label(label)
-                .percent(percent)
-                .render(bottom, buf);
-        } else {
-            Gauge::default()
-                .block(block)
-                .gauge_style(Color::Green)
-                .label("0%".to_string())
-                .percent(0)
-                .render(bottom, buf);
-        }
+        Gauge::default()
+            .block(block)
+            .gauge_style(gauge_color)
+            .label(label)
+            .percent(percent)
+            .render(area, buf);
     }
 
-    fn render_label(&self, network_chunk: Rect, buf: &mut Buffer) {
-        const NETWORK_HEADERS: [&str; 3] = ["Download epeed:", "Unchoked:", "Name:"];
+    fn render_combined_graph(&self, area: Rect, buf: &mut Buffer, is_dimmed: bool) {
+        let download_data: Vec<(f64, f64)> = self
+            .total_download_throughput
+            .oldest_ordered()
+            .copied()
+            .collect();
+        let upload_data: Vec<(f64, f64)> = self
+            .total_upload_throughput
+            .oldest_ordered()
+            .copied()
+            .collect();
 
-        let current_throughput = self
+        let (oldest_time, _) = download_data.first().copied().unwrap_or((0.0, 0.0));
+        let (newest_time, _) = download_data.last().copied().unwrap_or((0.0, 0.0));
+
+        let all_values: Vec<f64> = download_data
+            .iter()
+            .chain(upload_data.iter())
+            .map(|(_, v)| *v)
+            .collect();
+
+        let smallest = all_values
+            .iter()
+            .copied()
+            .min_by(|a, b| a.total_cmp(b))
+            .unwrap_or(0.0);
+
+        let largest = all_values
+            .iter()
+            .copied()
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap_or(0.0);
+
+        let dimmed_color = tailwind::SLATE.c500;
+
+        let label_style = if is_dimmed {
+            Style::default().fg(dimmed_color)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+
+        let x_labels = vec![
+            Span::styled("".to_string(), label_style),
+            Span::styled("Time ".to_string(), label_style),
+        ];
+        let y_labels = vec![
+            Span::styled(
+                format!("{}/s", human_bytes::human_bytes(smallest)),
+                label_style,
+            ),
+            Span::styled(
+                format!("{}/s", human_bytes::human_bytes((smallest + largest) / 2.0)),
+                label_style,
+            ),
+            Span::styled(
+                format!("{}/s", human_bytes::human_bytes(largest)),
+                label_style,
+            ),
+        ];
+
+        let download_style = if is_dimmed {
+            Style::default().fg(dimmed_color)
+        } else {
+            Style::default().fg(Color::Green)
+        };
+        let upload_style = if is_dimmed {
+            Style::default().fg(dimmed_color)
+        } else {
+            Style::default().fg(Color::Magenta)
+        };
+
+        let datasets = vec![
+            Dataset::default()
+                .name("Download")
+                .graph_type(ratatui::widgets::GraphType::Line)
+                .marker(ratatui::symbols::Marker::Braille)
+                .style(download_style)
+                .data(&download_data),
+            Dataset::default()
+                .name("Upload")
+                .graph_type(ratatui::widgets::GraphType::Line)
+                .marker(ratatui::symbols::Marker::Braille)
+                .style(upload_style)
+                .data(&upload_data),
+        ];
+
+        let border_style = if is_dimmed {
+            Style::default().fg(dimmed_color)
+        } else {
+            Style::default()
+        };
+
+        let axis_style = if is_dimmed {
+            Style::default().fg(dimmed_color)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        let chart = Chart::new(datasets)
+            .block(
+                Block::bordered()
+                    .title("Throughput")
+                    .title_alignment(Alignment::Center)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .border_style(border_style),
+            )
+            .x_axis(
+                Axis::default()
+                    .style(axis_style)
+                    .labels(x_labels)
+                    .bounds([oldest_time, newest_time]),
+            )
+            .y_axis(
+                Axis::default()
+                    .style(axis_style)
+                    .labels(y_labels)
+                    .bounds([smallest, largest]),
+            )
+            .legend_position(Some(ratatui::widgets::LegendPosition::TopRight));
+
+        chart.render(area, buf);
+    }
+
+    fn render_info(&self, area: Rect, buf: &mut Buffer, is_dimmed: bool) {
+        const HEADERS: [&str; 5] = [
+            "Download speed:",
+            "Upload speed:",
+            "Peers:",
+            "Unchoked:",
+            "Name:",
+        ];
+
+        let download_throughput = self
             .total_download_throughput
             .recent()
             .copied()
+            .map(|(_, v)| v)
             .unwrap_or_default();
 
-        let throuhput_label = human_bytes(current_throughput.1);
+        let upload_throughput = self
+            .total_upload_throughput
+            .recent()
+            .copied()
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+
         let name = self
             .metadata
             .as_ref()
             .map(|meta| meta.name.to_owned())
             .unwrap_or("unknown".to_owned());
 
-        let network = vec![Row::new([
-            Text::styled(throuhput_label, Style::default()),
-            Text::styled(format!("{}", self.num_unchoked), Style::default()),
-            Text::styled(name, Style::default()),
-        ])];
+        let dimmed_color = tailwind::SLATE.c500;
+        let style = if is_dimmed {
+            Style::default().fg(dimmed_color)
+        } else {
+            Style::default()
+        };
 
-        Table::new(network, [Constraint::Fill(1), Constraint::Fill(1)])
-            .header(Row::new(NETWORK_HEADERS).style(Style::default()))
+        let row = Row::new([
+            Text::styled(format!("{}/s", human_bytes(download_throughput)), style),
+            Text::styled(format!("{}/s", human_bytes(upload_throughput)), style),
+            Text::styled(format!("{}", self.num_connections), style),
+            Text::styled(format!("{}", self.num_unchoked), style),
+            Text::styled(name, style),
+        ]);
+
+        let border_style = if is_dimmed {
+            Style::default().fg(dimmed_color)
+        } else {
+            Style::default()
+        };
+
+        Table::new(vec![row], [Constraint::Fill(1); 5])
+            .header(Row::new(HEADERS).style(style))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default()),
+                    .border_style(border_style),
             )
-            .style(Style::default())
-            .render(network_chunk, buf);
+            .style(style)
+            .render(area, buf);
     }
-}
-
-fn render_througput_graph(
-    name: &str,
-    data: &HistoryBuf<(f64, f64), 256>,
-    area: Rect,
-    buf: &mut Buffer,
-) {
-    let total_throughput: Vec<(f64, f64)> = data.oldest_ordered().copied().collect();
-    let (oldest_time, _) = total_throughput.first().copied().unwrap_or((0.0, 0.0));
-    let (newest_time, _) = total_throughput.last().copied().unwrap_or((0.0, 0.0));
-
-    let smallest = total_throughput
-        .iter()
-        .copied()
-        .min_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map(|(_, throughput)| throughput)
-        .unwrap_or(0.0);
-
-    let largest = total_throughput
-        .iter()
-        .copied()
-        .max_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map(|(_, throughput)| throughput)
-        .unwrap_or(0.0);
-
-    let x_labels = vec![
-        Span::styled(
-            "".to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "Time ".to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let y_labels = vec![
-        Span::styled(
-            format!("{}/s", human_bytes::human_bytes(smallest)),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{}/s", human_bytes::human_bytes((smallest + largest) / 2.0)),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{}/s", human_bytes::human_bytes(largest)),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let data = vec![
-        Dataset::default()
-            .graph_type(ratatui::widgets::GraphType::Line)
-            .marker(ratatui::symbols::Marker::Braille)
-            .style(Style::default().fg(ratatui::style::Color::Green))
-            .data(&total_throughput),
-    ];
-
-    let chart = Chart::new(data)
-        .block(
-            Block::bordered()
-                .title(name)
-                .title_alignment(Alignment::Center)
-                .border_type(ratatui::widgets::BorderType::Rounded),
-        )
-        .x_axis(
-            Axis::default()
-                .style(Style::default().fg(ratatui::style::Color::Gray))
-                .labels(x_labels)
-                .bounds([oldest_time, newest_time]),
-        )
-        .y_axis(
-            Axis::default()
-                .style(Style::default().fg(ratatui::style::Color::Gray))
-                .labels(y_labels)
-                .bounds([smallest, largest]),
-        );
-
-    chart.render(area, buf);
-}
-
-fn center(area: Rect, horizontal: Constraint, vertical: Constraint) -> Rect {
-    let [area] = Layout::horizontal([horizontal])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([vertical]).flex(Flex::Center).areas(area);
-    area
 }
 
 impl Widget for &mut VortexApp<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        use ratatui::widgets::StatefulWidget;
-        if self.metadata.is_none() {
-            let popup_area = center(area, Constraint::Percentage(31), Constraint::Length(3));
-            Clear.render(popup_area, buf);
-            let throbber_widget = throbber_widgets_tui::Throbber::default()
-                .label("Downloading metadata")
-                .style(ratatui::style::Style::default().fg(ratatui::style::Color::Yellow))
-                .throbber_style(
-                    ratatui::style::Style::default()
-                        .fg(ratatui::style::Color::Green)
-                        .add_modifier(ratatui::style::Modifier::BOLD),
-                )
-                .throbber_set(throbber_widgets_tui::BRAILLE_SIX_DOUBLE)
-                .use_type(throbber_widgets_tui::WhichUse::Spin);
-
-            Block::new()
-                .borders(Borders::ALL)
-                .border_style(Style::default().yellow())
-                .render(popup_area, buf);
-
-            let [throbber_area] = Layout::vertical([Constraint::Percentage(50)])
-                .flex(Flex::Center)
-                .areas(popup_area);
-            let [_, new_area] = Layout::horizontal([Constraint::Length(2), Constraint::Fill(1)])
-                .areas(throbber_area);
-
-            StatefulWidget::render(
-                throbber_widget,
-                new_area,
-                buf,
-                &mut self.metadata_spinner_state,
-            );
-        }
-        let [graph_area, tabel_area, progression_area] = Layout::vertical([
-            Constraint::Percentage(80),
-            Constraint::Fill(1),
-            Constraint::Fill(1),
+        let [progress_area, graph_area, info_area] = Layout::vertical([
+            Constraint::Length(4), // Progress bar: fixed height
+            Constraint::Fill(1),   // Graph: takes remaining space
+            Constraint::Max(5),    // Info area: max height
         ])
         .areas(area);
-        self.render_throughput(graph_area, buf);
-        self.render_label(tabel_area, buf);
-        self.render_completion(progression_area, buf);
+
+        let is_dimmed = self.state() == AppState::DownloadingMetadata;
+        self.render_progress_bar(progress_area, buf);
+        self.render_combined_graph(graph_area, buf, is_dimmed);
+        self.render_info(info_area, buf, is_dimmed);
     }
 }
 

@@ -23,5 +23,4 @@ crossbeam-channel = "0.5.15"
 ratatui = "0.30.0"
 human_bytes = "0.4.3"
 humantime = "2.2"
-throbber-widgets-tui = "0.10.0"
 
