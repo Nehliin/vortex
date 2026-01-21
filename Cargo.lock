@@ -2461,15 +2461,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "throbber-widgets-tui"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fb8f83731b18ea611a38a243b458adfa78239d61ca6acc545aa3b1c450ac6e7"
-dependencies = [
- "ratatui",
-]
-
-[[package]]
 name = "tikv-jemalloc-sys"
 version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2705,7 +2696,6 @@ dependencies = [
  "mainline",
  "metrics-exporter-prometheus",
  "ratatui",
- "throbber-widgets-tui",
  "tikv-jemallocator",
  "vortex-bittorrent",
 ]

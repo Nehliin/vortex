@@ -578,6 +578,13 @@ impl State {
         }
     }
 
+    /// Returns if the torrent has been completed
+    pub fn is_complete(&self) -> bool {
+        self.torrent_state
+            .as_ref()
+            .is_some_and(|state| state.is_complete)
+    }
+
     /// Use this constructor if you have access to the torrent metadata
     /// and/or if the torrent has already started.
     ///

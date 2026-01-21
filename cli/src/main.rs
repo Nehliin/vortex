@@ -4,26 +4,29 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     sync::mpsc::SyncSender,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use clap::{Args, Parser};
-use crossbeam_channel::{Receiver, Sender, bounded, select, tick};
-use heapless::{HistoryBuf, spsc::Consumer, spsc::Queue};
-use human_bytes::human_bytes;
+use crossbeam_channel::{Receiver, bounded, select, tick};
+use heapless::spsc::Queue;
 use mainline::{Dht, Id};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use ratatui::{
-    DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
-    layout::{Alignment, Constraint, Flex, Layout},
+    layout::{Constraint, Layout},
     prelude::{Buffer, Rect},
-    style::{Color, Modifier, Style, Stylize, palette::tailwind},
-    text::{Span, Text},
-    widgets::{Axis, Block, Borders, Chart, Clear, Dataset, Gauge, Row, Table, Widget},
+    widgets::Widget,
 };
-use throbber_widgets_tui::ThrobberState;
 use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
+
+mod app;
+mod ui;
+
+use app::{AppState, VortexApp};
+use ui::{
+    InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData, ThroughputGraph,
+    extract_throughput_data,
+};
 
 use tikv_jemallocator::Jemalloc;
 
@@ -176,6 +179,7 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     let id = PeerId::generate();
     let metadata = state.as_ref().metadata().cloned();
+    let is_complete = state.is_complete();
     let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
 
@@ -186,7 +190,14 @@ fn main() -> io::Result<()> {
         let cmd_tx_clone = command_tx.clone();
         s.spawn(move || dht_thread(info_hash_id, cmd_tx_clone, shutdown_signal_rc));
 
-        let mut app = VortexApp::new(command_tx, event_rc, shutdown_signal_tx, metadata, root);
+        let mut app = VortexApp::new(
+            command_tx,
+            event_rc,
+            shutdown_signal_tx,
+            metadata,
+            root,
+            is_complete,
+        );
         let terminal = ratatui::init();
         let result = app.run(terminal);
         ratatui::restore();
@@ -194,365 +205,73 @@ fn main() -> io::Result<()> {
     })
 }
 
-struct VortexApp<'queue> {
-    cmd_tx: SyncSender<Command>,
-    event_rc: Consumer<'queue, TorrentEvent>,
-    should_exit: bool,
-    start_time: Instant,
-    total_download_throughput: Box<HistoryBuf<(f64, f64), 256>>,
-    total_upload_throughput: Box<HistoryBuf<(f64, f64), 256>>,
-    pieces_completed: usize,
-    num_connections: usize,
-    num_unchoked: usize,
-    metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
-    root: PathBuf,
-    metadata_spinner_state: ThrobberState,
-    last_tick: Instant,
-    // Signal the other threads we they shutdown
-    shutdown_signal_tx: Sender<()>,
-}
-
-impl<'queue> VortexApp<'queue> {
-    fn new(
-        cmd_tx: SyncSender<Command>,
-        event_rc: Consumer<'queue, TorrentEvent>,
-        shutdown_signal_tx: Sender<()>,
-        metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
-        root: PathBuf,
-    ) -> Self {
-        Self {
-            cmd_tx,
-            event_rc,
-            should_exit: false,
-            start_time: Instant::now(),
-            pieces_completed: 0,
-            total_download_throughput: Box::new(HistoryBuf::new()),
-            total_upload_throughput: Box::new(HistoryBuf::new()),
-            num_connections: 0,
-            num_unchoked: 0,
-            metadata_spinner_state: Default::default(),
-            last_tick: Instant::now(),
-            metadata,
-            root,
-            shutdown_signal_tx,
-        }
-    }
-
-    fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
-        while !self.should_exit {
-            terminal.draw(|frame| self.draw(frame))?;
-            // separate from torrent events?
-            self.handle_events()?;
-        }
-        Ok(())
-    }
-
-    fn shutdown(&mut self) {
-        let _ = self.cmd_tx.send(Command::Stop);
-        let _ = self.shutdown_signal_tx.send(());
-        self.should_exit = true;
-    }
-
-    fn draw(&mut self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
-    }
-
-    fn on_tick(&mut self) {
-        self.metadata_spinner_state.calc_next();
-    }
-
-    fn handle_events(&mut self) -> io::Result<()> {
-        while let Some(event) = self.event_rc.dequeue() {
-            match event {
-                TorrentEvent::TorrentComplete => {
-                    //let elapsed = self.start_time.elapsed();
-                    self.shutdown();
-                }
-                TorrentEvent::ListenerStarted { port: _ } => {
-                    // Nothing to do here
-                }
-                TorrentEvent::MetadataComplete(metadata) => {
-                    self.metadata = Some(metadata.clone());
-                    let root = self.root.clone();
-                    // Store the metadata as the info hash in the download folder, that will
-                    // ensure it's possible to recover from downloads that's already started
-                    // The thread is used to keep this non blocking
-                    std::thread::spawn(move || {
-                        let path = root.join(metadata.info_hash());
-                        if let Err(err) = metadata.write_into_file(path) {
-                            log::error!("Failed to save metadata to disk: {err}")
-                        }
-                    });
-                }
-                TorrentEvent::TorrentMetrics {
-                    pieces_completed,
-                    pieces_allocated: _,
-                    peer_metrics,
-                    num_unchoked,
-                } => {
-                    self.pieces_completed = pieces_completed;
-                    self.num_connections = peer_metrics.len();
-                    self.num_unchoked = num_unchoked;
-                    let tick_download_throughput: u64 =
-                        peer_metrics.iter().map(|val| val.download_throughput).sum();
-                    let tick_upload_throughput: u64 =
-                        peer_metrics.iter().map(|val| val.upload_throughput).sum();
-                    let curr_time = self.start_time.elapsed().as_secs_f64();
-                    self.total_download_throughput
-                        .write((curr_time, tick_download_throughput as f64));
-                    self.total_upload_throughput
-                        .write((curr_time, tick_upload_throughput as f64));
-                }
-            }
-        }
-        if event::poll(Duration::from_millis(16))? {
-            match event::read()? {
-                // it's important to check that the event is a key press event as
-                // crossterm also emits key release and repeat events on Windows.
-                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                    self.handle_key_event(key_event)
-                }
-                _ => {}
-            };
-        }
-        if self.last_tick.elapsed() >= Duration::from_millis(250) {
-            self.on_tick();
-            self.last_tick = Instant::now();
-        }
-
-        Ok(())
-    }
-
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if let KeyCode::Char('q') = key_event.code {
-            self.shutdown()
-        }
-    }
-
-    fn render_throughput(&self, top: Rect, buf: &mut Buffer) {
-        let [upload_area, download_area] =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
-
-        render_througput_graph(
-            "Download",
-            &self.total_download_throughput,
-            download_area,
-            buf,
-        );
-        render_througput_graph("Upload", &self.total_upload_throughput, upload_area, buf);
-    }
-
-    fn render_completion(&self, bottom: Rect, buf: &mut Buffer) {
-        let block = Block::new()
-            .borders(Borders::all())
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .fg(tailwind::SLATE.c200);
-
-        if let Some(metadata) = &self.metadata {
-            let percent =
-                (100.0 * (self.pieces_completed as f64 / metadata.pieces.len() as f64)) as u16;
-            let remaining = metadata.length - self.pieces_completed as i64 * metadata.piece_length;
-
-            let maybe_seconds_left = (remaining as u64).checked_div(
-                self.total_download_throughput
-                    .recent()
-                    .map(|(_, throughput)| *throughput as u64)
-                    .unwrap_or_default(),
-            );
-            let label = if let Some(seconds_left) = maybe_seconds_left {
-                let estimated_time_left =
-                    humantime::Duration::from(Duration::from_secs(seconds_left));
-                format!("{percent}% (est {estimated_time_left} remaining)")
-            } else {
-                format!("{percent}%")
-            };
-
-            Gauge::default()
-                .block(block)
-                .gauge_style(Color::Green)
-                .label(label)
-                .percent(percent)
-                .render(bottom, buf);
-        } else {
-            Gauge::default()
-                .block(block)
-                .gauge_style(Color::Green)
-                .label("0%".to_string())
-                .percent(0)
-                .render(bottom, buf);
-        }
-    }
-
-    fn render_label(&self, network_chunk: Rect, buf: &mut Buffer) {
-        const NETWORK_HEADERS: [&str; 3] = ["Download epeed:", "Unchoked:", "Name:"];
-
-        let current_throughput = self
-            .total_download_throughput
-            .recent()
-            .copied()
-            .unwrap_or_default();
-
-        let throuhput_label = human_bytes(current_throughput.1);
-        let name = self
-            .metadata
-            .as_ref()
-            .map(|meta| meta.name.to_owned())
-            .unwrap_or("unknown".to_owned());
-
-        let network = vec![Row::new([
-            Text::styled(throuhput_label, Style::default()),
-            Text::styled(format!("{}", self.num_unchoked), Style::default()),
-            Text::styled(name, Style::default()),
-        ])];
-
-        Table::new(network, [Constraint::Fill(1), Constraint::Fill(1)])
-            .header(Row::new(NETWORK_HEADERS).style(Style::default()))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default()),
-            )
-            .style(Style::default())
-            .render(network_chunk, buf);
-    }
-}
-
-fn render_througput_graph(
-    name: &str,
-    data: &HistoryBuf<(f64, f64), 256>,
-    area: Rect,
-    buf: &mut Buffer,
-) {
-    let total_throughput: Vec<(f64, f64)> = data.oldest_ordered().copied().collect();
-    let (oldest_time, _) = total_throughput.first().copied().unwrap_or((0.0, 0.0));
-    let (newest_time, _) = total_throughput.last().copied().unwrap_or((0.0, 0.0));
-
-    let smallest = total_throughput
-        .iter()
-        .copied()
-        .min_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map(|(_, throughput)| throughput)
-        .unwrap_or(0.0);
-
-    let largest = total_throughput
-        .iter()
-        .copied()
-        .max_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map(|(_, throughput)| throughput)
-        .unwrap_or(0.0);
-
-    let x_labels = vec![
-        Span::styled(
-            "".to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "Time ".to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let y_labels = vec![
-        Span::styled(
-            format!("{}/s", human_bytes::human_bytes(smallest)),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{}/s", human_bytes::human_bytes((smallest + largest) / 2.0)),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{}/s", human_bytes::human_bytes(largest)),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let data = vec![
-        Dataset::default()
-            .graph_type(ratatui::widgets::GraphType::Line)
-            .marker(ratatui::symbols::Marker::Braille)
-            .style(Style::default().fg(ratatui::style::Color::Green))
-            .data(&total_throughput),
-    ];
-
-    let chart = Chart::new(data)
-        .block(
-            Block::bordered()
-                .title(name)
-                .title_alignment(Alignment::Center)
-                .border_type(ratatui::widgets::BorderType::Rounded),
-        )
-        .x_axis(
-            Axis::default()
-                .style(Style::default().fg(ratatui::style::Color::Gray))
-                .labels(x_labels)
-                .bounds([oldest_time, newest_time]),
-        )
-        .y_axis(
-            Axis::default()
-                .style(Style::default().fg(ratatui::style::Color::Gray))
-                .labels(y_labels)
-                .bounds([smallest, largest]),
-        );
-
-    chart.render(area, buf);
-}
-
-fn center(area: Rect, horizontal: Constraint, vertical: Constraint) -> Rect {
-    let [area] = Layout::horizontal([horizontal])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([vertical]).flex(Flex::Center).areas(area);
-    area
-}
-
 impl Widget for &mut VortexApp<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        use ratatui::widgets::StatefulWidget;
-        if self.metadata.is_none() {
-            let popup_area = center(area, Constraint::Percentage(31), Constraint::Length(3));
-            Clear.render(popup_area, buf);
-            let throbber_widget = throbber_widgets_tui::Throbber::default()
-                .label("Downloading metadata")
-                .style(ratatui::style::Style::default().fg(ratatui::style::Color::Yellow))
-                .throbber_style(
-                    ratatui::style::Style::default()
-                        .fg(ratatui::style::Color::Green)
-                        .add_modifier(ratatui::style::Modifier::BOLD),
-                )
-                .throbber_set(throbber_widgets_tui::BRAILLE_SIX_DOUBLE)
-                .use_type(throbber_widgets_tui::WhichUse::Spin);
-
-            Block::new()
-                .borders(Borders::ALL)
-                .border_style(Style::default().yellow())
-                .render(popup_area, buf);
-
-            let [throbber_area] = Layout::vertical([Constraint::Percentage(50)])
-                .flex(Flex::Center)
-                .areas(popup_area);
-            let [_, new_area] = Layout::horizontal([Constraint::Length(2), Constraint::Fill(1)])
-                .areas(throbber_area);
-
-            StatefulWidget::render(
-                throbber_widget,
-                new_area,
-                buf,
-                &mut self.metadata_spinner_state,
-            );
-        }
-        let [graph_area, tabel_area, progression_area] = Layout::vertical([
-            Constraint::Percentage(80),
+        let [progress_area, graph_area, info_area] = Layout::vertical([
+            Constraint::Length(4),
             Constraint::Fill(1),
-            Constraint::Fill(1),
+            Constraint::Max(5),
         ])
         .areas(area);
-        self.render_throughput(graph_area, buf);
-        self.render_label(tabel_area, buf);
-        self.render_completion(progression_area, buf);
-    }
-}
 
-impl Drop for VortexApp<'_> {
-    fn drop(&mut self) {
-        self.shutdown();
+        let state = self.state();
+        let is_dimmed = state == AppState::DownloadingMetadata;
+
+        let progress_state = match state {
+            AppState::DownloadingMetadata => ProgressState::DownloadingMetadata,
+            AppState::Seeding => ProgressState::Seeding,
+            AppState::Downloading => {
+                if let Some(metadata) = &self.metadata {
+                    let download_throughput = self
+                        .total_download_throughput
+                        .recent()
+                        .map(|(_, throughput)| *throughput)
+                        .unwrap_or_default();
+
+                    ProgressState::Downloading {
+                        pieces_completed: self.pieces_completed,
+                        total_pieces: metadata.pieces.len(),
+                        piece_length: metadata.piece_length,
+                        total_length: metadata.length,
+                        download_throughput,
+                    }
+                } else {
+                    ProgressState::DownloadingMetadata
+                }
+            }
+        };
+
+        ProgressBar::new(progress_state).render(progress_area, buf);
+
+        let throughput_data = ThroughputData {
+            download: extract_throughput_data(&self.total_download_throughput),
+            upload: extract_throughput_data(&self.total_upload_throughput),
+        };
+
+        ThroughputGraph::new(throughput_data, is_dimmed).render(graph_area, buf);
+
+        let info_data = InfoData {
+            download_throughput: self
+                .total_download_throughput
+                .recent()
+                .copied()
+                .map(|(_, v)| v)
+                .unwrap_or_default(),
+            upload_throughput: self
+                .total_upload_throughput
+                .recent()
+                .copied()
+                .map(|(_, v)| v)
+                .unwrap_or_default(),
+            num_connections: self.num_connections,
+            num_unchoked: self.num_unchoked,
+            name: self
+                .metadata
+                .as_ref()
+                .map(|meta| meta.name.to_owned())
+                .unwrap_or("unknown".to_owned()),
+        };
+
+        InfoPanel::new(info_data, is_dimmed).render(info_area, buf);
     }
 }
