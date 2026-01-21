@@ -508,7 +508,8 @@ impl<'queue> VortexApp<'queue> {
                     .labels(y_labels)
                     .bounds([smallest, largest]),
             )
-            .legend_position(Some(ratatui::widgets::LegendPosition::TopRight));
+            // Ensure it's not in the way of the current progress
+            .legend_position(Some(ratatui::widgets::LegendPosition::TopLeft));
 
         chart.render(area, buf);
     }
@@ -578,9 +579,9 @@ impl<'queue> VortexApp<'queue> {
 impl Widget for &mut VortexApp<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let [progress_area, graph_area, info_area] = Layout::vertical([
-            Constraint::Length(4), // Progress bar: fixed height
-            Constraint::Fill(1),   // Graph: takes remaining space
-            Constraint::Max(5),    // Info area: max height
+            Constraint::Length(4), // Progress bar
+            Constraint::Fill(1),   // Graph
+            Constraint::Max(5),    // Info area
         ])
         .areas(area);
 
