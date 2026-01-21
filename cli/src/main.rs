@@ -182,6 +182,7 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     let id = PeerId::generate();
     let metadata = state.as_ref().metadata().cloned();
+    let is_complete = state.is_complete();
     let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
 
@@ -192,7 +193,14 @@ fn main() -> io::Result<()> {
         let cmd_tx_clone = command_tx.clone();
         s.spawn(move || dht_thread(info_hash_id, cmd_tx_clone, shutdown_signal_rc));
 
-        let mut app = VortexApp::new(command_tx, event_rc, shutdown_signal_tx, metadata, root);
+        let mut app = VortexApp::new(
+            command_tx,
+            event_rc,
+            shutdown_signal_tx,
+            metadata,
+            root,
+            is_complete,
+        );
         let terminal = ratatui::init();
         let result = app.run(terminal);
         ratatui::restore();
@@ -224,6 +232,7 @@ impl<'queue> VortexApp<'queue> {
         shutdown_signal_tx: Sender<()>,
         metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
         root: PathBuf,
+        is_complete: bool,
     ) -> Self {
         Self {
             cmd_tx,
@@ -235,7 +244,7 @@ impl<'queue> VortexApp<'queue> {
             total_upload_throughput: Box::new(HistoryBuf::new()),
             num_connections: 0,
             num_unchoked: 0,
-            is_complete: false,
+            is_complete,
             metadata,
             root,
             shutdown_signal_tx,
