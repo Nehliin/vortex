@@ -42,7 +42,12 @@ pub fn decode_info_hash_hex(s: &str) -> [u8; 20] {
         .unwrap()
 }
 
-fn dht_thread(info_hash_id: Id, cmd_tx: SyncSender<Command>, shutdown_signal_rc: Receiver<()>) {
+fn dht_thread(
+    info_hash_id: Id,
+    port: u16,
+    cmd_tx: SyncSender<Command>,
+    shutdown_signal_rc: Receiver<()>,
+) {
     let mut builder = Dht::builder();
     let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
     if dht_boostrap_nodes.exists() {
@@ -55,8 +60,7 @@ fn dht_thread(info_hash_id: Id, cmd_tx: SyncSender<Command>, shutdown_signal_rc:
     log::info!("Bootstrapping!");
     dht_client.bootstrapped();
     log::info!("Bootstrapping done!");
-    // TODO: Remove announcement when complete?
-    dht_client.announce_peer(info_hash_id, None).unwrap();
+    dht_client.announce_peer(info_hash_id, Some(port)).unwrap();
 
     let fetch_interval = tick(Duration::from_secs(20));
 
@@ -105,6 +109,9 @@ struct TorrentInfo {
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// Port for the listener
+    #[arg(short, long)]
+    port: Option<u16>,
     #[command(flatten)]
     torrent_info: TorrentInfo,
     /// Path where the downloaded files should be saved
@@ -176,7 +183,8 @@ fn main() -> io::Result<()> {
     let (command_tx, command_rc) = std::sync::mpsc::sync_channel(256);
     let (event_tx, event_rc) = event_q.split();
 
-    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", cli.port.unwrap_or_default())).unwrap();
+    let port = listener.local_addr().unwrap().port();
     let id = PeerId::generate();
     let metadata = state.as_ref().metadata().cloned();
     let is_complete = state.is_complete();
@@ -188,7 +196,7 @@ fn main() -> io::Result<()> {
             torrent.start(event_tx, command_rc, listener).unwrap();
         });
         let cmd_tx_clone = command_tx.clone();
-        s.spawn(move || dht_thread(info_hash_id, cmd_tx_clone, shutdown_signal_rc));
+        s.spawn(move || dht_thread(info_hash_id, port, cmd_tx_clone, shutdown_signal_rc));
 
         let mut app = VortexApp::new(
             command_tx,
