@@ -240,7 +240,6 @@ pub struct InfoData {
     pub download_throughput: f64,
     pub upload_throughput: f64,
     pub num_connections: usize,
-    pub num_unchoked: usize,
     pub name: String,
 }
 
@@ -257,13 +256,7 @@ impl InfoPanel {
 
 impl Widget for InfoPanel {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        const HEADERS: [&str; 5] = [
-            "Download speed:",
-            "Upload speed:",
-            "Peers:",
-            "Unchoked:",
-            "Name:",
-        ];
+        const HEADERS: [&str; 4] = ["Download speed:", "Upload speed:", "Peers:", "Name:"];
 
         let default_style = if self.is_dimmed {
             Style::default().fg(DIMMED_COLOR)
@@ -281,7 +274,6 @@ impl Widget for InfoPanel {
                 upload_style(self.is_dimmed),
             ),
             ratatui::text::Text::styled(format!("{}", self.data.num_connections), default_style),
-            ratatui::text::Text::styled(format!("{}", self.data.num_unchoked), default_style),
             ratatui::text::Text::styled(self.data.name, default_style),
         ]);
 
@@ -291,7 +283,7 @@ impl Widget for InfoPanel {
             Style::default()
         };
 
-        Table::new(vec![row], [ratatui::layout::Constraint::Fill(1); 5])
+        Table::new(vec![row], [ratatui::layout::Constraint::Fill(1); 4])
             .header(Row::new(HEADERS).style(default_style))
             .block(
                 Block::default()

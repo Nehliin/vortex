@@ -264,7 +264,6 @@ impl Widget for &mut VortexApp<'_> {
                 .map(|(_, v)| v)
                 .unwrap_or_default(),
             num_connections: self.num_connections,
-            num_unchoked: self.num_unchoked,
             name: self
                 .metadata
                 .as_ref()

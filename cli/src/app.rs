@@ -43,8 +43,6 @@ pub struct VortexApp<'queue> {
     pub pieces_completed: usize,
     /// Number of active peer connections
     pub num_connections: usize,
-    /// Number of unchoked peers
-    pub num_unchoked: usize,
     /// Torrent metadata (available after metadata download)
     pub metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
     /// Root directory for downloads
@@ -73,7 +71,6 @@ impl<'queue> VortexApp<'queue> {
             total_download_throughput: Box::new(HistoryBuf::new()),
             total_upload_throughput: Box::new(HistoryBuf::new()),
             num_connections: 0,
-            num_unchoked: 0,
             is_complete,
             metadata,
             root,
@@ -135,11 +132,9 @@ impl<'queue> VortexApp<'queue> {
                     pieces_completed,
                     pieces_allocated: _,
                     peer_metrics,
-                    num_unchoked,
                 } => {
                     self.pieces_completed = pieces_completed;
                     self.num_connections = peer_metrics.len();
-                    self.num_unchoked = num_unchoked;
                     let tick_download_throughput: u64 =
                         peer_metrics.iter().map(|val| val.download_throughput).sum();
                     let tick_upload_throughput: u64 =

@@ -208,8 +208,6 @@ pub enum TorrentEvent {
         pieces_allocated: usize,
         /// Peer metrics for all currently connected peers
         peer_metrics: Vec<PeerMetrics>,
-        /// The currently number of unchoked peers
-        num_unchoked: usize,
     },
 }
 
