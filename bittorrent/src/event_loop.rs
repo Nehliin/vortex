@@ -1150,14 +1150,12 @@ fn report_tick_metrics(
 ) {
     let mut pieces_completed = 0;
     let mut pieces_allocated = 0;
-    let mut num_unchoked = 0;
 
     if let Some(torrent_state) = state.state() {
         let total_completed = torrent_state.piece_selector.total_completed();
         let total_allocated = torrent_state.piece_selector.total_allocated();
         pieces_completed = total_completed;
         pieces_allocated = total_allocated;
-        num_unchoked = torrent_state.num_unchoked as usize;
         #[cfg(feature = "metrics")]
         {
             let counter = metrics::counter!("pieces_completed");
@@ -1180,7 +1178,6 @@ fn report_tick_metrics(
             pieces_completed,
             pieces_allocated,
             peer_metrics,
-            num_unchoked,
         })
         .is_err()
     {

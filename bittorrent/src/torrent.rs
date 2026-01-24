@@ -177,11 +177,6 @@ pub struct PeerMetrics {
     pub download_throughput: u64,
     /// The number of bytes per second we are currently uploading to the peer
     pub upload_throughput: u64,
-    /// If this peer is in "endgame" mode. Aka we are downloading pieces from it
-    /// that may be allocated by other peers.
-    pub endgame: bool,
-    /// If we suspect this peer is snubbing us
-    pub snubbed: bool,
 }
 
 /// Events from the torrent
@@ -208,8 +203,6 @@ pub enum TorrentEvent {
         pieces_allocated: usize,
         /// Peer metrics for all currently connected peers
         peer_metrics: Vec<PeerMetrics>,
-        /// The currently number of unchoked peers
-        num_unchoked: usize,
     },
 }
 
