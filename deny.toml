@@ -20,6 +20,7 @@ skip = [
     { name = "crypto-common", version = "*" },
     { name = "block-buffer", version = "*" },
     { name = "itertools", version = "*" },
+    { name = "getrandom", version = "0.2.17" },
 ]
 
 [advisories]
@@ -29,6 +30,6 @@ unmaintained = "workspace"
 version = 2
 # We want really high confidence when inferring licenses from text
 confidence-threshold = 0.93
-allow = ["Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "MIT", "Unicode-3.0", "ISC", "OpenSSL", "Zlib"]
+allow = ["Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "MIT", "MPL-2.0", "Unicode-3.0", "ISC", "OpenSSL", "Zlib"]
 exceptions = [
 ]

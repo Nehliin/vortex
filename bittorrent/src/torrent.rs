@@ -42,7 +42,8 @@ pub enum Error {
 pub const CQE_WAIT_TIME_NS: u32 = 150_000_000;
 
 /// Configuration settings for a given torrent
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct Config {
     /// The max number of total connections that can be open at a time for the torrent
     pub max_connections: usize,
