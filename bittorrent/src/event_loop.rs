@@ -895,21 +895,24 @@ impl<'scope, 'state: 'scope> EventLoop {
                     histogram.record(scheduled.elapsed().as_millis() as u32);
                 }
                 if let Ok(buffer) = Rc::try_unwrap(data) {
-                    let connection = &mut self.connections[connection_idx];
-                    let start_idx = piece_offset as usize;
-                    let end_idx = start_idx
-                        + state
-                            .piece_selector
-                            .piece_len(piece_idx)
-                            .min(SUBPIECE_SIZE as u32) as usize;
-                    connection.send_piece(
-                        piece_idx,
-                        piece_offset,
-                        // TODO: avoid this copy by caching the piece buffer and make the Piece message
-                        // take an enum of either Buffer or Bytes?
-                        Bytes::copy_from_slice(&buffer.raw_slice()[start_idx..end_idx]),
-                        false,
-                    );
+                    // The connection may have been closed inbetween the read being scheduled
+                    // and it completing. That's fine
+                    if let Some(connection) = self.connections.get_mut(connection_idx) {
+                        let start_idx = piece_offset as usize;
+                        let end_idx = start_idx
+                            + state
+                                .piece_selector
+                                .piece_len(piece_idx)
+                                .min(SUBPIECE_SIZE as u32) as usize;
+                        connection.send_piece(
+                            piece_idx,
+                            piece_offset,
+                            // TODO: avoid this copy by caching the piece buffer and make the Piece message
+                            // take an enum of either Buffer or Bytes?
+                            Bytes::copy_from_slice(&buffer.raw_slice()[start_idx..end_idx]),
+                            false,
+                        );
+                    }
                     state.piece_buffer_pool.return_buffer(buffer);
                 }
                 self.inflight_disk_ops -= 1;
