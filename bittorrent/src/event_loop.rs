@@ -172,7 +172,9 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
         libc::ECONNRESET => {
             let event = events.remove(event_data_idx).unwrap();
             match event.typ {
-                EventType::Write { socket, addr, .. } | EventType::Recv { socket, addr } => {
+                EventType::Connect { socket, addr }
+                | EventType::Write { socket, addr, .. }
+                | EventType::Recv { socket, addr } => {
                     log::error!(
                         "[{}] Connection reset before handshake completed",
                         addr.as_socket().unwrap()
@@ -893,21 +895,24 @@ impl<'scope, 'state: 'scope> EventLoop {
                     histogram.record(scheduled.elapsed().as_millis() as u32);
                 }
                 if let Ok(buffer) = Rc::try_unwrap(data) {
-                    let connection = &mut self.connections[connection_idx];
-                    let start_idx = piece_offset as usize;
-                    let end_idx = start_idx
-                        + state
-                            .piece_selector
-                            .piece_len(piece_idx)
-                            .min(SUBPIECE_SIZE as u32) as usize;
-                    connection.send_piece(
-                        piece_idx,
-                        piece_offset,
-                        // TODO: avoid this copy by caching the piece buffer and make the Piece message
-                        // take an enum of either Buffer or Bytes?
-                        Bytes::copy_from_slice(&buffer.raw_slice()[start_idx..end_idx]),
-                        false,
-                    );
+                    // The connection may have been closed inbetween the read being scheduled
+                    // and it completing. That's fine
+                    if let Some(connection) = self.connections.get_mut(connection_idx) {
+                        let start_idx = piece_offset as usize;
+                        let end_idx = start_idx
+                            + state
+                                .piece_selector
+                                .piece_len(piece_idx)
+                                .min(SUBPIECE_SIZE as u32) as usize;
+                        connection.send_piece(
+                            piece_idx,
+                            piece_offset,
+                            // TODO: avoid this copy by caching the piece buffer and make the Piece message
+                            // take an enum of either Buffer or Bytes?
+                            Bytes::copy_from_slice(&buffer.raw_slice()[start_idx..end_idx]),
+                            false,
+                        );
+                    }
                     state.piece_buffer_pool.return_buffer(buffer);
                 }
                 self.inflight_disk_ops -= 1;
@@ -984,7 +989,15 @@ impl<'scope, 'state: 'scope> EventLoop {
                     .unwrap();
                 let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
-                let parsed_handshake = parse_handshake(*state.info_hash(), handshake_data).unwrap();
+                let parsed_handshake = match parse_handshake(*state.info_hash(), handshake_data) {
+                    Ok(handshake) => handshake,
+                    Err(err) => {
+                        log::error!("[{addr}] Failed to parse handshake: {err}",);
+                        self.events.remove(io_event.event_data_idx);
+                        io_utils::close_socket(sq, socket, None, &mut self.events);
+                        return Err(io::ErrorKind::InvalidData.into());
+                    }
+                };
                 // Remove from pending connections if this was an outgoing connection
                 // For incoming connections (from Accept), this will be false and that's ok
                 self.pending_connections

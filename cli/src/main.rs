@@ -64,6 +64,7 @@ fn dht_thread(
     dht_client.announce_peer(info_hash_id, Some(port)).unwrap();
 
     let fetch_interval = tick(Duration::from_secs(20));
+    let announce_interval = tick(Duration::from_mins(10));
 
     let query = || {
         let all_peers = dht_client.get_peers(info_hash_id);
@@ -78,6 +79,9 @@ fn dht_thread(
         select! {
             recv(fetch_interval) -> _ => {
                 query();
+            }
+            recv(announce_interval) -> _ => {
+                dht_client.announce_peer(info_hash_id, Some(port)).unwrap();
             }
             recv(shutdown_signal_rc) -> _ => {
                 let bootstrap_nodes = dht_client.to_bootstrap();
