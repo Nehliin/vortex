@@ -19,7 +19,6 @@ heapless = "0.9"
 metrics-exporter-prometheus = "0.18"
 
 [profile.release]
-inherits = "release"
 opt-level = 3
 debug = 1
 debug-assertions = false
