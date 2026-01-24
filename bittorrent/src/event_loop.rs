@@ -172,7 +172,9 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
         libc::ECONNRESET => {
             let event = events.remove(event_data_idx).unwrap();
             match event.typ {
-                EventType::Write { socket, addr, .. } | EventType::Recv { socket, addr } => {
+                EventType::Connect { socket, addr }
+                | EventType::Write { socket, addr, .. }
+                | EventType::Recv { socket, addr } => {
                     log::error!(
                         "[{}] Connection reset before handshake completed",
                         addr.as_socket().unwrap()
