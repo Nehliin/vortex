@@ -571,8 +571,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             download_throughput: self.network_stats.prev_download_throughput,
             // Same goes for upload data
             upload_throughput: self.network_stats.prev_upload_throughput,
-            endgame: self.endgame,
-            snubbed: self.snubbed,
         }
     }
 
