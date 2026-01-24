@@ -1,6 +1,6 @@
 //! UI components for the TUI application.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use heapless::HistoryBuf;
 use human_bytes::human_bytes;
@@ -236,11 +236,18 @@ impl Widget for ThroughputGraph {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum Time {
+    StartedAt(SystemTime),
+    DownloadTime(Duration),
+}
+
 pub struct InfoData {
+    pub name: String,
     pub download_throughput: f64,
     pub upload_throughput: f64,
     pub num_connections: usize,
-    pub name: String,
+    pub time: Time,
 }
 
 pub struct InfoPanel {
@@ -256,15 +263,35 @@ impl InfoPanel {
 
 impl Widget for InfoPanel {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        const HEADERS: [&str; 4] = ["Download speed:", "Upload speed:", "Peers:", "Name:"];
-
         let default_style = if self.is_dimmed {
             Style::default().fg(DIMMED_COLOR)
         } else {
             Style::default()
         };
 
+        let (time_header_text, time_text, time_style) = match self.data.time {
+            Time::StartedAt(system_time) => (
+                "Started at:",
+                humantime::format_rfc3339_seconds(system_time).to_string(),
+                default_style,
+            ),
+            Time::DownloadTime(duration) => (
+                "Downloaded in:",
+                // only keep seconds
+                humantime::Duration::from(Duration::from_secs(duration.as_secs())).to_string(),
+                Style::default().fg(Color::Green),
+            ),
+        };
+        let headers: [&str; 5] = [
+            "Name:",
+            "Download speed:",
+            "Upload speed:",
+            "Peers:",
+            time_header_text,
+        ];
+
         let row = Row::new([
+            ratatui::text::Text::styled(self.data.name, default_style),
             ratatui::text::Text::styled(
                 format!("{}/s", human_bytes(self.data.download_throughput)),
                 download_style(self.is_dimmed),
@@ -274,7 +301,7 @@ impl Widget for InfoPanel {
                 upload_style(self.is_dimmed),
             ),
             ratatui::text::Text::styled(format!("{}", self.data.num_connections), default_style),
-            ratatui::text::Text::styled(self.data.name, default_style),
+            ratatui::text::Text::styled(time_text, time_style),
         ]);
 
         let border_style = if self.is_dimmed {
@@ -283,8 +310,8 @@ impl Widget for InfoPanel {
             Style::default()
         };
 
-        Table::new(vec![row], [ratatui::layout::Constraint::Fill(1); 4])
-            .header(Row::new(HEADERS).style(default_style))
+        Table::new(vec![row], [ratatui::layout::Constraint::Fill(1); 5])
+            .header(Row::new(headers).style(default_style))
             .block(
                 Block::default()
                     .borders(Borders::ALL)

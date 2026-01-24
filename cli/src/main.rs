@@ -277,6 +277,7 @@ impl Widget for &mut VortexApp<'_> {
                 .as_ref()
                 .map(|meta| meta.name.to_owned())
                 .unwrap_or("unknown".to_owned()),
+            time: self.time_field,
         };
 
         InfoPanel::new(info_data, is_dimmed).render(info_area, buf);

@@ -4,7 +4,7 @@ use std::{
     io,
     path::PathBuf,
     sync::mpsc::SyncSender,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crossbeam_channel::Sender;
@@ -14,6 +14,8 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
 };
 use vortex_bittorrent::{Command, TorrentEvent};
+
+use crate::ui::Time;
 
 /// Current state of the torrent application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,7 @@ pub struct VortexApp<'queue> {
     pub root: PathBuf,
     /// Whether the torrent download is complete
     pub is_complete: bool,
+    pub time_field: Time,
     /// Signal sender to shutdown other threads
     pub shutdown_signal_tx: Sender<()>,
 }
@@ -73,6 +76,7 @@ impl<'queue> VortexApp<'queue> {
             num_connections: 0,
             is_complete,
             metadata,
+            time_field: Time::StartedAt(SystemTime::now()),
             root,
             shutdown_signal_tx,
         }
@@ -110,6 +114,11 @@ impl<'queue> VortexApp<'queue> {
         while let Some(event) = self.event_rc.dequeue() {
             match event {
                 TorrentEvent::TorrentComplete => {
+                    let download_time = match self.time_field {
+                        Time::StartedAt(system_time) => system_time.elapsed().unwrap(),
+                        Time::DownloadTime(duration) => duration,
+                    };
+                    self.time_field = Time::DownloadTime(download_time);
                     self.is_complete = true;
                 }
                 TorrentEvent::ListenerStarted { port: _ } => {
@@ -117,6 +126,7 @@ impl<'queue> VortexApp<'queue> {
                 }
                 TorrentEvent::MetadataComplete(metadata) => {
                     self.metadata = Some(metadata.clone());
+                    self.time_field = Time::StartedAt(SystemTime::now());
                     let root = self.root.clone();
                     // Store the metadata as the info hash in the download folder, that will
                     // ensure it's possible to recover from downloads that's already started
