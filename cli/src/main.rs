@@ -17,9 +17,10 @@ use ratatui::{
     prelude::{Buffer, Rect},
     widgets::Widget,
 };
-use vortex_bittorrent::{Command, Config, PeerId, State, Torrent, TorrentEvent};
+use vortex_bittorrent::{Command, PeerId, State, Torrent, TorrentEvent};
 
 mod app;
+mod config;
 mod ui;
 
 use app::{AppState, VortexApp};
@@ -47,11 +48,11 @@ fn dht_thread(
     port: u16,
     cmd_tx: SyncSender<Command>,
     shutdown_signal_rc: Receiver<()>,
+    dht_cache_path: PathBuf,
 ) {
     let mut builder = Dht::builder();
-    let dht_boostrap_nodes = PathBuf::from("dht_boostrap_nodes");
-    if dht_boostrap_nodes.exists() {
-        let list = std::fs::read_to_string(&dht_boostrap_nodes).unwrap();
+    if dht_cache_path.exists() {
+        let list = std::fs::read_to_string(&dht_cache_path).unwrap();
         let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
         builder.extra_bootstrap(&cached_nodes);
     }
@@ -81,7 +82,7 @@ fn dht_thread(
             recv(shutdown_signal_rc) -> _ => {
                 let bootstrap_nodes = dht_client.to_bootstrap();
                 let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
-                std::fs::write("dht_boostrap_nodes", dht_bootstrap_nodes_contet.as_bytes())
+                std::fs::write(&dht_cache_path, dht_bootstrap_nodes_contet.as_bytes())
                     .unwrap();
                 break;
             }
@@ -114,30 +115,64 @@ struct Cli {
     port: Option<u16>,
     #[command(flatten)]
     torrent_info: TorrentInfo,
-    /// Path where the downloaded files should be saved
+    /// Path to the config file (defaults to $XDG_CONFIG_HOME/vortex/config.toml)
+    /// the file will created it if doesn't already exists.
     #[arg(short, long)]
-    download_folder: PathBuf,
+    config_file: Option<PathBuf>,
+    /// Path where the downloaded files should be saved (defaults to $XDG_DATA_HOME/vortex/downloads)
+    #[arg(short, long)]
+    download_folder: Option<PathBuf>,
+    /// Log file path (defaults to $XDG_STATE_HOME/vortex/vortex.log)
+    #[arg(long)]
+    log_file: Option<PathBuf>,
+    /// DHT cache path (defaults to $XDG_CACHE_HOME/vortex/dht_bootstrap_nodes)
+    #[arg(long)]
+    dht_cache: Option<PathBuf>,
 }
 
 fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+
+    // load or create config file (auto-creates if doesn't exist)
+    let mut vortex_config = config::load_or_create_config(cli.config_file)
+        .map_err(|e| io::Error::other(format!("Failed to load config: {}", e)))?;
+
+    // merge cli args with config
+    vortex_config = config::merge_with_cli_args(
+        vortex_config,
+        cli.download_folder.clone(),
+        cli.log_file.clone(),
+        cli.dht_cache.clone(),
+        cli.port,
+    );
+
+    let paths = config::resolve_paths(&vortex_config);
+
+    std::fs::create_dir_all(&paths.download_folder)?;
+    if let Some(parent) = paths.log_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = paths.dht_cache.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     let target = Box::new(
         OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open("vortex.log")?,
+            .open(&paths.log_file)?,
     );
     env_logger::builder()
         .target(env_logger::Target::Pipe(target))
         .filter_level(log::LevelFilter::Debug)
         .init();
+
     let builder = PrometheusBuilder::new().with_recommended_naming(true);
     builder.install().unwrap();
 
-    let cli = Cli::parse();
-
-    let config = Config::default();
-    let root = cli.download_folder.clone();
+    let bt_config = vortex_config.bittorrent;
+    let root = paths.download_folder.clone();
 
     let mut state = match cli.torrent_info {
         TorrentInfo {
@@ -148,16 +183,10 @@ fn main() -> io::Result<()> {
                 root.join(info_hash.to_lowercase()),
             ) {
                 // Metadata has been saved from previous run
-                Ok(metadata) => {
-                    State::from_metadata_and_root(metadata, cli.download_folder, config)?
-                }
+                Ok(metadata) => State::from_metadata_and_root(metadata, root.clone(), bt_config)?,
                 Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
                     if io_err.kind() == ErrorKind::NotFound {
-                        State::unstarted(
-                            decode_info_hash_hex(&info_hash),
-                            cli.download_folder,
-                            config,
-                        )
+                        State::unstarted(decode_info_hash_hex(&info_hash), root.clone(), bt_config)
                     } else {
                         panic!("Failed looking for stored metadata {io_err}");
                     }
@@ -171,7 +200,7 @@ fn main() -> io::Result<()> {
         } => {
             let parsed_metadata =
                 lava_torrent::torrent::v1::Torrent::read_from_file(metadata).unwrap();
-            State::from_metadata_and_root(parsed_metadata, cli.download_folder, config)?
+            State::from_metadata_and_root(parsed_metadata, root.clone(), bt_config)?
         }
         _ => unreachable!(),
     };
@@ -183,7 +212,11 @@ fn main() -> io::Result<()> {
     let (command_tx, command_rc) = std::sync::mpsc::sync_channel(256);
     let (event_tx, event_rc) = event_q.split();
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", cli.port.unwrap_or_default())).unwrap();
+    let listener = TcpListener::bind(format!(
+        "0.0.0.0:{}",
+        vortex_config.port.unwrap_or_default()
+    ))
+    .unwrap();
     let port = listener.local_addr().unwrap().port();
     let id = PeerId::generate();
     let metadata = state.as_ref().metadata().cloned();
@@ -191,12 +224,21 @@ fn main() -> io::Result<()> {
     let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
 
+    let dht_cache_path = paths.dht_cache.clone();
     std::thread::scope(|s| {
         s.spawn(move || {
             torrent.start(event_tx, command_rc, listener).unwrap();
         });
         let cmd_tx_clone = command_tx.clone();
-        s.spawn(move || dht_thread(info_hash_id, port, cmd_tx_clone, shutdown_signal_rc));
+        s.spawn(move || {
+            dht_thread(
+                info_hash_id,
+                port,
+                cmd_tx_clone,
+                shutdown_signal_rc,
+                dht_cache_path,
+            )
+        });
 
         let mut app = VortexApp::new(
             command_tx,

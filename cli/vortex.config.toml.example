@@ -1,0 +1,58 @@
+# Vortex BitTorrent Cli Configuration
+# Copy this file to ~/.config/vortex/config.toml to customize settings
+# The config file will be auto-created with defaults on first run
+
+# Optional: Set port for incoming connections
+# If not set, a random port will be used
+# port = 6881
+
+[paths]
+# Override default XDG paths (optional)
+# If not set, XDG defaults will be used:
+#   download_folder: ~/.local/share/vortex/downloads
+#   log_file: ~/.local/state/vortex/vortex.log
+#   dht_cache: ~/.cache/vortex/dht_bootstrap_nodes
+
+# download_folder = "/path/to/downloads"
+# log_file = "/path/to/vortex.log"
+# dht_cache = "/path/to/dht_cache"
+
+[bittorrent]
+# Maximum concurrent peer connections
+max_connections = 128
+
+# Maximum outstanding piece requests
+max_reported_outstanding_requests = 512
+
+# Maximum number of unchoked peers
+max_unchoked = 8
+
+# Ticks before recalculating unchoked peers
+num_ticks_before_unchoke_recalc = 15
+
+# Ticks before recalculating optimistic unchoke
+num_ticks_before_optimistic_unchoke_recalc = 30
+
+# Piece quota for seeding
+seeding_piece_quota = 20
+
+# io-uring completion queue size
+cq_size = 4096
+
+# io-uring submission queue size
+sq_size = 4096
+
+# Minimum completion events to wait for
+completion_event_want = 32
+
+# Network read buffer size in bytes
+network_read_buffer_size = 32768
+
+# Network write buffer size in bytes
+network_write_buffer_size = 20480
+
+# Write buffer pool size
+write_buffer_pool_size = 256
+
+# Read buffer pool size
+read_buffer_pool_size = 256
