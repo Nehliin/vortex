@@ -986,7 +986,15 @@ impl<'scope, 'state: 'scope> EventLoop {
                     .unwrap();
                 let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
                 // Expect this to be the handshake response
-                let parsed_handshake = parse_handshake(*state.info_hash(), handshake_data).unwrap();
+                let parsed_handshake = match parse_handshake(*state.info_hash(), handshake_data) {
+                    Ok(handshake) => handshake,
+                    Err(err) => {
+                        log::error!("[{addr}] Failed to parse handshake: {err}",);
+                        self.events.remove(io_event.event_data_idx);
+                        io_utils::close_socket(sq, socket, None, &mut self.events);
+                        return Err(io::ErrorKind::InvalidData.into());
+                    }
+                };
                 // Remove from pending connections if this was an outgoing connection
                 // For incoming connections (from Accept), this will be false and that's ok
                 self.pending_connections
