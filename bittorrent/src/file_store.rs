@@ -42,7 +42,7 @@ impl File {
             }
         }
 
-        assert_eq!(file.metadata()?.size(), size as _);
+        debug_assert_eq!(file.metadata()?.size(), size as _);
         Ok(Self {
             file: file.into(),
             len: size,
@@ -196,7 +196,7 @@ impl FileStore {
             // that are part of the piece. We should thus have already r/w the relevant parts
             // of the piece from the previous files to ensure we start at minimum on 0
             let current_file_cursor = file_offset + piece_cursor as i64;
-            assert!(current_file_cursor >= 0);
+            debug_assert!(current_file_cursor >= 0);
             let current_file_cursor = current_file_cursor as usize;
             // if we are past this file, move on to the next
             if current_file_cursor >= file.file_handle.len() {
@@ -220,7 +220,7 @@ impl FileStore {
             }
         }
         // Must have written all data
-        assert_eq!(piece_cursor, piece_len);
+        debug_assert_eq!(piece_cursor, piece_len);
     }
 
     /// Synchronously check if a piece exists and has the correct hash.
@@ -250,7 +250,7 @@ impl FileStore {
 
             // we should always have read the files in order so that
             // total read ensures this offset to be greater than 0
-            assert!(piece_offset_in_file >= 0);
+            debug_assert!(piece_offset_in_file >= 0);
             let piece_offset_in_file = piece_offset_in_file as u64;
 
             let to_read = if piece_index == file.end_piece {

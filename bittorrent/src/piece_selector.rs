@@ -193,8 +193,8 @@ impl PieceSelector {
 
     #[inline]
     pub fn mark_complete(&mut self, index: usize) {
-        assert!(!self.completed_pieces[index]);
-        assert!(self.downloaded_pieces[index]);
+        debug_assert!(!self.completed_pieces[index]);
+        debug_assert!(self.downloaded_pieces[index]);
         self.completed_pieces.set(index, true);
         self.allocated_pieces.set(index, false);
         // The piece is no longer interesting if we've completed it
@@ -205,15 +205,15 @@ impl PieceSelector {
 
     #[inline]
     pub fn mark_downloaded(&mut self, index: usize) {
-        assert!(!self.downloaded_pieces[index]);
-        assert!(!self.completed_pieces[index]);
+        debug_assert!(!self.downloaded_pieces[index]);
+        debug_assert!(!self.completed_pieces[index]);
         self.downloaded_pieces.set(index, true);
     }
 
     #[inline]
     pub fn mark_not_downloaded(&mut self, index: usize) {
-        assert!(self.downloaded_pieces[index]);
-        assert!(!self.completed_pieces[index]);
+        debug_assert!(self.downloaded_pieces[index]);
+        debug_assert!(!self.completed_pieces[index]);
         self.downloaded_pieces.set(index, false);
     }
 
@@ -226,13 +226,13 @@ impl PieceSelector {
         let interesting_pieces = &mut self.interesting_peer_pieces.get_mut(connection_id).unwrap();
         let old = interesting_pieces.replace(index, false);
         // Must have been interesting to this peer before allocating it
-        assert!(old);
+        debug_assert!(old);
     }
 
     #[inline]
     pub fn mark_not_allocated(&mut self, index: i32, connection_id: ConnectionId) {
         let index = index as usize;
-        assert!(self.allocated_pieces[index]);
+        debug_assert!(self.allocated_pieces[index]);
         self.allocated_pieces.set(index, false);
         // Mark the piece as interesting again so it can be picked again
         // if necessary
