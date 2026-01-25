@@ -100,9 +100,9 @@ impl Default for Config {
             sq_size: 4096,
             completion_event_want: 32,
             network_read_buffer_size: (SUBPIECE_SIZE * 2) as usize,
-            read_buffer_pool_size: 256,
+            read_buffer_pool_size: 512,
             network_write_buffer_size: (SUBPIECE_SIZE + 4096) as usize,
-            write_buffer_pool_size: 256,
+            write_buffer_pool_size: 128,
         }
     }
 }
