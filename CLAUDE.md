@@ -7,9 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Vortex is a high-performance BitTorrent client built in Rust using io-uring for asynchronous I/O. The project is structured as a Cargo workspace with four main components:
 
 - **`cli/`**: Terminal UI application using Ratatui for downloading torrents with DHT support. This is the primary client crate used to test that the `bittorrent` crate can be used to create meaingful applications.
-- **`bittorrent/`**: Core BitTorrent protocol implementation built on io-uring. This is the main crate of this repository and is the one being actively developed. Your focus should be on this crate.
-- **`dht/`**: Distributed Hash Table implementation for peer discovery. This is no longer actively developed and mainly here for historical reasons. You can ignore this crate unless explicitly told otherwise.
-- **`utp-socket/`**: µTP (Micro Transport Protocol) socket implementation. This is no longer actively developed and no longer maintained. You can ignore this crate unless explicitly told otherwise.
+- **`bittorrent/`**: Core BitTorrent protocol implementation built on io-uring. 
 
 The bittorrent crate uses an event-driven architecture with io-uring for high-performance networking. Key modules include:
 - `event_loop`: Central event dispatcher managing connections and I/O
