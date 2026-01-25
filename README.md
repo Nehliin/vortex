@@ -80,8 +80,6 @@ cargo install --locked vortex-cli
 vortex-cli --info-hash <info-hash> -d downloads
 ```
 
-### Demo:
-(demo gif?)
 
 ### Usage:
 ```
@@ -170,5 +168,5 @@ If your LLM-assisted PR shows signs of not being written with thoughtfulness and
 
 ## License
 
-This project is licensed under the BSD-3-Clause License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the BSD-3-Clause License - see the [LICENSE](LICENCE.txt) file for details.
 
