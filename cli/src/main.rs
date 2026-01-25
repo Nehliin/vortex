@@ -11,7 +11,6 @@ use clap::{Args, Parser};
 use crossbeam_channel::{Receiver, bounded, select, tick};
 use heapless::spsc::Queue;
 use mainline::{Dht, Id};
-use metrics_exporter_prometheus::PrometheusBuilder;
 use ratatui::{
     layout::{Constraint, Layout},
     prelude::{Buffer, Rect},
@@ -172,8 +171,12 @@ fn main() -> io::Result<()> {
         .filter_level(log::LevelFilter::Debug)
         .init();
 
-    let builder = PrometheusBuilder::new().with_recommended_naming(true);
-    builder.install().unwrap();
+    #[cfg(feature = "metrics")]
+    {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+        let builder = PrometheusBuilder::new().with_recommended_naming(true);
+        builder.install().unwrap();
+    }
 
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
