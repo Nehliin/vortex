@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/Nehliin/vortex/compare/vortex-cli-v0.2.0...vortex-cli-v0.3.0) - 2026-01-25
+
+- (refactor) Make metrics an optional feature to vortex-cli ([#93](https://github.com/Nehliin/vortex/pull/93))
+- (fix) Crash fixes and announce on the DHT more frequently ([#90](https://github.com/Nehliin/vortex/pull/90))
+- (feat) Add XDG directory support to the cli ([#87](https://github.com/Nehliin/vortex/pull/87))
+- (feat) Support port selection and track total download time in cli ([#86](https://github.com/Nehliin/vortex/pull/86))
+- (style) Update UI and ensure app continues seeding after completion ([#85](https://github.com/Nehliin/vortex/pull/85))
+
 ## [0.2.0](https://github.com/Nehliin/vortex/compare/vortex-cli-v0.1.0...vortex-cli-v0.2.0) - 2026-01-15
 
 - Update cli to better match new state changes (#49)

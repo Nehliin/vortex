@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.3.0...vortex-bittorrent-v0.4.0) - 2026-01-25
+
+- (fix) ECONNRESET during TCP handshakes weren't properly handled and invalid bittorrent handshakes with the correct length would cause panics ([#90](https://github.com/Nehliin/vortex/pull/90))
+- (perf) Make the release profile more aggressive + migrate more asserts to debug_asserts ([#88](https://github.com/Nehliin/vortex/pull/88))
+- (feat) Support serde serialization for the config ([#87](https://github.com/Nehliin/vortex/pull/87))
+- Remove num_unchoked, endgame and snubbed from TorrentEvents  ([#86](https://github.com/Nehliin/vortex/pull/86))
+- (fix) Crash when peer disconnected before write completed ([#85](https://github.com/Nehliin/vortex/pull/85))
+- (feat) Metrics improvements ([#84](https://github.com/Nehliin/vortex/pull/84))
+
 ## [0.3.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.2.0...vortex-bittorrent-v0.3.0) - 2026-01-15
 
 - Ensure being choked makes queued pieces available to other peers (#34)
