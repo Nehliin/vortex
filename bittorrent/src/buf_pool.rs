@@ -76,6 +76,7 @@ unsafe impl BufMut for Buffer {
     }
 }
 
+#[allow(dead_code)]
 pub struct BufferPool {
     name: &'static str,
     free: BitVec,

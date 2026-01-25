@@ -3,7 +3,6 @@ use std::{
     io,
     os::fd::{AsRawFd, IntoRawFd, RawFd},
     ptr::null_mut,
-    time::Instant,
 };
 
 use io_uring::{
@@ -238,7 +237,7 @@ pub fn disk_operation<Q: SubmissionQueue>(
                     data: disk_op.buffer,
                     piece_idx: disk_op.piece_idx,
                     #[cfg(feature = "metrics")]
-                    scheduled: Instant::now(),
+                    scheduled: std::time::Instant::now(),
                 },
                 buffers: None,
             });
@@ -266,7 +265,7 @@ pub fn disk_operation<Q: SubmissionQueue>(
                     connection_idx,
                     piece_offset,
                     #[cfg(feature = "metrics")]
-                    scheduled: Instant::now(),
+                    scheduled: std::time::Instant::now(),
                 },
                 // TODO: consider using this instead
                 buffers: None,
