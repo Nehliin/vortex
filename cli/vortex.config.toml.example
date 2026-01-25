@@ -52,7 +52,7 @@ network_read_buffer_size = 32768
 network_write_buffer_size = 20480
 
 # Write buffer pool size
-write_buffer_pool_size = 256
+write_buffer_pool_size = 128
 
 # Read buffer pool size
-read_buffer_pool_size = 256
+read_buffer_pool_size = 512

@@ -13,11 +13,11 @@ anyhow = { workspace = true }
 lava_torrent = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
-vortex-bittorrent = { path = "../bittorrent", version = "0.3", features = ["metrics"] }
+vortex-bittorrent = { path = "../bittorrent", version = "0.3" }
 heapless = { workspace = true }
 tikv-jemallocator = "0.6"
 mainline = { version = "6", default-features = false, features = ["node"]}
-metrics-exporter-prometheus = { workspace = true }
+metrics-exporter-prometheus = { workspace = true, optional = true }
 clap = { version = "4.5.39", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 ratatui = "0.30.0"
@@ -27,3 +27,6 @@ toml = "0.8"
 dirs = "6.0"
 serde = { version = "1", features = ["derive"] }
 
+[features]
+default = []
+metrics = ["vortex-bittorrent/metrics", "dep:metrics-exporter-prometheus"]
