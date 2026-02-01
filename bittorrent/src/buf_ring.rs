@@ -209,7 +209,7 @@ impl BufferRing {
 
 impl Drop for BufferRing {
     fn drop(&mut self) {
-        if self.is_registerd {
+        if self.is_registerd && !std::thread::panicking() {
             panic!("Must unregister before dropping");
         }
     }
