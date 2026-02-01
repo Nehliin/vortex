@@ -29,7 +29,7 @@ use crate::{
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::{
         extended_protocol::extension_handshake_msg,
-        peer_connection::{ConnectionState, DisconnectReason, OutgoingMsg, PeerConnection},
+        peer_connection::{ConnectionState, DisconnectReason, PeerConnection},
         peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
     },
     piece_selector::{self, SUBPIECE_SIZE},
@@ -568,18 +568,15 @@ impl<'scope, 'state: 'scope> EventLoop {
                         let mut buffers = Vec::new();
                         let mut current_buffer = self.write_pool.get_buffer();
                         let conn_fd = socket.as_raw_fd();
-                        let mut ordered = false;
-                        for msg in connection.outgoing_msgs_buffer.iter() {
-                            let size = msg.message.encoded_size();
-                            // If any massage is ordered make the whole socket write ordered
-                            ordered |= msg.ordered;
+                        for message in connection.outgoing_msgs_buffer.iter() {
+                            let size = message.encoded_size();
                             if current_buffer.remaining_mut() >= size {
-                                msg.message.encode(&mut current_buffer);
+                                message.encode(&mut current_buffer);
                             } else {
                                 // Buffer is full, get a new one
                                 buffers.push(current_buffer);
                                 current_buffer = self.write_pool.get_buffer();
-                                msg.message.encode(&mut current_buffer);
+                                message.encode(&mut current_buffer);
                             }
                         }
                         buffers.push(current_buffer);
@@ -591,7 +588,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                             &mut sq,
                             buffers,
                             0,
-                            ordered,
                         );
                     }
                     connection.outgoing_msgs_buffer.clear();
@@ -910,7 +906,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                             // TODO: avoid this copy by caching the piece buffer and make the Piece message
                             // take an enum of either Buffer or Bytes?
                             Bytes::copy_from_slice(&buffer.raw_slice()[start_idx..end_idx]),
-                            false,
                         );
                     }
                     state.piece_buffer_pool.return_buffer(buffer);
@@ -951,7 +946,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                             sq,
                             buffer,
                             new_offset,
-                            false,
                         );
                     } else {
                         log::warn!(
@@ -1040,10 +1034,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                     scope,
                 );
                 if connection.extended_extension {
-                    connection.outgoing_msgs_buffer.push(OutgoingMsg {
-                        message: extension_handshake_msg(state, state.config),
-                        ordered: true,
-                    });
+                    connection
+                        .outgoing_msgs_buffer
+                        .push(extension_handshake_msg(state, state.config));
                 }
                 // Recv has been complete, move over to multishot, same user data
                 io_utils::recv_multishot(sq, recv_multi_id, fd, self.read_ring.bgid());
@@ -1051,23 +1044,16 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // TODO: only if fast ext is enabled
                 let bitfield_msg = if let Some(torrent_state) = state.state() {
                     let completed = torrent_state.piece_selector.downloaded_clone();
-                    let message = if completed.all() {
+                    // sent as first message after handshake
+                    if completed.all() {
                         peer_protocol::PeerMessage::HaveAll
                     } else if completed.not_any() {
                         peer_protocol::PeerMessage::HaveNone
                     } else {
                         peer_protocol::PeerMessage::Bitfield(completed.into())
-                    };
-                    // sent as first message after handshake
-                    OutgoingMsg {
-                        message,
-                        ordered: true,
                     }
                 } else {
-                    OutgoingMsg {
-                        message: peer_protocol::PeerMessage::HaveNone,
-                        ordered: true,
-                    }
+                    peer_protocol::PeerMessage::HaveNone
                 };
                 connection.outgoing_msgs_buffer.push(bitfield_msg);
             }

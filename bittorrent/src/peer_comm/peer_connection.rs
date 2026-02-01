@@ -120,12 +120,6 @@ fn generate_fast_set(
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub struct OutgoingMsg {
-    pub message: PeerMessage,
-    pub ordered: bool,
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum DisconnectReason {
     #[error("Peer was idle for too long")]
@@ -230,7 +224,7 @@ pub struct PeerConnection {
     /// one the peer is expected to use when sending to us
     pub extensions: HashMap<u8, Box<dyn ExtensionProtocol>>,
     // Stored here to prevent reallocations
-    pub outgoing_msgs_buffer: Vec<OutgoingMsg>,
+    pub outgoing_msgs_buffer: Vec<PeerMessage>,
     // Uses vec instead of hashset since this is expected to be small
     pub allowed_fast_pieces: Vec<i32>,
     // The pieces we allow others to request when choked
@@ -349,13 +343,13 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.queued.clear();
     }
 
-    pub fn optimistically_unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
+    pub fn optimistically_unchoke(&mut self, torrent_state: &mut InitializedState) {
         self.optimistically_unchoked = true;
         self.last_optimistically_unchoked = Some(Instant::now());
-        self.unchoke(torrent_state, ordered);
+        self.unchoke(torrent_state);
     }
 
-    pub fn unchoke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
+    pub fn unchoke(&mut self, torrent_state: &mut InitializedState) {
         if self.is_choking {
             log::info!("[Peer: {}] is unchoked", self.peer_id);
             torrent_state.num_unchoked += 1;
@@ -367,61 +361,43 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.network_stats.upload_since_unchoked = 0;
         self.last_unchoked = Some(Instant::now());
         self.is_choking = false;
-        self.outgoing_msgs_buffer.push(OutgoingMsg {
-            message: PeerMessage::Unchoke,
-            ordered,
-        });
+        self.outgoing_msgs_buffer.push(PeerMessage::Unchoke);
     }
 
-    pub fn have(&mut self, index: i32, ordered: bool) {
-        self.outgoing_msgs_buffer.push(OutgoingMsg {
-            message: PeerMessage::Have { index },
-            ordered,
-        });
+    pub fn have(&mut self, index: i32) {
+        self.outgoing_msgs_buffer.push(PeerMessage::Have { index });
     }
 
-    fn reject_request(&mut self, index: i32, begin: i32, length: i32, ordered: bool) {
+    fn reject_request(&mut self, index: i32, begin: i32, length: i32) {
         // TODO: Disconnect on too many rejected pieces
-        self.outgoing_msgs_buffer.push(OutgoingMsg {
-            message: PeerMessage::RejectRequest {
-                index,
-                begin,
-                length,
-            },
-            ordered,
+        self.outgoing_msgs_buffer.push(PeerMessage::RejectRequest {
+            index,
+            begin,
+            length,
         });
     }
 
-    pub fn send_piece(&mut self, index: i32, offset: i32, data: Bytes, ordered: bool) {
-        self.outgoing_msgs_buffer.push(OutgoingMsg {
-            message: PeerMessage::Piece {
-                index,
-                begin: offset,
-                data,
-            },
-            ordered,
+    pub fn send_piece(&mut self, index: i32, offset: i32, data: Bytes) {
+        self.outgoing_msgs_buffer.push(PeerMessage::Piece {
+            index,
+            begin: offset,
+            data,
         });
     }
 
-    fn interested(&mut self, ordered: bool) {
+    fn interested(&mut self) {
         // Consider requesting pieces here if we are unchoked
         // this might happen after an unchoke request
         self.is_interesting = true;
-        self.outgoing_msgs_buffer.push(OutgoingMsg {
-            message: PeerMessage::Interested,
-            ordered,
-        });
+        self.outgoing_msgs_buffer.push(PeerMessage::Interested);
     }
 
-    pub fn not_interested(&mut self, ordered: bool) {
+    pub fn not_interested(&mut self) {
         self.is_interesting = false;
-        self.outgoing_msgs_buffer.push(OutgoingMsg {
-            message: PeerMessage::NotInterested,
-            ordered,
-        });
+        self.outgoing_msgs_buffer.push(PeerMessage::NotInterested);
     }
 
-    pub fn choke(&mut self, torrent_state: &mut InitializedState, ordered: bool) {
+    pub fn choke(&mut self, torrent_state: &mut InitializedState) {
         if !self.is_choking {
             torrent_state.num_unchoked -= 1;
         }
@@ -429,10 +405,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             self.optimistically_unchoked = false;
         }
         self.is_choking = true;
-        self.outgoing_msgs_buffer.push(OutgoingMsg {
-            message: PeerMessage::Choke,
-            ordered,
-        });
+        self.outgoing_msgs_buffer.push(PeerMessage::Choke);
     }
 
     pub fn update_target_inflight(&mut self, target_inflight: usize) {
@@ -478,7 +451,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     fn push_subpiece_request(
-        outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
+        outgoing_msgs_buffer: &mut Vec<PeerMessage>,
         inflight: &mut VecDeque<Subpiece>,
         timeout_timer: &mut Option<Instant>,
         subpiece: Subpiece,
@@ -494,10 +467,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             *timeout_timer = Some(Instant::now());
         }
 
-        outgoing_msgs_buffer.push(OutgoingMsg {
-            message: subpiece_request,
-            ordered: false,
-        });
+        outgoing_msgs_buffer.push(subpiece_request);
     }
 
     pub fn remaining_request_queue_spots(&self) -> usize {
@@ -694,10 +664,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                 if !self.accept_fast_pieces.contains(&index) {
                                     self.accept_fast_pieces.push(index);
                                 }
-                                self.outgoing_msgs_buffer.push(OutgoingMsg {
-                                    message: PeerMessage::AllowedFast { index },
-                                    ordered: false,
-                                });
+                                self.outgoing_msgs_buffer
+                                    .push(PeerMessage::AllowedFast { index });
                             }
                         } else {
                             let IpAddr::V4(ipv4) = self.peer_addr.ip() else {
@@ -711,10 +679,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                 &mut self.accept_fast_pieces,
                             );
                             for index in self.accept_fast_pieces.iter().copied() {
-                                self.outgoing_msgs_buffer.push(OutgoingMsg {
-                                    message: PeerMessage::AllowedFast { index },
-                                    ordered: false,
-                                });
+                                self.outgoing_msgs_buffer
+                                    .push(PeerMessage::AllowedFast { index });
                             }
                         }
                     }
@@ -722,10 +688,10 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         // if we are not choking them we might need to send a
                         // unchoke to avoid some race conditions. Libtorrent
                         // uses the same type of logic
-                        self.unchoke(torrent_state, true);
+                        self.unchoke(torrent_state);
                     } else if torrent_state.can_preemtively_unchoke() {
                         log::debug!("[Peer: {}] Unchoking peer after intrest", self.peer_id);
-                        self.unchoke(torrent_state, true);
+                        self.unchoke(torrent_state);
                     }
                 }
             }
@@ -736,7 +702,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     self.peer_id
                 );
                 if let Some(torrent_state) = state_ref.state() {
-                    self.choke(torrent_state, false);
+                    self.choke(torrent_state);
                 }
             }
             PeerMessage::Have { index } => {
@@ -756,7 +722,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         .piece_selector
                         .update_peer_piece_intrest(self.conn_id, index);
                     if is_interesting && !self.is_interesting {
-                        self.interested(false);
+                        self.interested();
                     }
                 } else {
                     self.pre_meta_have_msgs.push(PeerMessage::Have { index });
@@ -790,7 +756,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             self.peer_id
                         );
                         // Mark ourselves as interested
-                        self.interested(true);
+                        self.interested();
                         let mut subpieces = torrent_state.allocate_piece(index, self.conn_id);
                         self.append_and_fill(&mut subpieces);
                     }
@@ -819,7 +785,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         .peer_bitfield(self.conn_id, bitfield);
                     if !torrent_state.is_complete {
                         // Mark ourselves as interested
-                        self.interested(true);
+                        self.interested();
                     }
                 } else {
                     self.pre_meta_have_msgs.push(PeerMessage::HaveAll);
@@ -842,7 +808,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     let num_pieces = torrent_state.num_pieces();
                     log::info!("[Peer: {}] Have None received", self.peer_id);
                     let bitfield = BitVec::repeat(false, num_pieces).into();
-                    self.not_interested(false);
+                    self.not_interested();
                     torrent_state
                         .piece_selector
                         .peer_bitfield(self.conn_id, bitfield);
@@ -892,7 +858,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
 
                     // Mark ourselves as interested if there are pieces we would like request
                     if !self.is_interesting && is_interesting {
-                        self.interested(true);
+                        self.interested();
                     }
                     // TODO: if unchocked already we should request stuff (in case they are recvd out
                     // of order)
@@ -940,7 +906,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         }
                         let should_unchoke = torrent_state.can_preemtively_unchoke();
                         if should_unchoke && self.is_choking {
-                            self.unchoke(torrent_state, true);
+                            self.unchoke(torrent_state);
                         }
                         // We are either not choking or the piece is part of the fast set and they
                         // support the fast ext
@@ -982,7 +948,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     }
                 };
                 if !handle_req() && self.fast_ext {
-                    self.reject_request(index, begin, length, false);
+                    self.reject_request(index, begin, length);
                 }
             }
             PeerMessage::RejectRequest {
@@ -1073,31 +1039,27 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         size: length,
                         timed_out: false,
                     };
-                    if !self
-                        .outgoing_msgs_buffer
-                        .iter()
-                        .any(|msg| match msg.message {
-                            PeerMessage::RejectRequest {
-                                index,
-                                begin,
-                                length,
-                            } if index == subpiece.index
-                                && subpiece.offset == begin
-                                && subpiece.size == length =>
-                            {
-                                true
-                            }
-                            PeerMessage::Piece { index, begin, .. }
-                                if index == subpiece.index && subpiece.offset == begin =>
-                            {
-                                true
-                            }
-                            _ => false,
-                        })
-                    {
+                    if !self.outgoing_msgs_buffer.iter().any(|msg| match *msg {
+                        PeerMessage::RejectRequest {
+                            index,
+                            begin,
+                            length,
+                        } if index == subpiece.index
+                            && subpiece.offset == begin
+                            && subpiece.size == length =>
+                        {
+                            true
+                        }
+                        PeerMessage::Piece { index, begin, .. }
+                            if index == subpiece.index && subpiece.offset == begin =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    }) {
                         // We've not already queued up a response
                         // so reject the request
-                        self.reject_request(subpiece.index, subpiece.offset, subpiece.size, false);
+                        self.reject_request(subpiece.index, subpiece.offset, subpiece.size);
                     }
                 }
             }

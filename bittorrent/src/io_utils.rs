@@ -130,7 +130,6 @@ pub fn writev_to_connection<Q: SubmissionQueue>(
     buffers: Vec<Buffer>,
     // Offset in the buffer the write should start from
     io_vec_offset: usize,
-    ordered: bool,
 ) {
     debug_assert!(io_vec_offset <= buffers.iter().map(|buf| buf.filled_slice().len()).sum());
     let mut remaining_offset = io_vec_offset as i64;
@@ -178,15 +177,9 @@ pub fn writev_to_connection<Q: SubmissionQueue>(
         EventType::ConnectedWriteV { iovecs, .. } => iovecs.as_ptr(),
         _ => unreachable!(),
     };
-    let flags = if ordered {
-        io_uring::squeue::Flags::IO_LINK
-    } else {
-        io_uring::squeue::Flags::empty()
-    };
     let write_op = opcode::Writev::new(types::Fd(fd), stable_iovec_ptr, iovecs_len as u32)
         .build()
-        .user_data(event_id.data().as_ffi())
-        .flags(flags);
+        .user_data(event_id.data().as_ffi());
     sq.push(write_op);
 }
 

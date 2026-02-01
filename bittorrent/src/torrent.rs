@@ -274,7 +274,7 @@ impl InitializedState {
             // We are no longer interestead in any of the
             // peers
             for (_, peer) in connections.iter_mut() {
-                peer.not_interested(false);
+                peer.not_interested();
                 // If the peer is upload only and
                 // we are upload only there is no reason
                 // to stay connected
@@ -295,7 +295,7 @@ impl InitializedState {
                 && peer.inflight.is_empty()
             {
                 // We are no longer interestead in this peer
-                peer.not_interested(false);
+                peer.not_interested();
                 // if it's upload only we can close the
                 // connection since it will never download from
                 // us
@@ -303,7 +303,7 @@ impl InitializedState {
                     peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
                 }
             }
-            peer.have(piece_idx, false);
+            peer.have(piece_idx);
         }
         log::debug!("Piece {piece_idx} completed!");
     }
@@ -404,7 +404,7 @@ impl InitializedState {
                         // reset so another peer can be optimistically unchoked
                         self.ticks_to_recalc_optimistic_unchoke = 0;
                     }
-                    peer.choke(self, true);
+                    peer.choke(self);
                 }
 
                 continue;
@@ -465,7 +465,7 @@ impl InitializedState {
                         "Peer[{}] now unchoked after recalculating throughputs",
                         peer.peer_id
                     );
-                    peer.unchoke(self, true);
+                    peer.unchoke(self);
                 }
                 remaining_unchoke_slots -= 1;
                 if peer.optimistically_unchoked {
@@ -484,7 +484,7 @@ impl InitializedState {
                     "Peer[{}] no longer unchoked after recalculating throughputs",
                     peer.peer_id
                 );
-                peer.choke(self, true);
+                peer.choke(self);
             }
         }
     }
@@ -522,13 +522,13 @@ impl InitializedState {
                 log::debug!("Peer[{}] optmistically unchoked again", peer.peer_id);
                 previously_opt_unchoked.remove(id);
             } else {
-                peer.optimistically_unchoke(self, true);
+                peer.optimistically_unchoke(self);
             }
         }
 
         for id in previously_opt_unchoked {
             let peer = &mut connections[id];
-            peer.choke(self, true);
+            peer.choke(self);
         }
     }
 }
