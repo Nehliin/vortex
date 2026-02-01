@@ -12,10 +12,7 @@ use crate::{
     torrent::{Config, StateRef},
 };
 
-use super::{
-    peer_connection::{DisconnectReason, OutgoingMsg},
-    peer_protocol::PeerMessage,
-};
+use super::{peer_connection::DisconnectReason, peer_protocol::PeerMessage};
 
 pub const UT_METADATA: &str = "ut_metadata";
 pub const UPLOAD_ONLY: &str = "upload_only";
@@ -25,7 +22,7 @@ pub fn init_extension<'state>(
     name: &str,
     handshake_dict: &BTreeMap<ByteString, Value>,
     state_ref: &mut StateRef<'state>,
-    outgoing_msgs_buffer: &mut Vec<OutgoingMsg>,
+    outgoing_msgs_buffer: &mut Vec<PeerMessage>,
 ) -> Result<Option<Box<dyn ExtensionProtocol>>, DisconnectReason> {
     match name {
         UT_METADATA => {
@@ -45,10 +42,7 @@ pub fn init_extension<'state>(
             let mut metadata = MetadataExtension::new(id, metadata_size as usize);
             if !state_ref.is_initialzied() {
                 for i in 0..16.min(metadata.num_pieces()) {
-                    outgoing_msgs_buffer.push(OutgoingMsg {
-                        message: metadata.request(i as i32),
-                        ordered: false,
-                    });
+                    outgoing_msgs_buffer.push(metadata.request(i as i32));
                 }
             }
             Ok(Some(Box::new(metadata)))
@@ -109,7 +103,7 @@ pub trait ExtensionProtocol {
         connection: &mut PeerConnection,
     ) -> Result<(), DisconnectReason>;
 
-    fn on_torrent_complete(&mut self, _outgoing_msgs_buffer: &mut Vec<OutgoingMsg>) {}
+    fn on_torrent_complete(&mut self, _outgoing_msgs_buffer: &mut Vec<PeerMessage>) {}
 }
 
 /// An extension protocol supported by libtorrent
@@ -149,11 +143,8 @@ impl ExtensionProtocol for UploadOnlyExtension {
         Ok(())
     }
 
-    fn on_torrent_complete(&mut self, outgoing_msgs_buffer: &mut Vec<OutgoingMsg>) {
-        outgoing_msgs_buffer.push(OutgoingMsg {
-            message: self.upload_only(true),
-            ordered: true,
-        });
+    fn on_torrent_complete(&mut self, outgoing_msgs_buffer: &mut Vec<PeerMessage>) {
+        outgoing_msgs_buffer.push(self.upload_only(true));
     }
 }
 
@@ -268,22 +259,19 @@ impl ExtensionProtocol for MetadataExtension {
                 if let Some(metadata) = state.metadata() {
                     let info_bytes = metadata.construct_info().encode();
                     if start_offset >= info_bytes.len() {
-                        connection.outgoing_msgs_buffer.push(OutgoingMsg {
-                            message: self.reject(message.piece),
-                            ordered: false,
-                        });
+                        connection
+                            .outgoing_msgs_buffer
+                            .push(self.reject(message.piece));
                     } else {
                         let metadata_piece = &info_bytes[start_offset..];
-                        connection.outgoing_msgs_buffer.push(OutgoingMsg {
-                            message: self.data(message.piece, metadata_piece),
-                            ordered: false,
-                        });
+                        connection
+                            .outgoing_msgs_buffer
+                            .push(self.data(message.piece, metadata_piece));
                     }
                 } else {
-                    connection.outgoing_msgs_buffer.push(OutgoingMsg {
-                        message: self.reject(message.piece),
-                        ordered: false,
-                    });
+                    connection
+                        .outgoing_msgs_buffer
+                        .push(self.reject(message.piece));
                 }
                 de.end().map_err(|_err| {
                     DisconnectReason::ProtocolError("Metadata request message longer than expected")
@@ -301,10 +289,9 @@ impl ExtensionProtocol for MetadataExtension {
 
                 self.completed.set(piece_idx, true);
                 if let Some(index) = self.inflight.first_zero() {
-                    connection.outgoing_msgs_buffer.push(OutgoingMsg {
-                        message: self.request(index as i32),
-                        ordered: false,
-                    });
+                    connection
+                        .outgoing_msgs_buffer
+                        .push(self.request(index as i32));
                 } else if self.completed.all() {
                     let mut hasher = Sha1::new();
                     hasher.update(&self.metadata);
