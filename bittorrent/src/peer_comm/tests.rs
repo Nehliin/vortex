@@ -14,7 +14,6 @@ use crate::{
     file_store::{DiskOp, DiskOpType},
     io_utils::{BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
-    peer_connection::OutgoingMsg,
     piece_selector::{SUBPIECE_SIZE, Subpiece},
     test_utils::{
         generate_peer, setup_seeding_test, setup_test, setup_uninitialized_test,
@@ -54,28 +53,15 @@ impl SubmissionQueue for MockSubmissionQueue {
 #[track_caller]
 fn sent_and_marked_interested(peer: &PeerConnection) {
     assert!(peer.is_interesting);
-    assert!(
-        peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
-            message: PeerMessage::Interested,
-            ordered: false,
-        }) || peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
-            message: PeerMessage::Interested,
-            ordered: true,
-        })
-    );
+    assert!(peer.outgoing_msgs_buffer.contains(&PeerMessage::Interested));
 }
 
 #[track_caller]
 fn sent_and_marked_not_interested(peer: &PeerConnection) {
     assert!(!peer.is_interesting);
     assert!(
-        peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
-            message: PeerMessage::NotInterested,
-            ordered: false,
-        }) || peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
-            message: PeerMessage::NotInterested,
-            ordered: true,
-        })
+        peer.outgoing_msgs_buffer
+            .contains(&PeerMessage::NotInterested)
     );
 }
 
@@ -1348,13 +1334,8 @@ fn send_have_to_peers_when_piece_completes() {
         );
         for (_, peer) in &mut connections {
             assert!(
-                peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
-                    message: PeerMessage::Have { index: index_a },
-                    ordered: false,
-                }) || peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
-                    message: PeerMessage::Have { index: index_a },
-                    ordered: true,
-                })
+                peer.outgoing_msgs_buffer
+                    .contains(&PeerMessage::Have { index: index_a })
             );
             // Clear for next check
             peer.outgoing_msgs_buffer.clear();
@@ -1391,13 +1372,8 @@ fn send_have_to_peers_when_piece_completes() {
         );
         for (_, peer) in &connections {
             assert!(
-                peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
-                    message: PeerMessage::Have { index: index_b },
-                    ordered: false,
-                }) || peer.outgoing_msgs_buffer.contains(&OutgoingMsg {
-                    message: PeerMessage::Have { index: index_b },
-                    ordered: true,
-                })
+                peer.outgoing_msgs_buffer
+                    .contains(&PeerMessage::Have { index: index_b })
             )
         }
     });
@@ -2257,7 +2233,7 @@ fn metadata_extension_request_message() {
 
         assert!(!connections[key_a].outgoing_msgs_buffer.is_empty());
         let response = &connections[key_a].outgoing_msgs_buffer[0];
-        if let PeerMessage::Extended { id, data } = &response.message {
+        if let PeerMessage::Extended { id, data } = &response {
             let mut de = Deserializer::from_slice(&data[..]);
             let message: MetadataMessage = <MetadataMessage>::deserialize(&mut de).unwrap();
             assert_eq!(
@@ -2783,7 +2759,7 @@ fn updates_upload_throughput() {
 
         // Unchoke the peer so upload stats are tracked properly
         let torrent_state = state_ref.state().unwrap();
-        connections[key].unchoke(torrent_state, false);
+        connections[key].unchoke(torrent_state);
 
         assert_eq!(connections[key].network_stats.upload_throughput, 0);
         assert_eq!(connections[key].network_stats.prev_upload_throughput, 0);
@@ -3672,7 +3648,7 @@ fn upload_only_extension_message_sent_on_torrent_complete() {
 
         // Should have sent upload_only extension message with value 1
         let has_upload_only_msg = connections[key].outgoing_msgs_buffer.iter_mut().any(|msg| {
-            if let PeerMessage::Extended { id: 3, data } = &mut msg.message {
+            if let PeerMessage::Extended { id: 3, data } = msg {
                 data.len() == 1 && data.get_u8() == 1
             } else {
                 false
@@ -3688,7 +3664,7 @@ fn upload_only_extension_message_sent_on_torrent_complete() {
                 .outgoing_msgs_buffer
                 .iter_mut()
                 .any(|msg| {
-                    if let PeerMessage::Extended { id: 3, data } = &mut msg.message {
+                    if let PeerMessage::Extended { id: 3, data } = msg {
                         data.len() == 1 && data.get_u8() == 1
                     } else {
                         false
@@ -3703,7 +3679,7 @@ fn upload_only_extension_message_sent_on_torrent_complete() {
                 .outgoing_msgs_buffer
                 .iter_mut()
                 .any(|msg| {
-                    if let PeerMessage::Extended { id: 3, data } = &mut msg.message {
+                    if let PeerMessage::Extended { id: 3, data } = msg {
                         data.len() == 1 && data.get_u8() == 1
                     } else {
                         false
