@@ -1,13 +1,10 @@
 use std::{
-    fs::OpenOptions,
-    io::{self, ErrorKind},
-    net::TcpListener,
-    path::PathBuf,
-    sync::mpsc::SyncSender,
-    time::Duration,
+    fs::OpenOptions, io::ErrorKind, net::TcpListener, num::ParseIntError, path::PathBuf,
+    sync::mpsc::SyncSender, time::Duration,
 };
 
 use clap::{Args, Parser};
+use color_eyre::eyre::{WrapErr, eyre};
 use crossbeam_channel::{Receiver, bounded, select, tick};
 use heapless::spsc::Queue;
 use mainline::{Dht, Id};
@@ -33,13 +30,16 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-pub fn decode_info_hash_hex(s: &str) -> [u8; 20] {
-    (0..s.len())
+pub fn decode_info_hash_hex(s: &str) -> color_eyre::eyre::Result<[u8; 20]> {
+    let byte_vec = (0..s.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect::<Vec<u8>>()
-        .try_into()
-        .unwrap()
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+        .collect::<Result<Vec<u8>, ParseIntError>>()?;
+
+    match byte_vec.try_into() {
+        Ok(bytes) => Ok(bytes),
+        Err(_) => Err(eyre!("Invalid length")),
+    }
 }
 
 fn dht_thread(
@@ -49,19 +49,21 @@ fn dht_thread(
     shutdown_signal_rc: Receiver<()>,
     dht_cache_path: PathBuf,
     skip_dht_cache: bool,
-) {
+) -> color_eyre::eyre::Result<()> {
     let mut builder = Dht::builder();
     if dht_cache_path.exists() && !skip_dht_cache {
-        let list = std::fs::read_to_string(&dht_cache_path).unwrap();
+        let list = std::fs::read_to_string(&dht_cache_path).wrap_err("Failed to dht_cache")?;
         let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
         builder.extra_bootstrap(&cached_nodes);
     }
 
-    let dht_client = builder.build().unwrap();
+    let dht_client = builder.build().wrap_err("Failed to build DHT client")?;
     log::info!("Bootstrapping!");
     dht_client.bootstrapped();
     log::info!("Bootstrapping done!");
-    dht_client.announce_peer(info_hash_id, Some(port)).unwrap();
+    dht_client
+        .announce_peer(info_hash_id, Some(port))
+        .wrap_err("Failed to announce ourself on the DHT")?;
 
     let fetch_interval = tick(Duration::from_secs(20));
     let announce_interval = tick(Duration::from_mins(10));
@@ -70,7 +72,9 @@ fn dht_thread(
         let all_peers = dht_client.get_peers(info_hash_id);
         for peers in all_peers {
             log::info!("Got {} peers", peers.len());
-            cmd_tx.send(Command::ConnectToPeers(peers)).unwrap();
+            cmd_tx
+                .send(Command::ConnectToPeers(peers))
+                .expect("Command channel to not be full");
         }
     };
 
@@ -81,14 +85,15 @@ fn dht_thread(
                 query();
             }
             recv(announce_interval) -> _ => {
-                dht_client.announce_peer(info_hash_id, Some(port)).unwrap();
+                dht_client.announce_peer(info_hash_id, Some(port))
+                    .wrap_err("Failed to announce ourself on the DHT")?;
             }
             recv(shutdown_signal_rc) -> _ => {
                 let bootstrap_nodes = dht_client.to_bootstrap();
                 let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
                 std::fs::write(&dht_cache_path, dht_bootstrap_nodes_contet.as_bytes())
-                    .unwrap();
-                break;
+                    .wrap_err("Failed to write to dht cache")?;
+                break Ok(());
             }
 
         }
@@ -137,12 +142,13 @@ struct Cli {
     skip_dht_cache: bool,
 }
 
-fn main() -> io::Result<()> {
+fn main() -> color_eyre::Result<()> {
+    color_eyre::install()?;
     let cli = Cli::parse();
 
     // load or create config file (auto-creates if doesn't exist)
-    let mut vortex_config = config::load_or_create_config(cli.config_file)
-        .map_err(|e| io::Error::other(format!("Failed to load config: {}", e)))?;
+    let mut vortex_config =
+        config::load_or_create_config(cli.config_file).wrap_err("Failed to load config")?;
 
     // merge cli args with config
     vortex_config = config::merge_with_cli_args(
@@ -157,10 +163,10 @@ fn main() -> io::Result<()> {
 
     std::fs::create_dir_all(&paths.download_folder)?;
     if let Some(parent) = paths.log_file.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).wrap_err("Failed to create log file directory")?;
     }
     if let Some(parent) = paths.dht_cache.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).wrap_err("Failed to create dht cache directory")?;
     }
 
     let target = Box::new(
@@ -168,7 +174,8 @@ fn main() -> io::Result<()> {
             .create(true)
             .write(true)
             .truncate(true)
-            .open(&paths.log_file)?,
+            .open(&paths.log_file)
+            .wrap_err("Failed to open log file")?,
     );
     env_logger::builder()
         .target(env_logger::Target::Pipe(target))
@@ -179,7 +186,7 @@ fn main() -> io::Result<()> {
     {
         use metrics_exporter_prometheus::PrometheusBuilder;
         let builder = PrometheusBuilder::new().with_recommended_naming(true);
-        builder.install().unwrap();
+        builder.install().wrap_err("Failed to install prometheus")?;
     }
 
     let bt_config = vortex_config.bittorrent;
@@ -197,37 +204,41 @@ fn main() -> io::Result<()> {
                 Ok(metadata) => State::from_metadata_and_root(metadata, root.clone(), bt_config)?,
                 Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
                     if io_err.kind() == ErrorKind::NotFound {
-                        State::unstarted(decode_info_hash_hex(&info_hash), root.clone(), bt_config)
+                        State::unstarted(
+                            decode_info_hash_hex(&info_hash).wrap_err("Invalid info hash")?,
+                            root.clone(),
+                            bt_config,
+                        )
                     } else {
-                        panic!("Failed looking for stored metadata {io_err}");
+                        return Err(eyre!("Failed looking for stored metadata {io_err}"));
                     }
                 }
-                Err(err) => panic!("Failed looking for stored metadata {err}"),
+                Err(err) => return Err(eyre!("Failed looking for stored metadata {err}")),
             }
         }
         TorrentInfo {
             info_hash: None,
             torrent_file: Some(metadata),
         } => {
-            let parsed_metadata =
-                lava_torrent::torrent::v1::Torrent::read_from_file(metadata).unwrap();
-            State::from_metadata_and_root(parsed_metadata, root.clone(), bt_config)?
+            let parsed_metadata = lava_torrent::torrent::v1::Torrent::read_from_file(metadata)
+                .wrap_err("Invalid torrent file")?;
+            State::from_metadata_and_root(parsed_metadata, root.clone(), bt_config)
+                .wrap_err("Failed initialzing state")?
         }
         _ => unreachable!(),
     };
 
-    let info_hash_id = Id::from_bytes(state.info_hash()).unwrap();
+    let info_hash_id = Id::from_bytes(state.info_hash()).wrap_err("Invalid info_hash")?;
 
     let mut event_q: Queue<TorrentEvent, 512> = heapless::spsc::Queue::new();
 
     let (command_tx, command_rc) = std::sync::mpsc::sync_channel(256);
     let (event_tx, event_rc) = event_q.split();
 
-    let listener = TcpListener::bind(format!(
-        "0.0.0.0:{}",
-        vortex_config.port.unwrap_or_default()
-    ))
-    .unwrap();
+    let addr = format!("0.0.0.0:{}", vortex_config.port.unwrap_or_default());
+    let listener =
+        TcpListener::bind(&addr).wrap_err(format!("Failed binding tcp listener to {addr}"))?;
+
     let port = listener.local_addr().unwrap().port();
     let id = PeerId::generate();
     let metadata = state.as_ref().metadata().cloned();
@@ -250,6 +261,7 @@ fn main() -> io::Result<()> {
                 dht_cache_path,
                 cli.skip_dht_cache,
             )
+            .expect("DHT thread failed")
         });
 
         let mut app = VortexApp::new(
