@@ -160,6 +160,15 @@ pub struct MetadataMessage {
     pub total_size: Option<i32>,
 }
 
+/// Progress in downloading metadata per peer
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MetadataProgress {
+    /// Total number of metadata pieces to download
+    pub total_piece: usize,
+    /// Completed number of metadata pieces
+    pub completed_pieces: usize,
+}
+
 // BEP 9
 pub struct MetadataExtension {
     // The peers ID for the extension
@@ -338,6 +347,10 @@ impl ExtensionProtocol for MetadataExtension {
                 log::error!("Got metadata extension unknown type: {typ}");
             }
         }
+        connection.metadata_progress = Some(MetadataProgress {
+            total_piece: self.num_pieces(),
+            completed_pieces: self.completed.count_ones(),
+        });
         Ok(())
     }
 }
