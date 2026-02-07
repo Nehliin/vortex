@@ -317,13 +317,14 @@ impl ExtensionProtocol for MetadataExtension {
                 }
             }
             REJECT => {
-                self.inflight.set(piece_idx, true);
+                self.inflight.set(piece_idx, false);
                 log::warn!("Got reject request");
                 de.end().map_err(|_err| {
                     DisconnectReason::ProtocolError("Metadata request message longer than expected")
                 })?;
             }
             typ => {
+                self.inflight.set(piece_idx, false);
                 log::error!("Got metadata extension unknown type: {typ}");
             }
         }
