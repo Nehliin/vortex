@@ -187,6 +187,32 @@ mod test_utils {
         )
     }
 
+    pub fn setup_test_with_large_metadata() -> State {
+        let files: HashMap<String, Vec<u8>> =
+            [("f3.txt".to_owned(), vec![3_u8; SUBPIECE_SIZE as usize * 16])]
+                .into_iter()
+                .collect();
+        let torrent_name = format!("{}", rand::random::<u16>());
+        let torrent_tmp_dir = TempDir::new(&format!("{torrent_name}_torrent"));
+        let download_tmp_dir = TempDir::new(&format!("{torrent_name}_download_dir"));
+        let root = download_tmp_dir.path.clone();
+        let torrent_info = setup_torrent_with_metadata_size(
+            &torrent_name,
+            torrent_tmp_dir,
+            (SUBPIECE_SIZE * 2) as usize,
+            files,
+            true,
+        );
+        let state = InitializedState::new(&root, &torrent_info, Config::default()).unwrap();
+        State::inprogress(
+            torrent_info.info_hash_bytes().try_into().unwrap(),
+            root,
+            torrent_info,
+            state,
+            Config::default(),
+        )
+    }
+
     pub fn setup_uninitialized_test() -> (State, lava_torrent::torrent::v1::Torrent) {
         setup_uninitialized_test_with_metadata_size(false)
     }
