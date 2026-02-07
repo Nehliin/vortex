@@ -92,7 +92,7 @@ impl<'queue> VortexApp<'queue> {
         }
     }
 
-    pub fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
+    pub fn run(&mut self, mut terminal: DefaultTerminal) -> color_eyre::Result<()> {
         while !self.should_exit {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;

@@ -72,7 +72,7 @@ pub fn get_default_dht_cache_path() -> PathBuf {
 
 pub fn load_or_create_config(
     config_path: Option<PathBuf>,
-) -> Result<VortexConfig, Box<dyn std::error::Error>> {
+) -> color_eyre::eyre::Result<VortexConfig> {
     let config_path = config_path.unwrap_or_else(get_config_path);
 
     if config_path.exists() {
