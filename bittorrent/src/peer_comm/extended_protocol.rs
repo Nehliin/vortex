@@ -294,6 +294,7 @@ impl ExtensionProtocol for MetadataExtension {
                 }
                 let end = (start_offset + SUBPIECE_SIZE as usize).min(self.metadata.len());
                 let actual_data = &data[de.byte_offset()..];
+                connection.network_stats.download_throughput += actual_data.len() as u64;
                 self.metadata[start_offset..end].copy_from_slice(actual_data);
 
                 self.completed.set(piece_idx, true);
