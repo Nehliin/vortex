@@ -11,6 +11,7 @@ use ratatui::{
     text::Span,
     widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, Row, Table, Widget},
 };
+use vortex_bittorrent::MetadataProgress;
 
 const DIMMED_COLOR: Color = tailwind::SLATE.c500;
 
@@ -32,7 +33,9 @@ fn upload_style(is_dimmed: bool) -> Style {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProgressState {
-    DownloadingMetadata,
+    DownloadingMetadata {
+        metadata_progress: MetadataProgress,
+    },
     Downloading {
         pieces_completed: usize,
         total_pieces: usize,
@@ -45,7 +48,7 @@ pub enum ProgressState {
 
 impl ProgressState {
     fn is_dimmed(&self) -> bool {
-        matches!(self, ProgressState::DownloadingMetadata)
+        matches!(self, ProgressState::DownloadingMetadata { .. })
     }
 }
 
@@ -60,8 +63,11 @@ impl ProgressBar {
 
     fn calculate_display(&self) -> (u16, String, Color) {
         match self.state {
-            ProgressState::DownloadingMetadata => {
-                (0, "Downloading metadata...".to_string(), Color::Gray)
+            ProgressState::DownloadingMetadata { metadata_progress } => {
+                let pct = (100.0
+                    * (metadata_progress.completed_pieces as f64
+                        / metadata_progress.total_piece as f64)) as u16;
+                (pct, "Downloading metadata...".to_string(), Color::Gray)
             }
             ProgressState::Seeding => (100, "Seeding".to_string(), Color::Cyan),
             ProgressState::Downloading {

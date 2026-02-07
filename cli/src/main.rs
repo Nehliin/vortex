@@ -292,7 +292,9 @@ impl Widget for &mut VortexApp<'_> {
         let is_dimmed = state == AppState::DownloadingMetadata;
 
         let progress_state = match state {
-            AppState::DownloadingMetadata => ProgressState::DownloadingMetadata,
+            AppState::DownloadingMetadata => ProgressState::DownloadingMetadata {
+                metadata_progress: self.best_metadata_progress,
+            },
             AppState::Seeding => ProgressState::Seeding,
             AppState::Downloading => {
                 if let Some(metadata) = &self.metadata {
@@ -310,7 +312,9 @@ impl Widget for &mut VortexApp<'_> {
                         download_throughput,
                     }
                 } else {
-                    ProgressState::DownloadingMetadata
+                    ProgressState::DownloadingMetadata {
+                        metadata_progress: self.best_metadata_progress,
+                    }
                 }
             }
         };

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, default};
 
 use bitvec::{boxed::BitBox, vec::BitVec};
 use bt_bencode::{ByteString, Deserializer, Value};
