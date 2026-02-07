@@ -13,7 +13,7 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1.4.1", features = ["derive"]}
 #utp_socket = { path = "../utp_socket" }
 vortex-bittorrent = { path = "../bittorrent", features = ["fuzzing"] }
-bytes = "1.9"
+bytes = "1.11.1"
 
 # Prevent this from interfering with workspaces
 [workspace]
