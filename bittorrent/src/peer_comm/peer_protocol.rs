@@ -689,4 +689,69 @@ mod tests {
         assert_eq!(bitfield.len(), 0);
         assert!(bitfield.is_empty());
     }
+
+    #[test]
+    fn keepalive_encodes_as_four_zero_bytes() {
+        let msg = PeerMessage::KeepAlive;
+        let mut buf = Vec::with_capacity(msg.encoded_size());
+        msg.encode(&mut buf);
+        assert_eq!(buf, [0u8, 0, 0, 0]);
+    }
+
+    #[test]
+    fn keepalive_roundtrip_through_decoder() {
+        let mut decoder = PeerMessageDecoder::new(64);
+        decoder.append_data(&[0u8, 0, 0, 0]);
+        let msg = decoder.next().unwrap().unwrap();
+        assert_eq!(msg, PeerMessage::KeepAlive);
+        assert!(decoder.next().is_none());
+    }
+
+    #[test]
+    fn keepalive_interleaved_with_regular_messages() {
+        let mut encoded = BytesMut::new();
+
+        let messages = [
+            PeerMessage::Choke,
+            PeerMessage::KeepAlive,
+            PeerMessage::Unchoke,
+        ];
+        for msg in &messages {
+            let mut msg_buf = Vec::with_capacity(msg.encoded_size());
+            msg.encode(&mut msg_buf);
+            encoded.extend_from_slice(&msg_buf);
+        }
+
+        let mut decoder = PeerMessageDecoder::new(64);
+        decoder.append_data(&encoded);
+
+        let mut parsed = Vec::new();
+        while let Some(Ok(decoded)) = decoder.next() {
+            parsed.push(decoded);
+        }
+        assert_eq!(parsed, messages);
+    }
+
+    #[test]
+    fn multiple_consecutive_keepalives_decoded() {
+        let mut decoder = PeerMessageDecoder::new(64);
+        // Three keepalives back to back
+        decoder.append_data(&[0u8; 12]);
+
+        let mut count = 0;
+        while let Some(Ok(msg)) = decoder.next() {
+            assert_eq!(msg, PeerMessage::KeepAlive);
+            count += 1;
+        }
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn negative_message_length_is_invalid() {
+        let mut decoder = PeerMessageDecoder::new(64);
+        // -1 as i32 big-endian
+        decoder.append_data(&(-1_i32).to_be_bytes());
+        let result = decoder.next().unwrap();
+        assert!(result.is_err());
+    }
 }
