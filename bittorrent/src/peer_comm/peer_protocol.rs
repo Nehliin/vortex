@@ -220,6 +220,7 @@ pub enum PeerMessage {
     Cancel { index: i32, begin: i32, length: i32 },
     Piece { index: i32, begin: i32, data: Bytes },
     Extended { id: u8, data: Bytes },
+    KeepAlive,
 }
 
 impl PeerMessage {
@@ -257,6 +258,7 @@ impl PeerMessage {
             | PeerMessage::Cancel { .. } => 13,
             PeerMessage::Piece { data, .. } => 9 + data.len(),
             PeerMessage::Extended { data, .. } => 2 + data.len(),
+            PeerMessage::KeepAlive => 0,
         };
         // Length prefix + message
         std::mem::size_of::<i32>() + message_size
@@ -266,6 +268,7 @@ impl PeerMessage {
         // Message length, (encoded - size of len prefix)
         buf.put_i32((self.encoded_size() - std::mem::size_of::<i32>()) as i32);
         match self {
+            PeerMessage::KeepAlive => {}
             PeerMessage::Choke => {
                 buf.put_u8(Self::CHOKE);
             }
@@ -389,6 +392,8 @@ impl Iterator for PeerMessageDecoder {
                         let msg_length = self.data.get_i32();
                         if msg_length > 0 {
                             self.length = Some(msg_length as usize);
+                        } else if msg_length == 0 {
+                            break Some(Ok(PeerMessage::KeepAlive));
                         } else {
                             return Some(Err(io::ErrorKind::InvalidData.into()));
                         }
