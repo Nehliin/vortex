@@ -48,9 +48,10 @@ fn dht_thread(
     cmd_tx: SyncSender<Command>,
     shutdown_signal_rc: Receiver<()>,
     dht_cache_path: PathBuf,
+    skip_dht_cache: bool,
 ) {
     let mut builder = Dht::builder();
-    if dht_cache_path.exists() {
+    if dht_cache_path.exists() && !skip_dht_cache {
         let list = std::fs::read_to_string(&dht_cache_path).unwrap();
         let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
         builder.extra_bootstrap(&cached_nodes);
@@ -131,6 +132,9 @@ struct Cli {
     /// DHT cache path (defaults to $XDG_CACHE_HOME/vortex/dht_bootstrap_nodes)
     #[arg(long)]
     dht_cache: Option<PathBuf>,
+    /// Skip use of the DHT node cache and rebuild from bootstrap nodes
+    #[arg(long)]
+    skip_dht_cache: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -244,6 +248,7 @@ fn main() -> io::Result<()> {
                 cmd_tx_clone,
                 shutdown_signal_rc,
                 dht_cache_path,
+                cli.skip_dht_cache,
             )
         });
 
