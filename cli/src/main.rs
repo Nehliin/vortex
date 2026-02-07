@@ -288,10 +288,7 @@ impl Widget for &mut VortexApp<'_> {
         ])
         .areas(area);
 
-        let state = self.state();
-        let is_dimmed = state == AppState::DownloadingMetadata;
-
-        let progress_state = match state {
+        let progress_state = match self.state() {
             AppState::DownloadingMetadata => ProgressState::DownloadingMetadata {
                 metadata_progress: self.best_metadata_progress,
             },
@@ -326,7 +323,7 @@ impl Widget for &mut VortexApp<'_> {
             upload: extract_throughput_data(&self.total_upload_throughput),
         };
 
-        ThroughputGraph::new(throughput_data, is_dimmed).render(graph_area, buf);
+        ThroughputGraph::new(throughput_data).render(graph_area, buf);
 
         let info_data = InfoData {
             download_throughput: self
@@ -350,6 +347,6 @@ impl Widget for &mut VortexApp<'_> {
             time: self.time_field,
         };
 
-        InfoPanel::new(info_data, is_dimmed).render(info_area, buf);
+        InfoPanel::new(info_data).render(info_area, buf);
     }
 }
