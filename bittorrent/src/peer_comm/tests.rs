@@ -2325,6 +2325,81 @@ fn metadata_extension_request_response_capped_to_piece_size() {
 }
 
 #[test]
+fn metadata_extension_request_last_piece_smaller_than_subpiece() {
+    let mut download_state = setup_test_with_large_metadata();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[key_a].extended_extension = true;
+
+        let metadata = state_ref.metadata().unwrap().construct_info().encode();
+        let expected_size = metadata.len();
+        let piece_size = SUBPIECE_SIZE as usize;
+        let num_pieces = expected_size.div_ceil(piece_size);
+        let last_piece_size = expected_size - (num_pieces - 1) * piece_size;
+
+        // The last piece must be smaller than a full piece for this test to be meaningful
+        assert!(
+            last_piece_size < piece_size,
+            "Metadata size ({expected_size}) happens to be a multiple of {piece_size}; \
+             last piece would be full-sized, so this test is not exercising the right path"
+        );
+
+        // Set up extension handshake
+        let handshake_data = format!("d1:md11:ut_metadatai3ee13:metadata_sizei{expected_size}eee");
+        connections[key_a].handle_message(
+            PeerMessage::Extended {
+                id: 0,
+                data: handshake_data.as_bytes().to_vec().into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        connections[key_a].outgoing_msgs_buffer.clear();
+
+        // Request the last piece
+        let last_piece_idx = num_pieces - 1;
+        let request_data = format!("d8:msg_typei0e5:piecei{last_piece_idx}ee");
+        connections[key_a].handle_message(
+            PeerMessage::Extended {
+                id: 1,
+                data: request_data.as_bytes().to_vec().into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+
+        assert!(!connections[key_a].outgoing_msgs_buffer.is_empty());
+        let response = &connections[key_a].outgoing_msgs_buffer[0];
+        if let PeerMessage::Extended { data, .. } = &response {
+            let mut de = Deserializer::from_slice(&data[..]);
+            let message: MetadataMessage = <MetadataMessage>::deserialize(&mut de).unwrap();
+            assert_eq!(message.msg_type, 1); // DATA
+            assert_eq!(message.piece, last_piece_idx as i32);
+            assert_eq!(message.total_size, Some(expected_size as i32));
+
+            let metadata_piece = &data[de.byte_offset()..];
+            assert_eq!(
+                metadata_piece.len(),
+                last_piece_size,
+                "Last piece should be {last_piece_size} bytes, got {} bytes",
+                metadata_piece.len()
+            );
+            let start_offset = last_piece_idx * piece_size;
+            assert_eq!(metadata_piece, &metadata[start_offset..]);
+        } else {
+            panic!("Expected Extended message");
+        }
+        assert!(connections[key_a].pending_disconnect.is_none());
+    });
+}
+
+#[test]
 fn metadata_extension_data_message() {
     let mut download_state = setup_test();
 
