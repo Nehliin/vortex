@@ -272,7 +272,8 @@ impl ExtensionProtocol for MetadataExtension {
                             .outgoing_msgs_buffer
                             .push(self.reject(message.piece));
                     } else {
-                        let metadata_piece = &info_bytes[start_offset..];
+                        let end = (start_offset + SUBPIECE_SIZE as usize).min(info_bytes.len());
+                        let metadata_piece = &info_bytes[start_offset..end];
                         connection
                             .outgoing_msgs_buffer
                             .push(self.data(message.piece, metadata_piece));
