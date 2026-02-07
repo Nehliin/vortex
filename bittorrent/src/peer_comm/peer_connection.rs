@@ -18,7 +18,7 @@ use crate::{
     file_store::{DiskOp, DiskOpType},
     io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
     peer_comm::{
-        extended_protocol::{EXTENSIONS, UPLOAD_ONLY, init_extension},
+        extended_protocol::{EXTENSIONS, MetadataProgress, UPLOAD_ONLY, init_extension},
         peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
     },
     piece_selector::{DownloadedPiece, SUBPIECE_SIZE, Subpiece},
@@ -188,6 +188,8 @@ pub struct PeerConnection {
     pub fast_ext: bool,
     /// The peer supports extended extension
     pub extended_extension: bool,
+    /// Progress for downloading metadata if supported
+    pub metadata_progress: Option<MetadataProgress>,
     /// The peer have informed us that it is choking us.
     pub peer_choking: bool,
     /// The peer is interested what we have to offer
@@ -291,6 +293,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             accept_fast_pieces: Default::default(),
             pre_meta_have_msgs: Default::default(),
             network_write_inflight: false,
+            metadata_progress: None,
         }
     }
 
@@ -541,6 +544,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             download_throughput: self.network_stats.prev_download_throughput,
             // Same goes for upload data
             upload_throughput: self.network_stats.prev_upload_throughput,
+            metadata_progress: self.metadata_progress,
         }
     }
 

@@ -12,7 +12,7 @@ use crate::{
     buf_pool::{Buffer, BufferPool},
     event_loop::{ConnectionId, EventLoop},
     file_store::DiskOpType,
-    peer_comm::peer_protocol::PeerId,
+    peer_comm::{extended_protocol::MetadataProgress, peer_protocol::PeerId},
 };
 use crate::{
     file_store::DiskOp,
@@ -178,6 +178,8 @@ pub struct PeerMetrics {
     pub download_throughput: u64,
     /// The number of bytes per second we are currently uploading to the peer
     pub upload_throughput: u64,
+    /// Progress for downloading metadata if supported
+    pub metadata_progress: Option<MetadataProgress>,
 }
 
 /// Events from the torrent

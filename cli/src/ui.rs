@@ -11,28 +11,21 @@ use ratatui::{
     text::Span,
     widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, Row, Table, Widget},
 };
+use vortex_bittorrent::MetadataProgress;
 
-const DIMMED_COLOR: Color = tailwind::SLATE.c500;
-
-fn download_style(is_dimmed: bool) -> Style {
-    if is_dimmed {
-        Style::default().fg(DIMMED_COLOR)
-    } else {
-        Style::default().fg(Color::Green)
-    }
+fn download_style() -> Style {
+    Style::default().fg(Color::Green)
 }
 
-fn upload_style(is_dimmed: bool) -> Style {
-    if is_dimmed {
-        Style::default().fg(DIMMED_COLOR)
-    } else {
-        Style::default().fg(Color::Magenta)
-    }
+fn upload_style() -> Style {
+    Style::default().fg(Color::Magenta)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProgressState {
-    DownloadingMetadata,
+    DownloadingMetadata {
+        metadata_progress: MetadataProgress,
+    },
     Downloading {
         pieces_completed: usize,
         total_pieces: usize,
@@ -41,12 +34,6 @@ pub enum ProgressState {
         download_throughput: f64,
     },
     Seeding,
-}
-
-impl ProgressState {
-    fn is_dimmed(&self) -> bool {
-        matches!(self, ProgressState::DownloadingMetadata)
-    }
 }
 
 pub struct ProgressBar {
@@ -60,8 +47,15 @@ impl ProgressBar {
 
     fn calculate_display(&self) -> (u16, String, Color) {
         match self.state {
-            ProgressState::DownloadingMetadata => {
-                (0, "Downloading metadata...".to_string(), Color::Gray)
+            ProgressState::DownloadingMetadata { metadata_progress } => {
+                let pct = if metadata_progress.total_piece == 0 {
+                    0
+                } else {
+                    (100.0
+                        * (metadata_progress.completed_pieces as f64
+                            / metadata_progress.total_piece as f64)) as u16
+                };
+                (pct, "Downloading metadata...".to_string(), Color::Gray)
             }
             ProgressState::Seeding => (100, "Seeding".to_string(), Color::Cyan),
             ProgressState::Downloading {
@@ -94,19 +88,12 @@ impl ProgressBar {
 
 impl Widget for ProgressBar {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let is_dimmed = self.state.is_dimmed();
         let (percent, label, gauge_color) = self.calculate_display();
-
-        let border_color = if is_dimmed {
-            tailwind::SLATE.c600
-        } else {
-            tailwind::SLATE.c200
-        };
 
         let block = Block::new()
             .borders(Borders::all())
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .fg(border_color);
+            .fg(tailwind::SLATE.c200);
 
         Gauge::default()
             .block(block)
@@ -124,12 +111,11 @@ pub struct ThroughputData {
 
 pub struct ThroughputGraph {
     data: ThroughputData,
-    is_dimmed: bool,
 }
 
 impl ThroughputGraph {
-    pub fn new(data: ThroughputData, is_dimmed: bool) -> Self {
-        Self { data, is_dimmed }
+    pub fn new(data: ThroughputData) -> Self {
+        Self { data }
     }
 
     fn calculate_value_bounds(&self) -> (f64, f64) {
@@ -159,11 +145,7 @@ impl ThroughputGraph {
 
 impl Widget for ThroughputGraph {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let label_style = if self.is_dimmed {
-            Style::default().fg(DIMMED_COLOR)
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        };
+        let label_style = Style::default().add_modifier(Modifier::BOLD);
 
         let (oldest_time, _) = self.data.download.first().copied().unwrap_or((0.0, 0.0));
         let (newest_time, _) = self.data.download.last().copied().unwrap_or((0.0, 0.0));
@@ -188,27 +170,18 @@ impl Widget for ThroughputGraph {
                 .name("Download")
                 .graph_type(ratatui::widgets::GraphType::Line)
                 .marker(ratatui::symbols::Marker::Braille)
-                .style(download_style(self.is_dimmed))
+                .style(download_style())
                 .data(&self.data.download),
             Dataset::default()
                 .name("Upload")
                 .graph_type(ratatui::widgets::GraphType::Line)
                 .marker(ratatui::symbols::Marker::Braille)
-                .style(upload_style(self.is_dimmed))
+                .style(upload_style())
                 .data(&self.data.upload),
         ];
 
-        let border_style = if self.is_dimmed {
-            Style::default().fg(DIMMED_COLOR)
-        } else {
-            Style::default()
-        };
-
-        let axis_style = if self.is_dimmed {
-            Style::default().fg(DIMMED_COLOR)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
+        let border_style = Style::default();
+        let axis_style = Style::default().fg(Color::Gray);
 
         let chart = Chart::new(datasets)
             .block(
@@ -252,22 +225,17 @@ pub struct InfoData {
 
 pub struct InfoPanel {
     data: InfoData,
-    is_dimmed: bool,
 }
 
 impl InfoPanel {
-    pub fn new(data: InfoData, is_dimmed: bool) -> Self {
-        Self { data, is_dimmed }
+    pub fn new(data: InfoData) -> Self {
+        Self { data }
     }
 }
 
 impl Widget for InfoPanel {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let default_style = if self.is_dimmed {
-            Style::default().fg(DIMMED_COLOR)
-        } else {
-            Style::default()
-        };
+        let default_style = Style::default();
 
         let (time_header_text, time_text, time_style) = match self.data.time {
             Time::StartedAt(system_time) => (
@@ -294,29 +262,19 @@ impl Widget for InfoPanel {
             ratatui::text::Text::styled(self.data.name, default_style),
             ratatui::text::Text::styled(
                 format!("{}/s", human_bytes(self.data.download_throughput)),
-                download_style(self.is_dimmed),
+                download_style(),
             ),
             ratatui::text::Text::styled(
                 format!("{}/s", human_bytes(self.data.upload_throughput)),
-                upload_style(self.is_dimmed),
+                upload_style(),
             ),
             ratatui::text::Text::styled(format!("{}", self.data.num_connections), default_style),
             ratatui::text::Text::styled(time_text, time_style),
         ]);
 
-        let border_style = if self.is_dimmed {
-            Style::default().fg(DIMMED_COLOR)
-        } else {
-            Style::default()
-        };
-
         Table::new(vec![row], [ratatui::layout::Constraint::Fill(1); 5])
             .header(Row::new(headers).style(default_style))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style),
-            )
+            .block(Block::default().borders(Borders::ALL))
             .style(default_style)
             .render(area, buf);
     }

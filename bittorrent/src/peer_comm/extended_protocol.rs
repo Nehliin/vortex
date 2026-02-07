@@ -41,7 +41,7 @@ pub fn init_extension<'state>(
 
             let mut metadata = MetadataExtension::new(id, metadata_size as usize);
             if !state_ref.is_initialzied() {
-                for i in 0..16.min(metadata.num_pieces()) {
+                for i in 0..8.min(metadata.num_pieces()) {
                     outgoing_msgs_buffer.push(metadata.request(i as i32));
                 }
             }
@@ -158,6 +158,15 @@ pub struct MetadataMessage {
     pub piece: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_size: Option<i32>,
+}
+
+/// Progress in downloading metadata per peer
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MetadataProgress {
+    /// Total number of metadata pieces to download
+    pub total_piece: usize,
+    /// Completed number of metadata pieces
+    pub completed_pieces: usize,
 }
 
 // BEP 9
@@ -285,6 +294,7 @@ impl ExtensionProtocol for MetadataExtension {
                 }
                 let end = (start_offset + SUBPIECE_SIZE as usize).min(self.metadata.len());
                 let actual_data = &data[de.byte_offset()..];
+                connection.network_stats.download_throughput += actual_data.len() as u64;
                 self.metadata[start_offset..end].copy_from_slice(actual_data);
 
                 self.completed.set(piece_idx, true);
@@ -317,16 +327,31 @@ impl ExtensionProtocol for MetadataExtension {
                 }
             }
             REJECT => {
-                self.inflight.set(piece_idx, true);
+                if let Some(index) = self.inflight.first_zero() {
+                    connection
+                        .outgoing_msgs_buffer
+                        .push(self.request(index as i32));
+                }
+                self.inflight.set(piece_idx, false);
                 log::warn!("Got reject request");
                 de.end().map_err(|_err| {
                     DisconnectReason::ProtocolError("Metadata request message longer than expected")
                 })?;
             }
             typ => {
+                if let Some(index) = self.inflight.first_zero() {
+                    connection
+                        .outgoing_msgs_buffer
+                        .push(self.request(index as i32));
+                }
+                self.inflight.set(piece_idx, false);
                 log::error!("Got metadata extension unknown type: {typ}");
             }
         }
+        connection.metadata_progress = Some(MetadataProgress {
+            total_piece: self.num_pieces(),
+            completed_pieces: self.completed.count_ones(),
+        });
         Ok(())
     }
 }

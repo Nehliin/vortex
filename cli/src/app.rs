@@ -13,7 +13,7 @@ use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
 };
-use vortex_bittorrent::{Command, TorrentEvent};
+use vortex_bittorrent::{Command, MetadataProgress, TorrentEvent};
 
 use crate::ui::Time;
 
@@ -47,6 +47,8 @@ pub struct VortexApp<'queue> {
     pub num_connections: usize,
     /// Torrent metadata (available after metadata download)
     pub metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
+    /// The progress for downloading metada from the furthest along peer
+    pub best_metadata_progress: MetadataProgress,
     /// Root directory for downloads
     pub root: PathBuf,
     /// Whether the torrent download is complete
@@ -75,6 +77,7 @@ impl<'queue> VortexApp<'queue> {
             total_upload_throughput: Box::new(HistoryBuf::new()),
             num_connections: 0,
             is_complete,
+            best_metadata_progress: Default::default(),
             metadata,
             time_field: Time::StartedAt(SystemTime::now()),
             root,
@@ -145,6 +148,11 @@ impl<'queue> VortexApp<'queue> {
                 } => {
                     self.pieces_completed = pieces_completed;
                     self.num_connections = peer_metrics.len();
+                    self.best_metadata_progress = peer_metrics
+                        .iter()
+                        .filter_map(|peer| peer.metadata_progress)
+                        .max_by(|x, y| x.completed_pieces.cmp(&y.completed_pieces))
+                        .unwrap_or_default();
                     let tick_download_throughput: u64 =
                         peer_metrics.iter().map(|val| val.download_throughput).sum();
                     let tick_upload_throughput: u64 =

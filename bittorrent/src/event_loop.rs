@@ -1224,6 +1224,15 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             connection.pending_disconnect = Some(DisconnectReason::Idle);
             continue;
         }
+        // Take delta into account when calculating throughput
+        connection.network_stats.download_throughput = (connection.network_stats.download_throughput
+            as f64
+            / tick_delta.as_secs_f64())
+        .round() as u64;
+        connection.network_stats.upload_throughput =
+            (connection.network_stats.upload_throughput as f64 / tick_delta.as_secs_f64()).round()
+                as u64;
+
         if let Some(torrent_state) = torrent_state.state() {
             // TODO: If we are not using fast extension this might be triggered by a snub
             if let Some(time) = connection.last_received_subpiece {
@@ -1236,14 +1245,6 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
                     connection.snubbed = false;
                 }
             }
-
-            // Take delta into account when calculating throughput
-            connection.network_stats.download_throughput =
-                (connection.network_stats.download_throughput as f64 / tick_delta.as_secs_f64())
-                    .round() as u64;
-            connection.network_stats.upload_throughput =
-                (connection.network_stats.upload_throughput as f64 / tick_delta.as_secs_f64())
-                    .round() as u64;
             if !connection.peer_choking {
                 // slow start win size increase is handled in update_stats
                 if !connection.slow_start {
@@ -1263,33 +1264,31 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
                 log::debug!("[Peer {}] Exiting slow start", connection.peer_id);
                 connection.slow_start = false;
             }
-            connection.network_stats.prev_download_throughput =
-                connection.network_stats.download_throughput;
-            connection.network_stats.prev_upload_throughput =
-                connection.network_stats.upload_throughput;
-            connection.network_stats.download_throughput = 0;
-            connection.network_stats.upload_throughput = 0;
         }
+        connection.network_stats.prev_download_throughput =
+            connection.network_stats.download_throughput;
+        connection.network_stats.prev_upload_throughput =
+            connection.network_stats.upload_throughput;
+        connection.network_stats.download_throughput = 0;
+        connection.network_stats.upload_throughput = 0;
     }
     let mut peer_metrics = Vec::with_capacity(connections.len());
-    if let Some(torrent_state) = torrent_state.state() {
-        // Request new pieces and fill up request queues
-        let mut peer_bandwidth: Vec<_> = connections
-            .iter_mut()
-            .filter_map(|(key, peer)| {
-                // Skip connections that are pending disconnect
-                if peer.pending_disconnect.is_none() {
-                    Some((key, peer.remaining_request_queue_spots()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
-        for (peer_key, mut bandwidth) in peer_bandwidth {
-            let peer = &mut connections[peer_key];
-
+    // Request new pieces and fill up request queues
+    let mut peer_bandwidth: Vec<_> = connections
+        .iter_mut()
+        .filter_map(|(key, peer)| {
+            // Skip connections that are pending disconnect
+            if peer.pending_disconnect.is_none() {
+                Some((key, peer.remaining_request_queue_spots()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    peer_bandwidth.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse());
+    for (peer_key, mut bandwidth) in peer_bandwidth {
+        let peer = &mut connections[peer_key];
+        if let Some(torrent_state) = torrent_state.state() {
             while {
                 let bandwitdth_available_for_new_piece =
                     bandwidth > (torrent_state.piece_selector.avg_num_subpieces() as usize / 2);
@@ -1310,9 +1309,9 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
                 }
             }
             peer.fill_request_queue();
-            let metrics = peer.report_metrics();
-            peer_metrics.push(metrics);
         }
+        let metrics = peer.report_metrics();
+        peer_metrics.push(metrics);
     }
     report_tick_metrics(
         torrent_state,
