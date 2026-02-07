@@ -295,6 +295,9 @@ impl ExtensionProtocol for MetadataExtension {
                 }
                 let end = (start_offset + SUBPIECE_SIZE as usize).min(self.metadata.len());
                 let actual_data = &data[de.byte_offset()..];
+                if actual_data.len() < end - start_offset {
+                    return Err(DisconnectReason::ProtocolError("Invalid DATA length"));
+                }
                 connection.network_stats.download_throughput += actual_data.len() as u64;
                 self.metadata[start_offset..end].copy_from_slice(actual_data);
 
@@ -328,24 +331,32 @@ impl ExtensionProtocol for MetadataExtension {
                 }
             }
             REJECT => {
-                if let Some(index) = self.inflight.first_zero() {
-                    connection
-                        .outgoing_msgs_buffer
-                        .push(self.request(index as i32));
+                if piece_idx < self.num_pieces() {
+                    if let Some(index) = self.inflight.first_zero() {
+                        connection
+                            .outgoing_msgs_buffer
+                            .push(self.request(index as i32));
+                    }
+                    self.inflight.set(piece_idx, false);
+                    log::warn!("Got reject request");
+                } else {
+                    log::error!("Got invalid reject request");
+                    return Err(DisconnectReason::ProtocolError("Invalid reject request"));
                 }
-                self.inflight.set(piece_idx, false);
-                log::warn!("Got reject request");
                 de.end().map_err(|_err| {
                     DisconnectReason::ProtocolError("Metadata request message longer than expected")
                 })?;
             }
             typ => {
-                if let Some(index) = self.inflight.first_zero() {
-                    connection
-                        .outgoing_msgs_buffer
-                        .push(self.request(index as i32));
+                if piece_idx < self.num_pieces() {
+                    if let Some(index) = self.inflight.first_zero() {
+                        connection
+                            .outgoing_msgs_buffer
+                            .push(self.request(index as i32));
+                    }
+                    self.inflight.set(piece_idx, false);
                 }
-                self.inflight.set(piece_idx, false);
+
                 log::error!("Got metadata extension unknown type: {typ}");
             }
         }
