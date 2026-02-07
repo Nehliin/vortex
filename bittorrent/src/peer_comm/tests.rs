@@ -4226,6 +4226,128 @@ fn seeding_round_robin_rotation_after_quota() {
 }
 
 #[test]
+fn incoming_keepalive_updates_last_seen() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+
+        // Fake that this peer hasn't been seen in a while
+        connections[key].last_seen = Instant::now() - Duration::from_secs(60);
+        assert!(connections[key].last_seen.elapsed() >= Duration::from_secs(59));
+
+        connections[key].handle_message(
+            PeerMessage::KeepAlive,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+
+        // last_seen should have been refreshed
+        assert!(connections[key].last_seen.elapsed() < Duration::from_millis(50));
+        // No disconnect should be pending
+        assert!(connections[key].pending_disconnect.is_none());
+    });
+}
+
+#[test]
+fn keepalive_not_sent_before_100s_elapsed() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+
+        // Freshly created connection - last_keepalive_sent is now
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &Default::default(),
+            &mut state_ref,
+            &mut event_tx,
+        );
+
+        assert!(
+            !connections[key]
+                .outgoing_msgs_buffer
+                .contains(&PeerMessage::KeepAlive),
+            "Should not send keepalive right after connecting"
+        );
+
+        // Simulate 50 seconds elapsed - still under the 100s threshold
+        connections[key].last_keepalive_sent = Instant::now() - Duration::from_secs(50);
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &Default::default(),
+            &mut state_ref,
+            &mut event_tx,
+        );
+
+        assert!(
+            !connections[key]
+                .outgoing_msgs_buffer
+                .contains(&PeerMessage::KeepAlive),
+            "Should not send keepalive before 100s threshold"
+        );
+    });
+}
+
+#[test]
+fn keepalive_sent_after_100s_elapsed() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+
+        // Simulate 101 seconds since last keepalive
+        connections[key].last_keepalive_sent = Instant::now() - Duration::from_secs(101);
+
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &Default::default(),
+            &mut state_ref,
+            &mut event_tx,
+        );
+        assert!(connections[key].last_keepalive_sent.elapsed() < Duration::from_millis(50));
+        assert!(
+            connections[key]
+                .outgoing_msgs_buffer
+                .contains(&PeerMessage::KeepAlive),
+            "Should send keepalive after 100s of inactivity"
+        );
+
+        // last_keepalive_sent should have been refreshed, so a second tick won't spam another
+        connections[key].outgoing_msgs_buffer.clear();
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &Default::default(),
+            &mut state_ref,
+            &mut event_tx,
+        );
+
+        assert!(
+            !connections[key]
+                .outgoing_msgs_buffer
+                .contains(&PeerMessage::KeepAlive),
+            "Should not send a second keepalive immediately after the first"
+        );
+    });
+}
+
+#[test]
 fn seeding_quota_not_met_keeps_unchoked() {
     let mut download_state = setup_seeding_test();
 

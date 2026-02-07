@@ -1224,6 +1224,9 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             connection.pending_disconnect = Some(DisconnectReason::Idle);
             continue;
         }
+        if connection.last_keepalive_sent.elapsed() > Duration::from_secs(100) {
+            connection.keep_alive();
+        }
         // Take delta into account when calculating throughput
         connection.network_stats.download_throughput = (connection.network_stats.download_throughput
             as f64
