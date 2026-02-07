@@ -41,7 +41,7 @@ pub fn init_extension<'state>(
 
             let mut metadata = MetadataExtension::new(id, metadata_size as usize);
             if !state_ref.is_initialzied() {
-                for i in 0..16.min(metadata.num_pieces()) {
+                for i in 0..8.min(metadata.num_pieces()) {
                     outgoing_msgs_buffer.push(metadata.request(i as i32));
                 }
             }
@@ -317,6 +317,11 @@ impl ExtensionProtocol for MetadataExtension {
                 }
             }
             REJECT => {
+                if let Some(index) = self.inflight.first_zero() {
+                    connection
+                        .outgoing_msgs_buffer
+                        .push(self.request(index as i32));
+                }
                 self.inflight.set(piece_idx, false);
                 log::warn!("Got reject request");
                 de.end().map_err(|_err| {
@@ -324,6 +329,11 @@ impl ExtensionProtocol for MetadataExtension {
                 })?;
             }
             typ => {
+                if let Some(index) = self.inflight.first_zero() {
+                    connection
+                        .outgoing_msgs_buffer
+                        .push(self.request(index as i32));
+                }
                 self.inflight.set(piece_idx, false);
                 log::error!("Got metadata extension unknown type: {typ}");
             }
