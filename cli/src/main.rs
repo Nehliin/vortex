@@ -49,19 +49,21 @@ fn dht_thread(
     shutdown_signal_rc: Receiver<()>,
     dht_cache_path: PathBuf,
     skip_dht_cache: bool,
-) {
+) -> color_eyre::eyre::Result<()> {
     let mut builder = Dht::builder();
     if dht_cache_path.exists() && !skip_dht_cache {
-        let list = std::fs::read_to_string(&dht_cache_path).unwrap();
+        let list = std::fs::read_to_string(&dht_cache_path).wrap_err("Failed to dht_cache")?;
         let cached_nodes: Vec<String> = list.lines().map(|line| line.to_string()).collect();
         builder.extra_bootstrap(&cached_nodes);
     }
 
-    let dht_client = builder.build().unwrap();
+    let dht_client = builder.build().wrap_err("Failed to build DHT client")?;
     log::info!("Bootstrapping!");
     dht_client.bootstrapped();
     log::info!("Bootstrapping done!");
-    dht_client.announce_peer(info_hash_id, Some(port)).unwrap();
+    dht_client
+        .announce_peer(info_hash_id, Some(port))
+        .wrap_err("Failed to announce ourself on the DHT")?;
 
     let fetch_interval = tick(Duration::from_secs(20));
     let announce_interval = tick(Duration::from_mins(10));
@@ -70,7 +72,9 @@ fn dht_thread(
         let all_peers = dht_client.get_peers(info_hash_id);
         for peers in all_peers {
             log::info!("Got {} peers", peers.len());
-            cmd_tx.send(Command::ConnectToPeers(peers)).unwrap();
+            cmd_tx
+                .send(Command::ConnectToPeers(peers))
+                .expect("Command channel to not be full");
         }
     };
 
@@ -81,14 +85,15 @@ fn dht_thread(
                 query();
             }
             recv(announce_interval) -> _ => {
-                dht_client.announce_peer(info_hash_id, Some(port)).unwrap();
+                dht_client.announce_peer(info_hash_id, Some(port))
+                    .wrap_err("Failed to announce ourself on the DHT")?;
             }
             recv(shutdown_signal_rc) -> _ => {
                 let bootstrap_nodes = dht_client.to_bootstrap();
                 let dht_bootstrap_nodes_contet = bootstrap_nodes.join("\n");
                 std::fs::write(&dht_cache_path, dht_bootstrap_nodes_contet.as_bytes())
-                    .unwrap();
-                break;
+                    .wrap_err("Failed to write to dht cache")?;
+                break Ok(());
             }
 
         }
@@ -256,6 +261,7 @@ fn main() -> color_eyre::Result<()> {
                 dht_cache_path,
                 cli.skip_dht_cache,
             )
+            .expect("DHT thread failed")
         });
 
         let mut app = VortexApp::new(
