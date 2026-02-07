@@ -231,6 +231,8 @@ pub struct PeerConnection {
     pub allowed_fast_pieces: Vec<i32>,
     // The pieces we allow others to request when choked
     pub accept_fast_pieces: Vec<i32>,
+    // When was the last time we sent a keep alive message to the peer?
+    pub last_keepalive_sent: Instant,
     // TODO improve
     pub pre_meta_have_msgs: Vec<PeerMessage>,
     // Is there an inflight network write operation?
@@ -285,6 +287,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             max_queue_size: 200,
             moving_rtt: Default::default(),
             pending_disconnect: None,
+            // We've just connected which is good enough as a last keep alive
+            last_keepalive_sent: Instant::now(),
             network_stats: Default::default(),
             outgoing_msgs_buffer: Default::default(),
             extensions: Default::default(),
@@ -393,6 +397,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         // this might happen after an unchoke request
         self.is_interesting = true;
         self.outgoing_msgs_buffer.push(PeerMessage::Interested);
+    }
+
+    pub fn keep_alive(&mut self) {
+        self.last_keepalive_sent = Instant::now();
+        self.outgoing_msgs_buffer.push(PeerMessage::KeepAlive);
     }
 
     pub fn not_interested(&mut self) {
@@ -617,6 +626,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     ) {
         self.last_seen = Instant::now();
         match peer_message {
+            PeerMessage::KeepAlive => {
+                log::debug!("[Peer: {}] sent keep alive", self.peer_id);
+            }
             PeerMessage::Choke => {
                 log::debug!("[Peer: {}] Peer is choking us!", self.peer_id);
                 self.peer_choking = true;
