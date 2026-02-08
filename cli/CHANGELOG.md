@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/Nehliin/vortex/compare/vortex-cli-v0.3.0...vortex-cli-v0.3.1) - 2026-02-08
+
+### Changed 
+
+- Removed the dimmed ui during the downloading metadata stage ([#100](https://github.com/Nehliin/vortex/pull/100))
+
+### Fixed 
+
+- Properly report peers, upload/download throughput during the downloading metadata state ([#100](https://github.com/Nehliin/vortex/pull/100))
+
+### Added
+
+- Report metadata download progress in the downloading state ([#100](https://github.com/Nehliin/vortex/pull/100))
+- Improve CLI error reporting by moving over to color_eyre ([#98](https://github.com/Nehliin/vortex/pull/98))
+- Support skipping use of dht node cache using the `--skip-dht-cache` ([#97](https://github.com/Nehliin/vortex/pull/97))
+
 ## [0.3.0](https://github.com/Nehliin/vortex/compare/vortex-cli-v0.2.0...vortex-cli-v0.3.0) - 2026-01-25
 
 - (refactor) Make metrics an optional feature to vortex-cli ([#93](https://github.com/Nehliin/vortex/pull/93))
