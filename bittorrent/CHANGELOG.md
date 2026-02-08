@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.4.0...vortex-bittorrent-v0.5.0) - 2026-02-08
+
+### Added
+
+- Report metadata progress in `PeerMetrics` ([#100](https://github.com/Nehliin/vortex/pull/100))
+
+### Perf
+
+- Remove incorrect usage of IO_LINK flag ([#96](https://github.com/Nehliin/vortex/pull/96)). After [#81](https://github.com/Nehliin/vortex/pull/81) only one vectored write is inflight at a time for each peer. It is also re-sent if not fully completed, thus guaranteeing ordering of all writes to the peer. This means that the IO_LINK is completely pointless for writes. Not only is it pointless, it slowed down the client by introducing arbitrary dependencies between peers since the IO_LINK would link vectored writes between peers. Peer A could link the write to the write afterwards which would after #81 always belong to a different peer. This wasn't the case when messages were sent as individual writes.
+
+### Fixed
+
+- Fix critical bug in extension message handshake ([#103](https://github.com/Nehliin/vortex/pull/103)). With this fix it should be _significantly_ faster to download metadata from the swarm.
+- Handle Keepalive messages ([#102](https://github.com/Nehliin/vortex/pull/102)).
+- Metadata extension violation handling REQUEST messages ([#101](https://github.com/Nehliin/vortex/pull/101))
+
+### Other
+
+- Avoid double panic ([#95](https://github.com/Nehliin/vortex/pull/95))
+
 ## [0.4.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.3.0...vortex-bittorrent-v0.4.0) - 2026-01-25
 
 - (fix) ECONNRESET during TCP handshakes weren't properly handled and invalid bittorrent handshakes with the correct length would cause panics ([#90](https://github.com/Nehliin/vortex/pull/90))

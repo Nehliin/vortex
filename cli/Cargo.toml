@@ -1,6 +1,6 @@
 [package]
 name = "vortex-cli"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Nehliin"]
 edition = "2024"
 description = "A cli for downloading torrents using the bittorrent protocol(s). Built on top of io-uring"
@@ -13,7 +13,7 @@ anyhow = { workspace = true }
 lava_torrent = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
-vortex-bittorrent = { path = "../bittorrent", version = "0.4" }
+vortex-bittorrent = { path = "../bittorrent", version = "0.5" }
 heapless = { workspace = true }
 tikv-jemallocator = "0.6"
 mainline = { version = "6", default-features = false, features = ["node"]}
