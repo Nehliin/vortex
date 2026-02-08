@@ -1163,43 +1163,44 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         };
 
                         for (key, val) in m {
-                            let Some(id) = val.as_u64().and_then(|val| u8::try_from(val).ok())
+                            let Some(their_id) =
+                                val.as_u64().and_then(|val| u8::try_from(val).ok())
                             else {
                                 self.pending_disconnect =
                                     Some(DisconnectReason::ProtocolError("metadata id not an u8"));
                                 return;
                             };
-                            if self.extensions.contains_key(&id) {
-                                continue;
-                            }
                             let Ok(extension_name) = str::from_utf8(key.as_slice()) else {
                                 self.pending_disconnect =
                                     Some(DisconnectReason::ProtocolError("Invalid extension name"));
                                 return;
                             };
+                            let our_ext =
+                                EXTENSIONS.iter().find(|(name, _)| *name == extension_name);
+                            if let Some((_, our_id)) = our_ext
+                                && self.extensions.contains_key(our_id)
+                            {
+                                continue;
+                            }
                             log::debug!(
                                 "[Peer: {}] Claims to support: {extension_name}",
                                 self.peer_id
                             );
                             match init_extension(
-                                id,
+                                their_id,
                                 extension_name,
                                 dict,
                                 state_ref,
                                 &mut self.outgoing_msgs_buffer,
                             ) {
                                 Ok(Some(extension)) => {
-                                    let id = EXTENSIONS
-                                        .iter()
-                                        .find_map(|(str, id)| {
-                                            (str == &extension_name).then_some(id)
-                                        })
-                                        .expect("Extension ID expected to be found");
+                                    let (extension_name, our_id) =
+                                        our_ext.expect("Extension ID expected to be found");
                                     log::debug!(
                                         "[Peer: {}] Initialized extension: {extension_name}",
                                         self.peer_id
                                     );
-                                    self.extensions.insert(*id, extension);
+                                    self.extensions.insert(*our_id, extension);
                                 }
                                 Ok(None) => {
                                     log::debug!(

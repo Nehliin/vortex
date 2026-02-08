@@ -4454,6 +4454,73 @@ fn seeding_time_threshold_not_met_keeps_unchoked() {
 }
 
 #[test]
+fn extension_handshake_with_upload_only_and_ut_metadata() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[key].extended_extension = true;
+
+        let expected_size = state_ref
+            .metadata()
+            .unwrap()
+            .construct_info()
+            .encode()
+            .len();
+
+        // Simulate a libtorrent-based peer (e.g. qBittorrent)
+        // libtorrent currently assigns: upload_only=3, ut_metadata=2, ut_holepunch=4
+        // Bencode dicts are sorted alphabetically, so the order is:
+        //   upload_only (id=3) -> ut_holepunch (id=4) -> ut_metadata (id=2) -> ut_pex (id=1)
+        let mut handshake = std::collections::BTreeMap::new();
+        let m: std::collections::BTreeMap<&str, u8> = [
+            ("upload_only", 3u8),
+            ("ut_holepunch", 4u8),
+            ("ut_metadata", 2u8),
+            ("ut_pex", 1u8),
+        ]
+        .into_iter()
+        .collect();
+        handshake.insert("m", bt_bencode::to_value(&m).unwrap());
+        handshake.insert(
+            "metadata_size",
+            bt_bencode::to_value(&expected_size).unwrap(),
+        );
+
+        let handshake_data = bt_bencode::to_vec(&handshake).unwrap();
+        connections[key].handle_message(
+            PeerMessage::Extended {
+                id: 0,
+                data: handshake_data.into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+
+        assert!(
+            connections[key].pending_disconnect.is_none(),
+            "Should not disconnect"
+        );
+
+        // Both our extensions (ut_metadata = 1, upload_only = 2) should be initialized
+        assert!(
+            connections[key].extensions.contains_key(&2),
+            "upload_only extension (our ID=2) should be initialized"
+        );
+        assert!(
+            connections[key].extensions.contains_key(&1),
+            "ut_metadata extension (our ID=1) should be initialized, \
+             but gets skipped because the peer's ut_metadata ID (2) \
+             collides with our internal upload_only ID (2) in the extensions map"
+        );
+    });
+}
+
+#[test]
 fn seeding_quota_complete_peers_deprioritized() {
     let mut download_state = setup_seeding_test();
 
