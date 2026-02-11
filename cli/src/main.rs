@@ -4,8 +4,8 @@ use std::{
 };
 
 use clap::{Args, Parser};
-use color_eyre::eyre::{WrapErr, eyre};
-use crossbeam_channel::{Receiver, bounded, select, tick};
+use color_eyre::eyre::{eyre, WrapErr};
+use crossbeam_channel::{bounded, select, tick, Receiver};
 use heapless::spsc::Queue;
 use mainline::{Dht, Id};
 use ratatui::{
@@ -21,8 +21,8 @@ mod ui;
 
 use app::{AppState, VortexApp};
 use ui::{
-    InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData, ThroughputGraph,
-    extract_throughput_data,
+    extract_throughput_data, InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData,
+    ThroughputGraph,
 };
 
 use tikv_jemallocator::Jemalloc;
@@ -113,6 +113,9 @@ struct TorrentInfo {
     /// be skipped and the torrent downlaod can start immediately
     #[arg(short, long)]
     torrent_file: Option<PathBuf>,
+
+    #[arg(short, long)]
+    magnet_link: Option<String>,
 }
 
 /// Vortex bittorrent client cli. Fast trackerless torrent downloads using modern io_uring techniques.
@@ -196,6 +199,7 @@ fn main() -> color_eyre::Result<()> {
         TorrentInfo {
             info_hash: Some(info_hash),
             torrent_file: None,
+            magnet_link: None,
         } => {
             match lava_torrent::torrent::v1::Torrent::read_from_file(
                 root.join(info_hash.to_lowercase()),
@@ -218,12 +222,33 @@ fn main() -> color_eyre::Result<()> {
         }
         TorrentInfo {
             info_hash: None,
+            magnet_link: None,
             torrent_file: Some(metadata),
         } => {
             let parsed_metadata = lava_torrent::torrent::v1::Torrent::read_from_file(metadata)
                 .wrap_err("Invalid torrent file")?;
             State::from_metadata_and_root(parsed_metadata, root.clone(), bt_config)
                 .wrap_err("Failed initialzing state")?
+        }
+        TorrentInfo {
+            info_hash: None,
+            magnet_link: Some(magnet_link),
+            torrent_file: None,
+        } => {
+            let hash_str = magnet_link
+                .split("btih:")
+                .nth(1)
+                .and_then(|s| s.get(0..40))
+                .ok_or_else(|| eyre!("Invalid magnet link: could not find info hash"))?;
+
+            let info_hash = decode_info_hash_hex(hash_str)
+                .wrap_err("Failed to decode hash from magnet link")?;
+
+            State::unstarted(
+                info_hash,
+                root.clone(),
+                bt_config,
+            )
         }
         _ => unreachable!(),
     };
