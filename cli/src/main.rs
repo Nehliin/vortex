@@ -113,7 +113,9 @@ struct TorrentInfo {
     /// be skipped and the torrent downlaod can start immediately
     #[arg(short, long)]
     torrent_file: Option<PathBuf>,
-
+    /// Magnet link containing the info hash of the torrent.
+    /// The metadata will be automatically downloaded 
+    /// in the swarm before download starts
     #[arg(short, long)]
     magnet_link: Option<String>,
 }
@@ -195,31 +197,38 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
-    let mut state = match cli.torrent_info {
-        TorrentInfo {
-            info_hash: Some(info_hash),
-            torrent_file: None,
-            magnet_link: None,
-        } => {
-            match lava_torrent::torrent::v1::Torrent::read_from_file(
-                root.join(info_hash.to_lowercase()),
-            ) {
-                // Metadata has been saved from previous run
-                Ok(metadata) => State::from_metadata_and_root(metadata, root.clone(), bt_config)?,
-                Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
-                    if io_err.kind() == ErrorKind::NotFound {
-                        State::unstarted(
-                            decode_info_hash_hex(&info_hash).wrap_err("Invalid info hash")?,
-                            root.clone(),
-                            bt_config,
-                        )
-                    } else {
-                        return Err(eyre!("Failed looking for stored metadata {io_err}"));
-                    }
-                }
-                Err(err) => return Err(eyre!("Failed looking for stored metadata {err}")),
+    let info_hash_str = if let Some(magnet) = &cli.torrent_info.magnet_link {
+        if !magnet.contains("xt=urn:btih:") {
+            return Err(eyre!("Invalid magnet link: missing 'xt=urn:btih:' prefix"));
+        }
+
+        let hash_part = magnet.split("btih:")
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .ok_or_else(|| eyre!("Invalid magnet link: could not find info hash"))?;
+
+        match hash_part.len() {
+            32=> {
+                let byte = data_encoding::BASE32
+                    .decode(hash_part.as_bytes())
+                    .wrap_err("Failed to decode base32 info hash from magnet link")?;
+                hex::encode(byte)
+            } 
+            40 =>{
+                hash_part.to_string()
+            }
+            _ => {
+                return Err(eyre!("Invalid magnet link: info hash should be either 32 (base32) or 40 (hex) characters long"));
             }
         }
+
+    } else if let Some(hash) = &cli.torrent_info.info_hash {
+        hash.clone()
+    } else {
+        "".to_string()
+    };
+
+    let mut state = match cli.torrent_info {
         TorrentInfo {
             info_hash: None,
             magnet_link: None,
@@ -230,27 +239,25 @@ fn main() -> color_eyre::Result<()> {
             State::from_metadata_and_root(parsed_metadata, root.clone(), bt_config)
                 .wrap_err("Failed initialzing state")?
         }
-        TorrentInfo {
-            info_hash: None,
-            magnet_link: Some(magnet_link),
-            torrent_file: None,
-        } => {
-            let hash_str = magnet_link
-                .split("btih:")
-                .nth(1)
-                .and_then(|s| s.get(0..40))
-                .ok_or_else(|| eyre!("Invalid magnet link: could not find info hash"))?;
-
-            let info_hash = decode_info_hash_hex(hash_str)
-                .wrap_err("Failed to decode hash from magnet link")?;
-
-            State::unstarted(
-                info_hash,
-                root.clone(),
-                bt_config,
-            )
+        _ => {
+             match lava_torrent::torrent::v1::Torrent::read_from_file(
+                root.join(info_hash_str.to_lowercase()),
+            ) {
+                Ok(metadata) => State::from_metadata_and_root(metadata, root.clone(), bt_config)?,
+                Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
+                    if io_err.kind() == ErrorKind::NotFound {
+                        State::unstarted(
+                            decode_info_hash_hex(&info_hash_str).wrap_err("Invalid info hash")?,
+                            root.clone(),
+                            bt_config,
+                        )
+                    } else {
+                        return Err(eyre!("Failed looking for stored metadata {io_err}"));
+                    }
+                }
+                Err(err) => return Err(eyre!("Failed looking for stored metadata {err}")),
+            }
         }
-        _ => unreachable!(),
     };
 
     let info_hash_id = Id::from_bytes(state.info_hash()).wrap_err("Invalid info_hash")?;
