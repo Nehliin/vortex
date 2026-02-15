@@ -100,6 +100,35 @@ fn dht_thread(
     }
 }
 
+fn parse_magnet_link(magnet: &str) -> Option<String> {
+    if !magnet.starts_with("magnet:?") {
+        return None;
+    }
+
+    if !magnet.contains("xt=urn:btih:") && magnet.contains("xt=urn:btmh:") {
+        eprintln!("Error: Only v1 magnet links are supported");
+        return None;
+    }
+
+    let hash_part = magnet
+        .split("xt=urn:btih:")
+        .nth(1)?
+        .split('&')
+        .next()?;
+
+    match hash_part.len() {
+        32 => {
+            let bytes = data_encoding::BASE32.decode(hash_part.to_uppercase().as_bytes()).ok()?;
+            Some(hex::encode(bytes))
+        }
+        40 => Some(hash_part.to_lowercase()),
+        _ => {
+            eprintln!("Error: Invalid info hash length in magnet link");
+            None
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 struct TorrentInfo {
@@ -197,36 +226,11 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
-    let info_hash_str = if let Some(magnet) = &cli.torrent_info.magnet_link {
-        if !magnet.contains("xt=urn:btih:") {
-            return Err(eyre!("Invalid magnet link: missing 'xt=urn:btih:' prefix"));
-        }
-
-        let hash_part = magnet.split("btih:")
-            .nth(1)
-            .and_then(|s| s.split('&').next())
-            .ok_or_else(|| eyre!("Invalid magnet link: could not find info hash"))?;
-
-        match hash_part.len() {
-            32=> {
-                let byte = data_encoding::BASE32
-                    .decode(hash_part.as_bytes())
-                    .wrap_err("Failed to decode base32 info hash from magnet link")?;
-                hex::encode(byte)
-            } 
-            40 =>{
-                hash_part.to_string()
-            }
-            _ => {
-                return Err(eyre!("Invalid magnet link: info hash should be either 32 (base32) or 40 (hex) characters long"));
-            }
-        }
-
-    } else if let Some(hash) = &cli.torrent_info.info_hash {
-        hash.clone()
-    } else {
-        "".to_string()
-    };
+   let info_hash_str = cli.torrent_info.magnet_link
+        .as_deref()
+        .and_then(parse_magnet_link)
+        .or_else(|| cli.torrent_info.info_hash.clone())
+        .unwrap_or_default();
 
     let mut state = match cli.torrent_info {
         TorrentInfo {
@@ -380,5 +384,32 @@ impl Widget for &mut VortexApp<'_> {
         };
 
         InfoPanel::new(info_data).render(info_area, buf);
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_valid_hex_magnet() {
+        let link = "magnet:?xt=urn:btih:66C6C265561A0D6957C08866E1D7B484391C8C85&dn=Zootopia";
+        assert_eq!(parse_magnet_link(link), Some("66c6c265561a0d6957c08866e1d7b484391c8c85".to_string()));
+    }
+
+    #[test]
+    fn test_parse_valid_base32_magnet() {
+        let link = "magnet:?xt=urn:btih:M6DMEZKWDIHWTV6AQC3OCF5URE4RZDIF";
+        
+        let expected_hex = "6786c265561a0f69d7c080b6e117b489391c8d05";
+        
+        assert_eq!(parse_magnet_link(link), Some(expected_hex.to_string()));
+    }
+
+    #[test]
+    fn test_reject_v2_only_magnet() {
+        let link = "magnet:?xt=urn:btmh:1234567890abcdef";
+        assert_eq!(parse_magnet_link(link), None);
     }
 }
