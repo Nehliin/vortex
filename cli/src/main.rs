@@ -4,7 +4,7 @@ use std::{
 };
 
 use clap::{Args, Parser};
-use color_eyre::eyre::{WrapErr, eyre};
+use color_eyre::eyre::{ContextCompat, WrapErr, eyre};
 use crossbeam_channel::{Receiver, bounded, select, tick};
 use heapless::spsc::Queue;
 use mainline::{Dht, Id};
@@ -100,6 +100,36 @@ fn dht_thread(
     }
 }
 
+fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<String> {
+    if !magnet.starts_with("magnet:?") {
+        return Err(eyre!("Invalid magnet link"));
+    }
+
+    if !magnet.contains("xt=urn:btih:") && magnet.contains("xt=urn:btmh:") {
+        return Err(eyre!("Only v1 magnet links are supported"));
+    }
+
+    let hash_part = magnet
+        .split("xt=urn:btih:")
+        .nth(1)
+        .wrap_err("Missing xt component of magnet link")?
+        .split('&')
+        .next()
+        .wrap_err("Info hash not found in magent link")?;
+
+    match hash_part.len() {
+        32 => {
+            let bytes = data_encoding::BASE32
+                .decode(hash_part.to_uppercase().as_bytes())
+                .ok()
+                .wrap_err("")?;
+            Ok(hex::encode(bytes))
+        }
+        40 => Ok(hash_part.to_lowercase()),
+        _ => Err(eyre!("Invalid info hash length in magnet link")),
+    }
+}
+
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 struct TorrentInfo {
@@ -113,6 +143,11 @@ struct TorrentInfo {
     /// be skipped and the torrent downlaod can start immediately
     #[arg(short, long)]
     torrent_file: Option<PathBuf>,
+    /// Magnet link containing the info hash of the torrent.
+    /// The metadata will be automatically downloaded
+    /// in the swarm before download starts
+    #[arg(short, long)]
+    magnet_link: Option<String>,
 }
 
 /// Vortex bittorrent client cli. Fast trackerless torrent downloads using modern io_uring techniques.
@@ -192,20 +227,35 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
+    let info_hash_str = cli
+        .torrent_info
+        .magnet_link
+        .as_deref()
+        .map(parse_magnet_link)
+        .transpose()?
+        .or_else(|| cli.torrent_info.info_hash.clone())
+        .expect("Info hash or magnet link must be provided");
+
     let mut state = match cli.torrent_info {
         TorrentInfo {
-            info_hash: Some(info_hash),
-            torrent_file: None,
+            info_hash: None,
+            magnet_link: None,
+            torrent_file: Some(metadata),
         } => {
+            let parsed_metadata = lava_torrent::torrent::v1::Torrent::read_from_file(metadata)
+                .wrap_err("Invalid torrent file")?;
+            State::from_metadata_and_root(parsed_metadata, root.clone(), bt_config)
+                .wrap_err("Failed initialzing state")?
+        }
+        _ => {
             match lava_torrent::torrent::v1::Torrent::read_from_file(
-                root.join(info_hash.to_lowercase()),
+                root.join(info_hash_str.to_lowercase()),
             ) {
-                // Metadata has been saved from previous run
                 Ok(metadata) => State::from_metadata_and_root(metadata, root.clone(), bt_config)?,
                 Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
                     if io_err.kind() == ErrorKind::NotFound {
                         State::unstarted(
-                            decode_info_hash_hex(&info_hash).wrap_err("Invalid info hash")?,
+                            decode_info_hash_hex(&info_hash_str).wrap_err("Invalid info hash")?,
                             root.clone(),
                             bt_config,
                         )
@@ -216,16 +266,6 @@ fn main() -> color_eyre::Result<()> {
                 Err(err) => return Err(eyre!("Failed looking for stored metadata {err}")),
             }
         }
-        TorrentInfo {
-            info_hash: None,
-            torrent_file: Some(metadata),
-        } => {
-            let parsed_metadata = lava_torrent::torrent::v1::Torrent::read_from_file(metadata)
-                .wrap_err("Invalid torrent file")?;
-            State::from_metadata_and_root(parsed_metadata, root.clone(), bt_config)
-                .wrap_err("Failed initialzing state")?
-        }
-        _ => unreachable!(),
     };
 
     let info_hash_id = Id::from_bytes(state.info_hash()).wrap_err("Invalid info_hash")?;
@@ -348,5 +388,35 @@ impl Widget for &mut VortexApp<'_> {
         };
 
         InfoPanel::new(info_data).render(info_area, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_valid_hex_magnet() {
+        let link = "magnet:?xt=urn:btih:ABCDEF1234567890ABCDEF1234567890ABCDEF12&dn=test_file";
+        assert_eq!(
+            parse_magnet_link(link).unwrap(),
+            "abcdef1234567890abcdef1234567890abcdef12".to_string()
+        );
+    }
+
+    #[test]
+    fn test_parse_valid_base32_magnet() {
+        let link = "magnet:?xt=urn:btih:MFRG2ZDFMZTWQ2LKNNWG23TPOBYXE4LY&dn=test_file&dn=test_file";
+        assert_eq!(
+            parse_magnet_link(link).unwrap(),
+            "61626d6465666768696a6b6c6d6e6f7071727178".to_string()
+        );
+    }
+
+    #[test]
+    fn test_reject_v2_only_magnet() {
+        let link =
+            "magnet:?xt=urn:btmh:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        assert!(parse_magnet_link(link).is_err());
     }
 }
