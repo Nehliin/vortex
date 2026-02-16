@@ -126,9 +126,7 @@ fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<String> {
             Ok(hex::encode(bytes))
         }
         40 => Ok(hash_part.to_lowercase()),
-        _ => {
-            Err(eyre!("Invalid info hash length in magnet link"))
-        }
+        _ => Err(eyre!("Invalid info hash length in magnet link")),
     }
 }
 
