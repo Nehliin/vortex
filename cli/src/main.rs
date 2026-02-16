@@ -4,8 +4,8 @@ use std::{
 };
 
 use clap::{Args, Parser};
-use color_eyre::eyre::{eyre, WrapErr};
-use crossbeam_channel::{bounded, select, tick, Receiver};
+use color_eyre::eyre::{WrapErr, eyre};
+use crossbeam_channel::{Receiver, bounded, select, tick};
 use heapless::spsc::Queue;
 use mainline::{Dht, Id};
 use ratatui::{
@@ -21,8 +21,8 @@ mod ui;
 
 use app::{AppState, VortexApp};
 use ui::{
-    extract_throughput_data, InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData,
-    ThroughputGraph,
+    InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData, ThroughputGraph,
+    extract_throughput_data,
 };
 
 use tikv_jemallocator::Jemalloc;
@@ -110,15 +110,13 @@ fn parse_magnet_link(magnet: &str) -> Option<String> {
         return None;
     }
 
-    let hash_part = magnet
-        .split("xt=urn:btih:")
-        .nth(1)?
-        .split('&')
-        .next()?;
+    let hash_part = magnet.split("xt=urn:btih:").nth(1)?.split('&').next()?;
 
     match hash_part.len() {
         32 => {
-            let bytes = data_encoding::BASE32.decode(hash_part.to_uppercase().as_bytes()).ok()?;
+            let bytes = data_encoding::BASE32
+                .decode(hash_part.to_uppercase().as_bytes())
+                .ok()?;
             Some(hex::encode(bytes))
         }
         40 => Some(hash_part.to_lowercase()),
@@ -143,7 +141,7 @@ struct TorrentInfo {
     #[arg(short, long)]
     torrent_file: Option<PathBuf>,
     /// Magnet link containing the info hash of the torrent.
-    /// The metadata will be automatically downloaded 
+    /// The metadata will be automatically downloaded
     /// in the swarm before download starts
     #[arg(short, long)]
     magnet_link: Option<String>,
@@ -226,7 +224,9 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
-   let info_hash_str = cli.torrent_info.magnet_link
+    let info_hash_str = cli
+        .torrent_info
+        .magnet_link
         .as_deref()
         .and_then(parse_magnet_link)
         .or_else(|| cli.torrent_info.info_hash.clone())
@@ -244,7 +244,7 @@ fn main() -> color_eyre::Result<()> {
                 .wrap_err("Failed initialzing state")?
         }
         _ => {
-             match lava_torrent::torrent::v1::Torrent::read_from_file(
+            match lava_torrent::torrent::v1::Torrent::read_from_file(
                 root.join(info_hash_str.to_lowercase()),
             ) {
                 Ok(metadata) => State::from_metadata_and_root(metadata, root.clone(), bt_config)?,
@@ -387,29 +387,32 @@ impl Widget for &mut VortexApp<'_> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_parse_valid_hex_magnet() {
-        let link = "magnet:?xt=urn:btih:66C6C265561A0D6957C08866E1D7B484391C8C85&dn=Zootopia";
-        assert_eq!(parse_magnet_link(link), Some("66c6c265561a0d6957c08866e1d7b484391c8c85".to_string()));
+        let link = "magnet:?xt=urn:btih:ABCDEF1234567890ABCDEF1234567890ABCDEF12&dn=test_file";
+        assert_eq!(
+            parse_magnet_link(link),
+            Some("abcdef1234567890abcdef1234567890abcdef12".to_string())
+        );
     }
 
     #[test]
     fn test_parse_valid_base32_magnet() {
-        let link = "magnet:?xt=urn:btih:M6DMEZKWDIHWTV6AQC3OCF5URE4RZDIF";
-        
-        let expected_hex = "6786c265561a0f69d7c080b6e117b489391c8d05";
-        
-        assert_eq!(parse_magnet_link(link), Some(expected_hex.to_string()));
+        let link = "magnet:?xt=urn:btih:MFRGGZDFMZTWQ2LKNNWG23TPOBYXE4LY&dn=test_file&dn=test_file";
+        assert_eq!(
+            parse_magnet_link(link),
+            Some("6162636465666768696a6b6c6d6e6f7071727178".to_string())
+        );
     }
 
     #[test]
     fn test_reject_v2_only_magnet() {
-        let link = "magnet:?xt=urn:btmh:1234567890abcdef";
+        let link =
+            "magnet:?xt=urn:btmh:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
         assert_eq!(parse_magnet_link(link), None);
     }
 }
