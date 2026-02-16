@@ -4,7 +4,7 @@ use std::{
 };
 
 use clap::{Args, Parser};
-use color_eyre::eyre::{WrapErr, eyre};
+use color_eyre::eyre::{ContextCompat, WrapErr, eyre};
 use crossbeam_channel::{Receiver, bounded, select, tick};
 use heapless::spsc::Queue;
 use mainline::{Dht, Id};
@@ -100,29 +100,34 @@ fn dht_thread(
     }
 }
 
-fn parse_magnet_link(magnet: &str) -> Option<String> {
+fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<String> {
     if !magnet.starts_with("magnet:?") {
-        return None;
+        return Err(eyre!("Invalid magnet link"));
     }
 
     if !magnet.contains("xt=urn:btih:") && magnet.contains("xt=urn:btmh:") {
-        eprintln!("Error: Only v1 magnet links are supported");
-        return None;
+        return Err(eyre!("Only v1 magnet links are supported"));
     }
 
-    let hash_part = magnet.split("xt=urn:btih:").nth(1)?.split('&').next()?;
+    let hash_part = magnet
+        .split("xt=urn:btih:")
+        .nth(1)
+        .wrap_err("Missing xt component of magnet link")?
+        .split('&')
+        .next()
+        .wrap_err("Info hash not found in magent link")?;
 
     match hash_part.len() {
         32 => {
             let bytes = data_encoding::BASE32
                 .decode(hash_part.to_uppercase().as_bytes())
-                .ok()?;
-            Some(hex::encode(bytes))
+                .ok()
+                .wrap_err("")?;
+            Ok(hex::encode(bytes))
         }
-        40 => Some(hash_part.to_lowercase()),
+        40 => Ok(hash_part.to_lowercase()),
         _ => {
-            eprintln!("Error: Invalid info hash length in magnet link");
-            None
+            Err(eyre!("Invalid info hash length in magnet link"))
         }
     }
 }
@@ -228,9 +233,10 @@ fn main() -> color_eyre::Result<()> {
         .torrent_info
         .magnet_link
         .as_deref()
-        .and_then(parse_magnet_link)
+        .map(parse_magnet_link)
+        .transpose()?
         .or_else(|| cli.torrent_info.info_hash.clone())
-        .unwrap_or_default();
+        .expect("Info hash or magnet link must be provided");
 
     let mut state = match cli.torrent_info {
         TorrentInfo {
@@ -395,17 +401,17 @@ mod tests {
     fn test_parse_valid_hex_magnet() {
         let link = "magnet:?xt=urn:btih:ABCDEF1234567890ABCDEF1234567890ABCDEF12&dn=test_file";
         assert_eq!(
-            parse_magnet_link(link),
-            Some("abcdef1234567890abcdef1234567890abcdef12".to_string())
+            parse_magnet_link(link).unwrap(),
+            "abcdef1234567890abcdef1234567890abcdef12".to_string()
         );
     }
 
     #[test]
     fn test_parse_valid_base32_magnet() {
-        let link = "magnet:?xt=urn:btih:MFRGGZDFMZTWQ2LKNNWG23TPOBYXE4LY&dn=test_file&dn=test_file";
+        let link = "magnet:?xt=urn:btih:MFRG2ZDFMZTWQ2LKNNWG23TPOBYXE4LY&dn=test_file&dn=test_file";
         assert_eq!(
-            parse_magnet_link(link),
-            Some("6162636465666768696a6b6c6d6e6f7071727178".to_string())
+            parse_magnet_link(link).unwrap(),
+            "61626d6465666768696a6b6c6d6e6f7071727178".to_string()
         );
     }
 
@@ -413,6 +419,6 @@ mod tests {
     fn test_reject_v2_only_magnet() {
         let link =
             "magnet:?xt=urn:btmh:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
-        assert_eq!(parse_magnet_link(link), None);
+        assert!(parse_magnet_link(link).is_err());
     }
 }
