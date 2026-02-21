@@ -72,12 +72,12 @@ cargo install --locked vortex-cli
 
 ### Magnet links
 
-`vortex-cli` doesn't support magnet links (yet). But you do not have to provide a full metadata file since it can download it from the swarm. It's enough to simply provide the info-hash of the torrent you want to download using the `--info-hash` flag.
+`vortex-cli` supports magnet links and be registered as your default magnet-link handler by running the `register-magnet-handler` subcommand.
 
 ### Quick Start
 
 ```
-vortex-cli --info-hash <info-hash> -d downloads
+vortex-cli --magnet-link <magnet-link> -d downloads
 ```
 
 
@@ -85,7 +85,12 @@ vortex-cli --info-hash <info-hash> -d downloads
 ```
 A cli for downloading torrents using the bittorrent protocol(s). Built on top of io-uring
 
-Usage: vortex-cli [OPTIONS] <--info-hash <INFO_HASH>|--torrent-file <TORRENT_FILE>>
+Usage: vortex-cli [OPTIONS] <--info-hash <INFO_HASH>|--torrent-file <TORRENT_FILE>|--magnet-link <MAGNET_LINK>>
+       vortex-cli [OPTIONS] <COMMAND>
+
+Commands:
+  register-magnet-handler  Register vortex-cli as the system-wide magnet link handler
+  help                     Print this message or the help of the given subcommand(s)
 
 Options:
   -p, --port <PORT>
@@ -94,6 +99,8 @@ Options:
           Info hash of the torrent you want to download. The metadata will be automatically downloaded in the swarm before download starts
   -t, --torrent-file <TORRENT_FILE>
           Torrent file containing the metadata of the torrent. if this is provided the initial metadata download will be skipped and the torrent downlaod can start immediately
+  -m, --magnet-link <MAGNET_LINK>
+          Magnet link containing the info hash of the torrent. The metadata will be automatically downloaded in the swarm before download starts
   -c, --config-file <CONFIG_FILE>
           Path to the config file (defaults to $XDG_CONFIG_HOME/vortex/config.toml) the file will created it if doesn't already exists
   -d, --download-folder <DOWNLOAD_FOLDER>
@@ -102,10 +109,13 @@ Options:
           Log file path (defaults to $XDG_STATE_HOME/vortex/vortex.log)
       --dht-cache <DHT_CACHE>
           DHT cache path (defaults to $XDG_CACHE_HOME/vortex/dht_bootstrap_nodes)
+      --skip-dht-cache
+          Skip use of the DHT node cache and rebuild from bootstrap nodes
   -h, --help
           Print help
   -V, --version
           Print version
+f
 ```
 
 
