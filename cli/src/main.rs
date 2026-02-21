@@ -1,6 +1,6 @@
 use std::{
     fs::OpenOptions, io::ErrorKind, net::TcpListener, num::ParseIntError, path::PathBuf,
-    sync::mpsc::SyncSender, time::Duration,
+    process::Command as ProcessCommand, sync::mpsc::SyncSender, time::Duration,
 };
 
 use clap::{Args, Parser};
@@ -150,9 +150,10 @@ struct TorrentInfo {
     magnet_link: Option<String>,
 }
 
-/// Vortex bittorrent client cli. Fast trackerless torrent downloads using modern io_uring techniques.
+/// Vortex bittorrent client cli. Fast trackerless torrent client using modern io_uring techniques.
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
+#[command(subcommand_negates_reqs = true)]
 struct Cli {
     /// Port for the listener
     #[arg(short, long)]
@@ -175,11 +176,68 @@ struct Cli {
     /// Skip use of the DHT node cache and rebuild from bootstrap nodes
     #[arg(long)]
     skip_dht_cache: bool,
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum CliCommand {
+    /// Register vortex-cli as the system-wide magnet link handler
+    RegisterMagnetHandler,
+}
+
+fn register_magnet_handler() -> color_eyre::Result<()> {
+    let exe_path = std::env::current_exe()
+        .wrap_err("Failed to determine current executable path")?
+        .canonicalize()
+        .wrap_err("Failed to canonicalize executable path")?;
+
+    let applications_dir = dirs::data_dir()
+        .wrap_err("Failed to determine data directory")?
+        .join("applications");
+    std::fs::create_dir_all(&applications_dir)
+        .wrap_err("Failed to create applications directory")?;
+
+    let desktop_file = applications_dir.join("vortex-cli.desktop");
+    let desktop_contents = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Vortex\n\
+         Comment=Fast trackerless torrent client using modern io_uring techniques\n\
+         Exec={} --magnet-link %u\n\
+         MimeType=x-scheme-handler/magnet;\n\
+         NoDisplay=true\n\
+         Terminal=true\n",
+        exe_path.display()
+    );
+    std::fs::write(&desktop_file, &desktop_contents)
+        .wrap_err("Failed to write .desktop file for vorex-cli")?;
+
+    let status = ProcessCommand::new("xdg-mime")
+        .args(["default", "vortex-cli.desktop", "x-scheme-handler/magnet"])
+        .status()
+        .wrap_err("Failed to run xdg-mime")?;
+    if !status.success() {
+        return Err(eyre!("xdg-mime exited with status {status}"));
+    }
+
+    // Best-effort to update the desktop database
+    let _ = ProcessCommand::new("update-desktop-database")
+        .arg(&applications_dir)
+        .status();
+
+    println!("Registered vortex-cli as the default magnet link handler.");
+    println!("Desktop file written to: {}", desktop_file.display());
+    Ok(())
 }
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
+
+    if let Some(CliCommand::RegisterMagnetHandler) = cli.command {
+        return register_magnet_handler();
+    }
 
     // load or create config file (auto-creates if doesn't exist)
     let mut vortex_config =
