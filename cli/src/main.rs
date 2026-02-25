@@ -285,15 +285,6 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
-    let info_hash_str = cli
-        .torrent_info
-        .magnet_link
-        .as_deref()
-        .map(parse_magnet_link)
-        .transpose()?
-        .or_else(|| cli.torrent_info.info_hash.clone())
-        .expect("Info hash or magnet link must be provided");
-
     let mut state = match cli.torrent_info {
         TorrentInfo {
             info_hash: None,
@@ -306,6 +297,14 @@ fn main() -> color_eyre::Result<()> {
                 .wrap_err("Failed initialzing state")?
         }
         _ => {
+            let info_hash_str = cli
+                .torrent_info
+                .magnet_link
+                .as_deref()
+                .map(parse_magnet_link)
+                .transpose()?
+                .or_else(|| cli.torrent_info.info_hash.clone())
+                .expect("Info hash or magnet link must be provided");
             match lava_torrent::torrent::v1::Torrent::read_from_file(
                 root.join(info_hash_str.to_lowercase()),
             ) {
