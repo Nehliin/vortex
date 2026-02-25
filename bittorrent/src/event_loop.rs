@@ -108,7 +108,10 @@ pub struct EventData {
 
 #[derive(Debug, Clone, Copy)]
 enum EventLoopState {
-    ShuttingDown,
+    ShuttingDown {
+        // Fd for the TcpListener provided to the event loop
+        listener_fd: Option<Fd>,
+    },
     Pausing {
         // Fd for the TcpListener provided to the event loop
         listener_fd: Fd,
@@ -427,7 +430,16 @@ impl<'scope, 'state: 'scope> EventLoop {
                 self.handle_commands(&mut sq, &mut command_rc, &mut state_ref, &mut event_tx);
                 let pause_ready = self.connections.is_empty() && self.inflight_disk_ops == 0;
                 match self.state {
-                    EventLoopState::ShuttingDown if pause_ready => {
+                    EventLoopState::ShuttingDown { listener_fd } if pause_ready => {
+                        if let Some(listener_fd) = listener_fd {
+                            // Blocking close here since we are shutting down regardless
+                            let ret = unsafe { libc::close(listener_fd.0) };
+                            if ret != 0 {
+                                log::error!("Failed closing listener errno: {}", unsafe {
+                                    libc::__errno_location().read()
+                                })
+                            }
+                        };
                         log::info!("All connections closed, shutdown complete");
                         return Ok(());
                     }
@@ -778,9 +790,15 @@ impl<'scope, 'state: 'scope> EventLoop {
                     }
                 }
                 Command::Stop => {
-                    if !matches!(self.state, EventLoopState::ShuttingDown) {
+                    if !matches!(self.state, EventLoopState::ShuttingDown { .. }) {
                         log::info!("Shutdown requested, closing all connections");
-                        self.state = EventLoopState::ShuttingDown;
+                        let listener_fd = match self.state {
+                            EventLoopState::ShuttingDown { listener_fd }
+                            | EventLoopState::Paused { listener_fd } => listener_fd,
+                            EventLoopState::Pausing { listener_fd }
+                            | EventLoopState::Running { listener_fd, .. } => Some(listener_fd),
+                        };
+                        self.state = EventLoopState::ShuttingDown { listener_fd };
                         self.disconnect_all(state_ref, sq);
                     }
                 }
