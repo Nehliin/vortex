@@ -796,6 +796,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 let addr = socket.peer_addr()?;
                 if addr.is_ipv6() {
                     log::error!("Received connection from non ipv4 addr");
+                    io_utils::close_socket(sq, socket, None, &mut self.events);
                     return Ok(());
                 };
 
