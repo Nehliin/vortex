@@ -854,6 +854,14 @@ impl<'scope, 'state: 'scope> EventLoop {
                 std::mem::swap(&mut event, &mut self.events[io_event.event_data_idx].typ);
                 let fd = ret;
                 let socket = unsafe { Socket::from_raw_fd(fd) };
+                // There is a race here where new connections may show up
+                // after we've paused or shut down but before the AcceptMulti
+                // operation has been fully cancelled
+                if !matches!(self.state, EventLoopState::Running { .. }) {
+                    log::warn!("Received incoming connection without being in the running state");
+                    io_utils::close_socket(sq, socket, None, &mut self.events);
+                    return Ok(());
+                }
                 let addr = socket.peer_addr()?;
                 if addr.is_ipv6() {
                     log::error!("Received connection from non ipv4 addr");
