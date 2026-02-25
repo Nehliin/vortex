@@ -120,7 +120,7 @@ fn basic_seeding() {
                                 }
                             }
                         }
-                        TorrentEvent::ListenerStarted { port } => {
+                        TorrentEvent::Running { port } => {
                             log::info!("Seeder listener started on port {}", port);
                             downloader_command_tx_clone
                                 .send(Command::ConnectToPeers(vec![
@@ -188,7 +188,7 @@ fn basic_seeding() {
                             TorrentEvent::MetadataComplete(_) => {
                                 log::info!("Downloader: Metadata complete");
                             }
-                            TorrentEvent::ListenerStarted { .. } => {}
+                            TorrentEvent::Running { .. } => {}
                         }
                     }
                 }

@@ -155,7 +155,7 @@ fn chained_seeding() {
                                 }
                             }
                         }
-                        TorrentEvent::ListenerStarted { port } => {
+                        TorrentEvent::Running { port } => {
                             log::info!("Seeder listener started on port {}", port);
                             // Connect middle peer to seeder
                             middle_command_tx_clone1
@@ -216,7 +216,7 @@ fn chained_seeding() {
                                 }
                             }
                         }
-                        TorrentEvent::ListenerStarted { port } => {
+                        TorrentEvent::Running { port } => {
                             log::info!("Middle peer listener started on port {}", port);
                             // Connect leecher to middle peer ONLY (not to seeder)
                             leecher_command_tx_clone
@@ -279,7 +279,7 @@ fn chained_seeding() {
                         TorrentEvent::MetadataComplete(_) => {
                             log::info!("Leecher: Metadata complete");
                         }
-                        TorrentEvent::ListenerStarted { .. } => {}
+                        TorrentEvent::Running { .. } => {}
                     }
                 }
             }
