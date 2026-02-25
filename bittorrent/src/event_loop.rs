@@ -766,9 +766,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                     if let EventLoopState::Paused { listener_fd } = self.state {
                         let port = state_ref
                             .listener_port
-                            .expect("Resume must be called after have being explicitly paused");
+                            .expect("Resume must be called after having been explicitly paused");
                         let listener_fd = listener_fd
-                            .expect("Resume must be called after have being explicitly paused");
+                            .expect("Resume must be called after having been explicitly paused");
                         self.setup_and_mark_running(listener_fd, port, sq, event_tx);
                     } else {
                         log::error!(
