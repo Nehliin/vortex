@@ -5,7 +5,9 @@ use bitvec::{
     vec::BitVec,
 };
 use lava_torrent::torrent::v1::Torrent;
-use rand::{Rng, SeedableRng, rngs::SmallRng};
+#[cfg(test)]
+use rand::SeedableRng;
+use rand::{RngExt, rngs::SmallRng};
 use slotmap::SecondaryMap;
 
 use crate::{buf_pool::Buffer, event_loop::ConnectionId};
@@ -73,7 +75,7 @@ impl PieceSelector {
             piece_length: piece_length as u32,
             interesting_peer_pieces: Default::default(),
             #[cfg(not(test))]
-            rng_gen: SmallRng::from_os_rng(),
+            rng_gen: rand::make_rng(),
             #[cfg(test)]
             rng_gen: SmallRng::seed_from_u64(0xbeefdead),
         }

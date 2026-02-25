@@ -6,12 +6,12 @@ members = [
 ]
 
 [workspace.dependencies]
-bytes = "1.10"
+bytes = "1.11"
 anyhow = "1.0"
 ahash = "0.8"
 log = { version = "0.4", features = ["release_max_level_info"]}
 parking_lot = "0.12"
-rand = "0.9"
+rand = "0.10"
 env_logger = "0.11"
 lava_torrent = "0.11"
 sha1 = "0.10"
