@@ -403,12 +403,6 @@ impl<'scope, 'state: 'scope> EventLoop {
         self.read_ring.register(&ring.submitter())?;
 
         let port = listener.local_addr().unwrap().port();
-        self.setup_listener(
-            types::Fd(listener.into_raw_fd()),
-            port,
-            &mut ring,
-            &mut event_tx,
-        );
         state.listener_port = Some(port);
 
         let mut state_ref = state.as_ref();
@@ -419,8 +413,15 @@ impl<'scope, 'state: 'scope> EventLoop {
             let mut sq = BackloggedSubmissionQueue::new(sq);
             let mut last_tick = Instant::now();
 
+            self.setup_and_mark_running(
+                types::Fd(listener.into_raw_fd()),
+                port,
+                &mut sq,
+                &mut event_tx,
+            );
+
             loop {
-                self.handle_commands(&mut sq, &mut command_rc, &mut state_ref);
+                self.handle_commands(&mut sq, &mut command_rc, &mut state_ref, &mut event_tx);
                 let pause_ready = self.connections.is_empty() && self.inflight_disk_ops == 0;
                 match self.state {
                     EventLoopState::ShuttingDown if pause_ready => {
@@ -428,7 +429,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                         return Ok(());
                     }
                     EventLoopState::Pausing { listener_fd } if pause_ready => {
-                        // event
+                        if event_tx.enqueue(TorrentEvent::Paused).is_err() {
+                            log::error!("Failed to enqueue Paused event");
+                        }
                         self.state = EventLoopState::Paused {
                             listener_fd: Some(listener_fd),
                         };
@@ -634,11 +637,11 @@ impl<'scope, 'state: 'scope> EventLoop {
         result
     }
 
-    fn setup_listener(
+    fn setup_and_mark_running<Q: SubmissionQueue>(
         &mut self,
         listener_fd: Fd,
         port: u16,
-        ring: &mut IoUring,
+        sq: &mut BackloggedSubmissionQueue<Q>,
         event_tx: &mut Producer<TorrentEvent>,
     ) {
         let event_idx: EventId = self.events.insert(EventData {
@@ -649,20 +652,15 @@ impl<'scope, 'state: 'scope> EventLoop {
         let accept_op = opcode::AcceptMulti::new(listener_fd)
             .build()
             .user_data(listener_user_data);
-        unsafe {
-            ring.submission().push(&accept_op).unwrap();
-        }
-        ring.submission().sync();
+        sq.push(accept_op);
+        sq.sync();
         self.state = EventLoopState::Running {
             listener_fd,
             listener_user_data,
         };
-        // Emit listener started event
-        if event_tx
-            .enqueue(TorrentEvent::ListenerStarted { port })
-            .is_err()
-        {
-            log::error!("Failed to enqueue ListenerStarted event");
+        // Emit running event
+        if event_tx.enqueue(TorrentEvent::Running { port }).is_err() {
+            log::error!("Failed to enqueue Running event");
         }
     }
 
@@ -702,6 +700,7 @@ impl<'scope, 'state: 'scope> EventLoop {
         sq: &mut BackloggedSubmissionQueue<Q>,
         command_rc: &mut Receiver<Command>,
         state_ref: &mut StateRef<'state>,
+        event_tx: &mut Producer<TorrentEvent>,
     ) {
         let existing_connections: HashSet<SockAddr> = self
             .connections
@@ -735,7 +734,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                         }
                     }
                 }
-                // TODO resume
                 Command::Pause => {
                     if let EventLoopState::Running {
                         listener_fd,
@@ -751,6 +749,21 @@ impl<'scope, 'state: 'scope> EventLoop {
                             CancelBuilder::user_data(listener_user_data).all(),
                         );
                         self.disconnect_all(state_ref, sq);
+                    }
+                }
+                Command::Resume => {
+                    if let EventLoopState::Paused { listener_fd } = self.state {
+                        let port = state_ref
+                            .listener_port
+                            .expect("Listener must have been setup previously");
+                        let listener_fd =
+                            listener_fd.expect("Listener must have been setup previously");
+                        self.setup_and_mark_running(listener_fd, port, sq, event_tx);
+                    } else {
+                        log::error!(
+                            "Resume requested when in a non paused state. Current state: {:?}",
+                            self.state
+                        );
                     }
                 }
                 Command::Stop => {
@@ -1559,7 +1572,7 @@ mod tests {
             let listener_port = loop {
                 if let Some(event) = event_rx.dequeue() {
                     match event {
-                        TorrentEvent::ListenerStarted { port } => {
+                        TorrentEvent::Running { port } => {
                             break port;
                         }
                         _ => continue,

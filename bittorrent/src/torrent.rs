@@ -171,6 +171,10 @@ pub enum Command {
     Stop,
     /// Pause the torrent gracefully, disconnecting any peers but keeping resources in memory.
     Pause,
+    /// Resumes a paused torrent, only relevant when the torrent is in the "Paused" state.
+    /// Use the `TorrentEvent::Paused` event to determine when the torrent successfully entered
+    /// the paused state.
+    Resume,
 }
 
 /// Metrics for a given peer
@@ -197,8 +201,10 @@ pub enum TorrentEvent {
     /// completed when starting the torrent.
     MetadataComplete(Box<TorrentMetadata>),
     /// The listener for incoming connection has finished set up
-    /// on the provided port.
-    ListenerStarted { port: u16 },
+    /// on the provided port and the event loop has started.
+    /// This will be emitted on first startup and every time
+    /// the torrent is resumed after a previous pause.
+    Running { port: u16 },
     /// The torrent was successfully paused.
     Paused,
     /// Over all metrics for the torrent, sent every tick.
