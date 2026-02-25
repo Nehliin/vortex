@@ -381,16 +381,14 @@ impl<'scope, 'state: 'scope> EventLoop {
     ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
 
-        let port = self.setup_listener(listener, &mut ring);
+        let port = listener.local_addr().unwrap().port();
+        self.setup_listener(
+            types::Fd(listener.into_raw_fd()),
+            port,
+            &mut ring,
+            &mut event_tx,
+        );
         state.listener_port = Some(port);
-
-        // Emit listener started event
-        if event_tx
-            .enqueue(TorrentEvent::ListenerStarted { port })
-            .is_err()
-        {
-            log::error!("Failed to enqueue ListenerStarted event");
-        }
 
         let mut state_ref = state.as_ref();
         let mut prev_state_initialized = state_ref.is_initialzied();
@@ -606,20 +604,36 @@ impl<'scope, 'state: 'scope> EventLoop {
         result
     }
 
-    fn setup_listener(&mut self, listener: TcpListener, ring: &mut IoUring) -> u16 {
+    fn setup_listener(
+        &mut self,
+        listener_fd: Fd,
+        port: u16,
+        ring: &mut IoUring,
+        event_tx: &mut Producer<TorrentEvent>,
+    ) {
         let event_idx: EventId = self.events.insert(EventData {
             typ: EventType::Accept,
             buffers: None,
         });
-        let port = listener.local_addr().unwrap().port();
-        let accept_op = opcode::AcceptMulti::new(types::Fd(listener.into_raw_fd()))
+        let listener_user_data = event_idx.data().as_ffi();
+        let accept_op = opcode::AcceptMulti::new(listener_fd)
             .build()
-            .user_data(event_idx.data().as_ffi());
+            .user_data(listener_user_data);
         unsafe {
             ring.submission().push(&accept_op).unwrap();
         }
         ring.submission().sync();
-        port
+        self.state = EventLoopState::Running {
+            listener_fd,
+            listener_user_data,
+        };
+        // Emit listener started event
+        if event_tx
+            .enqueue(TorrentEvent::ListenerStarted { port })
+            .is_err()
+        {
+            log::error!("Failed to enqueue ListenerStarted event");
+        }
     }
 
     fn write_handshake<Q: SubmissionQueue>(
