@@ -111,10 +111,9 @@ fn pause_resume() {
                             log::info!("Seeder running on port {}", port);
                             seeder_port_for_seeder.store(port, Ordering::Release);
                             // Connect the downloader to the seeder on first start
-                            let _ = downloader_command_tx_for_seeder
-                                .send(Command::ConnectToPeers(vec![
-                                    format!("127.0.0.1:{}", port).parse().unwrap(),
-                                ]));
+                            let _ = downloader_command_tx_for_seeder.send(Command::ConnectToPeers(
+                                vec![format!("127.0.0.1:{}", port).parse().unwrap()],
+                            ));
                         }
                         TorrentEvent::TorrentMetrics { .. } => {}
                         TorrentEvent::Paused => panic!("Seeder should never pause"),
