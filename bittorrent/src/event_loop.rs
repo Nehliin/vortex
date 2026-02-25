@@ -421,6 +421,9 @@ impl<'scope, 'state: 'scope> EventLoop {
             );
 
             loop {
+                // Handle commands first of all so we can block the event loop when in a paused
+                // state. The "pause_ready" check should ensure all meaningful CQE:s have been
+                // handled before we block the loop.
                 self.handle_commands(&mut sq, &mut command_rc, &mut state_ref, &mut event_tx);
                 let pause_ready = self.connections.is_empty() && self.inflight_disk_ops == 0;
                 match self.state {
@@ -748,16 +751,24 @@ impl<'scope, 'state: 'scope> EventLoop {
                             &mut self.events,
                             CancelBuilder::user_data(listener_user_data).all(),
                         );
+                        assert!(
+                            self.events
+                                .remove(EventId::from(KeyData::from_ffi(listener_user_data)))
+                                .is_some(),
+                            "Listener AcceptMulti removed more than once"
+                        );
                         self.disconnect_all(state_ref, sq);
+                    } else {
+                        log::warn!("Received Pause command when in a non running state. Ignoring");
                     }
                 }
                 Command::Resume => {
                     if let EventLoopState::Paused { listener_fd } = self.state {
                         let port = state_ref
                             .listener_port
-                            .expect("Listener must have been setup previously");
-                        let listener_fd =
-                            listener_fd.expect("Listener must have been setup previously");
+                            .expect("Resume must be called after have being explicitly paused");
+                        let listener_fd = listener_fd
+                            .expect("Resume must be called after have being explicitly paused");
                         self.setup_and_mark_running(listener_fd, port, sq, event_tx);
                     } else {
                         log::error!(
