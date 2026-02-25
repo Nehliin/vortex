@@ -164,6 +164,7 @@ fn chained_seeding() {
                                 ]))
                                 .unwrap();
                         }
+                        TorrentEvent::Paused => panic!("Should never pause"),
                         TorrentEvent::TorrentComplete | TorrentEvent::MetadataComplete(_) => {}
                     }
                 }
@@ -225,6 +226,7 @@ fn chained_seeding() {
                                 ]))
                                 .unwrap();
                         }
+                        TorrentEvent::Paused => panic!("Should never pause"),
                         TorrentEvent::MetadataComplete(_) => {
                             log::info!("Middle peer: Metadata complete");
                         }
@@ -279,6 +281,7 @@ fn chained_seeding() {
                         TorrentEvent::MetadataComplete(_) => {
                             log::info!("Leecher: Metadata complete");
                         }
+                        TorrentEvent::Paused => panic!("Should never pause"),
                         TorrentEvent::Running { .. } => {}
                     }
                 }

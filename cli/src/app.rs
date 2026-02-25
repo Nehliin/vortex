@@ -127,6 +127,9 @@ impl<'queue> VortexApp<'queue> {
                 TorrentEvent::Running { port: _ } => {
                     // Nothing to do here
                 }
+                TorrentEvent::Paused => {
+                    // TODO
+                }
                 TorrentEvent::MetadataComplete(metadata) => {
                     self.metadata = Some(metadata.clone());
                     self.time_field = Time::StartedAt(SystemTime::now());
