@@ -98,7 +98,6 @@ pub struct DiskOp {
     pub buffer: Rc<Buffer>,
 }
 
-// TODO: consider tracking readable/writable views
 #[derive(Debug)]
 pub struct FileStore {
     avg_piece_size: u64,

@@ -15,7 +15,7 @@ use io_uring::{
     IoUring,
     cqueue::Entry,
     opcode,
-    types::{self, Timespec},
+    types::{self, CancelBuilder, Fd, Timespec},
 };
 use libc::ECANCELED;
 use rayon::Scope;
@@ -104,6 +104,28 @@ new_key_type! {
 pub struct EventData {
     pub typ: EventType,
     pub buffers: Option<Vec<Buffer>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EventLoopState {
+    ShuttingDown {
+        // Fd for the TcpListener provided to the event loop
+        listener_fd: Option<Fd>,
+    },
+    Pausing {
+        // Fd for the TcpListener provided to the event loop
+        listener_fd: Fd,
+    },
+    Paused {
+        // Fd for the TcpListener provided to the event loop
+        listener_fd: Option<Fd>,
+    },
+    Running {
+        // Fd for the TcpListener provided to the event loop
+        listener_fd: Fd,
+        // Associated user data to the AcceptMulti SQE
+        listener_user_data: u64,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -333,6 +355,7 @@ const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(CQE_WAIT_TIME_NS);
 
 pub struct EventLoop {
     events: SlotMap<EventId, EventData>,
+    state: EventLoopState,
     write_pool: BufferPool,
     read_ring: BufferRing,
     // TODO: Merge these or consider disconnecting
@@ -367,6 +390,7 @@ impl<'scope, 'state: 'scope> EventLoop {
             pending_connections: HashSet::with_capacity(config.max_connections),
             our_id,
             inflight_disk_ops: 0,
+            state: EventLoopState::Paused { listener_fd: None },
             queued_disk_operations: Vec::with_capacity(32),
         }
     }
@@ -381,16 +405,8 @@ impl<'scope, 'state: 'scope> EventLoop {
     ) -> Result<(), Error> {
         self.read_ring.register(&ring.submitter())?;
 
-        let port = self.setup_listener(listener, &mut ring);
+        let port = listener.local_addr().unwrap().port();
         state.listener_port = Some(port);
-
-        // Emit listener started event
-        if event_tx
-            .enqueue(TorrentEvent::ListenerStarted { port })
-            .is_err()
-        {
-            log::error!("Failed to enqueue ListenerStarted event");
-        }
 
         let mut state_ref = state.as_ref();
         let mut prev_state_initialized = state_ref.is_initialzied();
@@ -399,9 +415,45 @@ impl<'scope, 'state: 'scope> EventLoop {
             let (submitter, sq, mut cq) = ring.split();
             let mut sq = BackloggedSubmissionQueue::new(sq);
             let mut last_tick = Instant::now();
-            let mut shutting_down = false;
+
+            self.setup_and_mark_running(
+                types::Fd(listener.into_raw_fd()),
+                port,
+                &mut sq,
+                &mut event_tx,
+            );
 
             loop {
+                // Handle commands first of all so we can block the event loop when in a paused
+                // state. The "pause_ready" check should ensure all meaningful CQE:s have been
+                // handled before we block the loop.
+                self.handle_commands(&mut sq, &mut command_rc, &mut state_ref, &mut event_tx);
+                let pause_ready = self.connections.is_empty() && self.inflight_disk_ops == 0;
+                match self.state {
+                    EventLoopState::ShuttingDown { listener_fd } if pause_ready => {
+                        if let Some(listener_fd) = listener_fd {
+                            // Blocking close here since we are shutting down regardless
+                            let ret = unsafe { libc::close(listener_fd.0) };
+                            if ret != 0 {
+                                log::error!("Failed closing listener errno: {}", unsafe {
+                                    libc::__errno_location().read()
+                                })
+                            }
+                        };
+                        log::info!("All connections closed, shutdown complete");
+                        return Ok(());
+                    }
+                    EventLoopState::Pausing { listener_fd } if pause_ready => {
+                        if event_tx.enqueue(TorrentEvent::Paused).is_err() {
+                            log::error!("Failed to enqueue Paused event");
+                        }
+                        self.state = EventLoopState::Paused {
+                            listener_fd: Some(listener_fd),
+                        };
+                    }
+                    _ => {}
+                }
+
                 let args = types::SubmitArgs::new().timespec(CQE_WAIT_TIME);
                 match submitter.submit_with_args(state_ref.config.completion_event_want, &args) {
                     Ok(_) => (),
@@ -593,12 +645,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                     connection.outgoing_msgs_buffer.clear();
                 }
                 sq.sync();
-
-                self.handle_commands(&mut sq, &mut shutting_down, &mut command_rc, &mut state_ref);
-                if shutting_down && self.connections.is_empty() && self.inflight_disk_ops == 0 {
-                    log::info!("All connections closed, shutdown complete");
-                    return Ok(());
-                }
             }
         });
 
@@ -606,20 +652,31 @@ impl<'scope, 'state: 'scope> EventLoop {
         result
     }
 
-    fn setup_listener(&mut self, listener: TcpListener, ring: &mut IoUring) -> u16 {
+    fn setup_and_mark_running<Q: SubmissionQueue>(
+        &mut self,
+        listener_fd: Fd,
+        port: u16,
+        sq: &mut BackloggedSubmissionQueue<Q>,
+        event_tx: &mut Producer<TorrentEvent>,
+    ) {
         let event_idx: EventId = self.events.insert(EventData {
             typ: EventType::Accept,
             buffers: None,
         });
-        let port = listener.local_addr().unwrap().port();
-        let accept_op = opcode::AcceptMulti::new(types::Fd(listener.into_raw_fd()))
+        let listener_user_data = event_idx.data().as_ffi();
+        let accept_op = opcode::AcceptMulti::new(listener_fd)
             .build()
-            .user_data(event_idx.data().as_ffi());
-        unsafe {
-            ring.submission().push(&accept_op).unwrap();
+            .user_data(listener_user_data);
+        sq.push(accept_op);
+        sq.sync();
+        self.state = EventLoopState::Running {
+            listener_fd,
+            listener_user_data,
+        };
+        // Emit running event
+        if event_tx.enqueue(TorrentEvent::Running { port }).is_err() {
+            log::error!("Failed to enqueue Running event");
         }
-        ring.submission().sync();
-        port
     }
 
     fn write_handshake<Q: SubmissionQueue>(
@@ -637,23 +694,45 @@ impl<'scope, 'state: 'scope> EventLoop {
         io_utils::write(sq, &mut self.events, socket, addr, buffer)
     }
 
+    fn disconnect_all<Q: SubmissionQueue>(
+        &mut self,
+        state_ref: &mut StateRef<'state>,
+        sq: &mut BackloggedSubmissionQueue<Q>,
+    ) {
+        // Initiate graceful shutdown for all connections
+        for connection in self.connections.values_mut() {
+            log::info!(
+                "[{}] Closing connection to peer: {}",
+                connection.peer_id,
+                connection.peer_addr,
+            );
+            connection.disconnect(sq, &mut self.events, state_ref);
+        }
+    }
+
     fn handle_commands<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
-        shutting_down: &mut bool,
         command_rc: &mut Receiver<Command>,
         state_ref: &mut StateRef<'state>,
+        event_tx: &mut Producer<TorrentEvent>,
     ) {
         let existing_connections: HashSet<SockAddr> = self
             .connections
             .iter()
             .map(|(_, peer)| SockAddr::from(peer.peer_addr))
             .collect();
-        for command in command_rc.try_iter() {
+        // Block on new commands if we are paused, otherwise do a nonblocking iter
+        let command_iter: &mut dyn Iterator<Item = Command> = match self.state {
+            EventLoopState::Paused { .. } => &mut command_rc.iter(),
+            _ => &mut command_rc.try_iter(),
+        };
+        for command in command_iter {
             match command {
                 Command::ConnectToPeers(addrs) => {
                     // Don't connect to new peers if we are shutting down
-                    if *shutting_down {
+                    // or pausing
+                    if !matches!(self.state, EventLoopState::Running { .. }) {
                         continue;
                     }
                     for addr in addrs.into_iter().map(|addr| addr.into()) {
@@ -670,19 +749,61 @@ impl<'scope, 'state: 'scope> EventLoop {
                         }
                     }
                 }
+                Command::Pause => {
+                    if let EventLoopState::Running {
+                        listener_fd,
+                        listener_user_data,
+                    } = self.state
+                    {
+                        log::info!("Pause requested, closing all connections");
+                        self.state = EventLoopState::Pausing { listener_fd };
+                        // Cancel the listener
+                        io_utils::cancel(
+                            sq,
+                            &mut self.events,
+                            CancelBuilder::user_data(listener_user_data).all(),
+                        );
+                        assert!(
+                            self.events
+                                .remove(EventId::from(KeyData::from_ffi(listener_user_data)))
+                                .is_some(),
+                            "Listener AcceptMulti removed more than once"
+                        );
+                        self.disconnect_all(state_ref, sq);
+                    } else {
+                        log::warn!("Received Pause command when in a non running state. Ignoring");
+                    }
+                }
+                Command::Resume => {
+                    if let EventLoopState::Paused { listener_fd } = self.state {
+                        let port = state_ref
+                            .listener_port
+                            .expect("Resume must be called after having been explicitly paused");
+                        let listener_fd = listener_fd
+                            .expect("Resume must be called after having been explicitly paused");
+                        self.setup_and_mark_running(listener_fd, port, sq, event_tx);
+                        // Break out of the command loop since we were iterating with
+                        // the blocking iter. We need to return to the main event loop
+                        // so CQEs can be processed.
+                        break;
+                    } else {
+                        log::error!(
+                            "Resume requested when in a non paused state. Current state: {:?}",
+                            self.state
+                        );
+                    }
+                }
                 Command::Stop => {
-                    if !*shutting_down {
+                    if !matches!(self.state, EventLoopState::ShuttingDown { .. }) {
                         log::info!("Shutdown requested, closing all connections");
-                        *shutting_down = true;
-                        // Initiate graceful shutdown for all connections
-                        for connection in self.connections.values_mut() {
-                            log::info!(
-                                "[{}] Closing connection to peer: {}",
-                                connection.peer_id,
-                                connection.peer_addr,
-                            );
-                            connection.disconnect(sq, &mut self.events, state_ref);
-                        }
+                        let listener_fd = match self.state {
+                            EventLoopState::ShuttingDown { listener_fd }
+                            | EventLoopState::Paused { listener_fd } => listener_fd,
+                            EventLoopState::Pausing { listener_fd }
+                            | EventLoopState::Running { listener_fd, .. } => Some(listener_fd),
+                        };
+                        self.state = EventLoopState::ShuttingDown { listener_fd };
+                        self.disconnect_all(state_ref, sq);
                     }
                 }
             }
@@ -779,9 +900,18 @@ impl<'scope, 'state: 'scope> EventLoop {
                 std::mem::swap(&mut event, &mut self.events[io_event.event_data_idx].typ);
                 let fd = ret;
                 let socket = unsafe { Socket::from_raw_fd(fd) };
+                // There is a race here where new connections may show up
+                // after we've paused or shut down but before the AcceptMulti
+                // operation has been fully cancelled
+                if !matches!(self.state, EventLoopState::Running { .. }) {
+                    log::warn!("Received incoming connection without being in the running state");
+                    io_utils::close_socket(sq, socket, None, &mut self.events);
+                    return Ok(());
+                }
                 let addr = socket.peer_addr()?;
                 if addr.is_ipv6() {
                     log::error!("Received connection from non ipv4 addr");
+                    io_utils::close_socket(sq, socket, None, &mut self.events);
                     return Ok(());
                 };
 
@@ -1475,7 +1605,7 @@ mod tests {
             let listener_port = loop {
                 if let Some(event) = event_rx.dequeue() {
                     match event {
-                        TorrentEvent::ListenerStarted { port } => {
+                        TorrentEvent::Running { port } => {
                             break port;
                         }
                         _ => continue,

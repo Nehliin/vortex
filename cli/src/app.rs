@@ -124,8 +124,11 @@ impl<'queue> VortexApp<'queue> {
                     self.time_field = Time::DownloadTime(download_time);
                     self.is_complete = true;
                 }
-                TorrentEvent::ListenerStarted { port: _ } => {
+                TorrentEvent::Running { port: _ } => {
                     // Nothing to do here
+                }
+                TorrentEvent::Paused => {
+                    // TODO
                 }
                 TorrentEvent::MetadataComplete(metadata) => {
                     self.metadata = Some(metadata.clone());

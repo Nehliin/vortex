@@ -291,17 +291,9 @@ pub fn close_socket<Q: SubmissionQueue>(
     events: &mut SlotMap<EventId, EventData>,
 ) {
     let fd = socket.into_raw_fd();
-    let event_id = events.insert(EventData {
-        typ: EventType::Cancel,
-        buffers: None,
-    });
-
     // If more events are received in the same cqe loop there might still linger events
     // that have been removed due to a earlier event in the loop causing the socket to close
-    let cancel_op = opcode::AsyncCancel2::new(CancelBuilder::fd(types::Fd(fd)).all())
-        .build()
-        .user_data(event_id.data().as_ffi());
-    sq.push(cancel_op);
+    cancel(sq, events, CancelBuilder::fd(types::Fd(fd)).all());
     let event_id = events.insert(EventData {
         typ: EventType::Close {
             maybe_connection_idx,
@@ -312,6 +304,21 @@ pub fn close_socket<Q: SubmissionQueue>(
         .build()
         .user_data(event_id.data().as_ffi());
     sq.push(close_op);
+}
+
+pub fn cancel<Q: SubmissionQueue>(
+    sq: &mut BackloggedSubmissionQueue<Q>,
+    events: &mut SlotMap<EventId, EventData>,
+    cancel_builder: CancelBuilder,
+) {
+    let event_id = events.insert(EventData {
+        typ: EventType::Cancel,
+        buffers: None,
+    });
+    let cancel_op = opcode::AsyncCancel2::new(cancel_builder)
+        .build()
+        .user_data(event_id.data().as_ffi());
+    sq.push(cancel_op);
 }
 
 pub fn recv<Q: SubmissionQueue>(

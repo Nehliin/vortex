@@ -78,7 +78,8 @@ fn basic_seeded_download() {
                         pieces_allocated: _,
                         peer_metrics: _,
                     } => {}
-                    TorrentEvent::ListenerStarted { port: _ } => {}
+                    TorrentEvent::Running { port: _ } => {}
+                    TorrentEvent::Paused => panic!("Should never pause"),
                 }
             }
         }
