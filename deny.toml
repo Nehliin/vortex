@@ -15,7 +15,6 @@ skip = [
     { name = "windows-sys", version = "*"},
     { name = "thiserror-impl" },
     { name = "thiserror" },
-    { name = "smallvec", version = "2.0.0-alpha.10" },
     { name = "digest", version = "*" },
     { name = "crypto-common", version = "*" },
     { name = "block-buffer", version = "*" },
