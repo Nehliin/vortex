@@ -782,6 +782,10 @@ impl<'scope, 'state: 'scope> EventLoop {
                         let listener_fd = listener_fd
                             .expect("Resume must be called after having been explicitly paused");
                         self.setup_and_mark_running(listener_fd, port, sq, event_tx);
+                        // Break out of the command loop since we were iterating with
+                        // the blocking iter. We need to return to the main event loop
+                        // so CQEs can be processed.
+                        break;
                     } else {
                         log::error!(
                             "Resume requested when in a non paused state. Current state: {:?}",
