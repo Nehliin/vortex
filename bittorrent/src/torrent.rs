@@ -167,8 +167,10 @@ pub enum Command {
     /// Connect to peers at the given address.
     /// Already connected peers will be filtered out
     ConnectToPeers(Vec<SocketAddrV4>),
-    /// Stop the event loop gracefully
+    /// Stop the event loop gracefully, disconnecting peers and freeing resources
     Stop,
+    /// Pause the torrent gracefully, disconnecting any peers but keeping resources in memory.
+    Pause,
 }
 
 /// Metrics for a given peer
@@ -197,6 +199,8 @@ pub enum TorrentEvent {
     /// The listener for incoming connection has finished set up
     /// on the provided port.
     ListenerStarted { port: u16 },
+    /// The torrent was successfully paused.
+    Paused,
     /// Over all metrics for the torrent, sent every tick.
     TorrentMetrics {
         /// How many pieces have currently been completed

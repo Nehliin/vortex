@@ -15,7 +15,7 @@ use io_uring::{
     IoUring,
     cqueue::Entry,
     opcode,
-    types::{self, Timespec},
+    types::{self, CancelBuilder, Fd, Timespec},
 };
 use libc::ECANCELED;
 use rayon::Scope;
@@ -104,6 +104,25 @@ new_key_type! {
 pub struct EventData {
     pub typ: EventType,
     pub buffers: Option<Vec<Buffer>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EventLoopState {
+    ShuttingDown,
+    Pausing {
+        // Fd for the TcpListener provided to the event loop
+        listener_fd: Fd,
+    },
+    Paused {
+        // Fd for the TcpListener provided to the event loop
+        listener_fd: Option<Fd>,
+    },
+    Running {
+        // Fd for the TcpListener provided to the event loop
+        listener_fd: Fd,
+        // Associated user data to the AcceptMulti SQE
+        listener_user_data: u64,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -333,6 +352,7 @@ const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(CQE_WAIT_TIME_NS);
 
 pub struct EventLoop {
     events: SlotMap<EventId, EventData>,
+    state: EventLoopState,
     write_pool: BufferPool,
     read_ring: BufferRing,
     // TODO: Merge these or consider disconnecting
@@ -367,6 +387,7 @@ impl<'scope, 'state: 'scope> EventLoop {
             pending_connections: HashSet::with_capacity(config.max_connections),
             our_id,
             inflight_disk_ops: 0,
+            state: EventLoopState::Paused { listener_fd: None },
             queued_disk_operations: Vec::with_capacity(32),
         }
     }
@@ -397,9 +418,24 @@ impl<'scope, 'state: 'scope> EventLoop {
             let (submitter, sq, mut cq) = ring.split();
             let mut sq = BackloggedSubmissionQueue::new(sq);
             let mut last_tick = Instant::now();
-            let mut shutting_down = false;
 
             loop {
+                self.handle_commands(&mut sq, &mut command_rc, &mut state_ref);
+                let pause_ready = self.connections.is_empty() && self.inflight_disk_ops == 0;
+                match self.state {
+                    EventLoopState::ShuttingDown if pause_ready => {
+                        log::info!("All connections closed, shutdown complete");
+                        return Ok(());
+                    }
+                    EventLoopState::Pausing { listener_fd } if pause_ready => {
+                        // event
+                        self.state = EventLoopState::Paused {
+                            listener_fd: Some(listener_fd),
+                        };
+                    }
+                    _ => {}
+                }
+
                 let args = types::SubmitArgs::new().timespec(CQE_WAIT_TIME);
                 match submitter.submit_with_args(state_ref.config.completion_event_want, &args) {
                     Ok(_) => (),
@@ -591,12 +627,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                     connection.outgoing_msgs_buffer.clear();
                 }
                 sq.sync();
-
-                self.handle_commands(&mut sq, &mut shutting_down, &mut command_rc, &mut state_ref);
-                if shutting_down && self.connections.is_empty() && self.inflight_disk_ops == 0 {
-                    log::info!("All connections closed, shutdown complete");
-                    return Ok(());
-                }
             }
         });
 
@@ -651,10 +681,25 @@ impl<'scope, 'state: 'scope> EventLoop {
         io_utils::write(sq, &mut self.events, socket, addr, buffer)
     }
 
+    fn disconnect_all<Q: SubmissionQueue>(
+        &mut self,
+        state_ref: &mut StateRef<'state>,
+        sq: &mut BackloggedSubmissionQueue<Q>,
+    ) {
+        // Initiate graceful shutdown for all connections
+        for connection in self.connections.values_mut() {
+            log::info!(
+                "[{}] Closing connection to peer: {}",
+                connection.peer_id,
+                connection.peer_addr,
+            );
+            connection.disconnect(sq, &mut self.events, state_ref);
+        }
+    }
+
     fn handle_commands<Q: SubmissionQueue>(
         &mut self,
         sq: &mut BackloggedSubmissionQueue<Q>,
-        shutting_down: &mut bool,
         command_rc: &mut Receiver<Command>,
         state_ref: &mut StateRef<'state>,
     ) {
@@ -663,11 +708,17 @@ impl<'scope, 'state: 'scope> EventLoop {
             .iter()
             .map(|(_, peer)| SockAddr::from(peer.peer_addr))
             .collect();
-        for command in command_rc.try_iter() {
+        // Block on new commands if we are paused, otherwise do a nonblocking iter
+        let command_iter: &mut dyn Iterator<Item = Command> = match self.state {
+            EventLoopState::Paused { .. } => &mut command_rc.iter(),
+            _ => &mut command_rc.try_iter(),
+        };
+        for command in command_iter {
             match command {
                 Command::ConnectToPeers(addrs) => {
                     // Don't connect to new peers if we are shutting down
-                    if *shutting_down {
+                    // or pausing
+                    if !matches!(self.state, EventLoopState::Running { .. }) {
                         continue;
                     }
                     for addr in addrs.into_iter().map(|addr| addr.into()) {
@@ -684,19 +735,29 @@ impl<'scope, 'state: 'scope> EventLoop {
                         }
                     }
                 }
+                // TODO resume
+                Command::Pause => {
+                    if let EventLoopState::Running {
+                        listener_fd,
+                        listener_user_data,
+                    } = self.state
+                    {
+                        log::info!("Pause requested, closing all connections");
+                        self.state = EventLoopState::Pausing { listener_fd };
+                        // Cancel the listener
+                        io_utils::cancel(
+                            sq,
+                            &mut self.events,
+                            CancelBuilder::user_data(listener_user_data).all(),
+                        );
+                        self.disconnect_all(state_ref, sq);
+                    }
+                }
                 Command::Stop => {
-                    if !*shutting_down {
+                    if !matches!(self.state, EventLoopState::ShuttingDown) {
                         log::info!("Shutdown requested, closing all connections");
-                        *shutting_down = true;
-                        // Initiate graceful shutdown for all connections
-                        for connection in self.connections.values_mut() {
-                            log::info!(
-                                "[{}] Closing connection to peer: {}",
-                                connection.peer_id,
-                                connection.peer_addr,
-                            );
-                            connection.disconnect(sq, &mut self.events, state_ref);
-                        }
+                        self.state = EventLoopState::ShuttingDown;
+                        self.disconnect_all(state_ref, sq);
                     }
                 }
             }
