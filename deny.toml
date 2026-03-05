@@ -20,6 +20,8 @@ skip = [
     { name = "block-buffer", version = "*" },
     { name = "itertools", version = "*" },
     { name = "getrandom", version = "*" },
+    { name = "cpufeatures", version = "*" },
+    { name = "r-efi", version = "*" },
 ]
 
 [advisories]
