@@ -309,7 +309,7 @@ mod tests {
 
     use bytes::BufMut;
     use lava_torrent::torrent::v1::TorrentBuilder;
-    use rand::Rng;
+    use rand::RngExt;
     use slotmap::Key;
     use std::os::fd::FromRawFd;
 
