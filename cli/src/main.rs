@@ -25,10 +25,10 @@ use ui::{
     extract_throughput_data,
 };
 
-use tikv_jemallocator::Jemalloc;
+use mimalloc::MiMalloc;
 
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
+static GLOBAL: MiMalloc = MiMalloc;
 
 pub fn decode_info_hash_hex(s: &str) -> color_eyre::eyre::Result<[u8; 20]> {
     let byte_vec = (0..s.len())
