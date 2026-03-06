@@ -8,7 +8,7 @@ use std::{
 use io_uring::{
     Submitter,
     opcode::{self},
-    squeue::PushError,
+    squeue::{Flags, PushError},
     types::{self, CancelBuilder, Timespec},
 };
 use slotmap::{Key, SlotMap};
@@ -293,7 +293,21 @@ pub fn close_socket<Q: SubmissionQueue>(
     let fd = socket.into_raw_fd();
     // If more events are received in the same cqe loop there might still linger events
     // that have been removed due to a earlier event in the loop causing the socket to close
-    cancel(sq, events, CancelBuilder::fd(types::Fd(fd)).all());
+    cancel(
+        sq,
+        events,
+        CancelBuilder::fd(types::Fd(fd)).all(),
+        // IO_HARDLINK ensures the cancel is guaranteed
+        // to happen before the close. Without this we might
+        // see ENOENT errors in the event loop due to the socket
+        // closing before the cancel happens. This will result in
+        // a panic in the event loop which only "accept" ECANCELED.
+        // We could accept ENOENT as well but it's cleaner to cancel -> close.
+        // IO_HARDLINK is also used instead of IO_LINK to ensure we always
+        // close the socket regardless if the the cancel fails or not.
+        // (This might be overly paranoid but whatever)
+        Some(Flags::IO_HARDLINK),
+    );
     let event_id = events.insert(EventData {
         typ: EventType::Close {
             maybe_connection_idx,
@@ -310,6 +324,7 @@ pub fn cancel<Q: SubmissionQueue>(
     sq: &mut BackloggedSubmissionQueue<Q>,
     events: &mut SlotMap<EventId, EventData>,
     cancel_builder: CancelBuilder,
+    flags: Option<Flags>,
 ) {
     let event_id = events.insert(EventData {
         typ: EventType::Cancel,
@@ -318,6 +333,11 @@ pub fn cancel<Q: SubmissionQueue>(
     let cancel_op = opcode::AsyncCancel2::new(cancel_builder)
         .build()
         .user_data(event_id.data().as_ffi());
+    let cancel_op = if let Some(flags) = flags {
+        cancel_op.flags(flags)
+    } else {
+        cancel_op
+    };
     sq.push(cancel_op);
 }
 

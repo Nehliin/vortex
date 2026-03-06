@@ -762,6 +762,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                             sq,
                             &mut self.events,
                             CancelBuilder::user_data(listener_user_data).all(),
+                            None,
                         );
                         assert!(
                             self.events
