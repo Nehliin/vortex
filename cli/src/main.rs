@@ -410,7 +410,7 @@ impl Widget for &mut VortexApp<'_> {
                 metadata_progress: self.best_metadata_progress,
             },
             AppState::Seeding => ProgressState::Seeding,
-            AppState::Paused { .. } | AppState::Downloading => {
+            AppState::Downloading => {
                 if let Some(metadata) = &self.metadata {
                     let download_throughput = self
                         .total_download_throughput
@@ -427,6 +427,19 @@ impl Widget for &mut VortexApp<'_> {
                     }
                 } else {
                     ProgressState::DownloadingMetadata {
+                        metadata_progress: self.best_metadata_progress,
+                    }
+                }
+            }
+            AppState::Paused { was_seeding: true } => ProgressState::PausedSeeding,
+            AppState::Paused { was_seeding: false } => {
+                if let Some(metadata) = &self.metadata {
+                    ProgressState::PausedDownloading {
+                        pieces_completed: self.pieces_completed,
+                        total_pieces: metadata.pieces.len(),
+                    }
+                } else {
+                    ProgressState::PausedMetadata {
                         metadata_progress: self.best_metadata_progress,
                     }
                 }

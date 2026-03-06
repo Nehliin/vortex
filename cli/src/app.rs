@@ -144,7 +144,11 @@ impl<'queue> VortexApp<'queue> {
                             }
                         }
                         _ => {
-                            panic!("Unexpected resume from state: {:?}", self.state);
+                            if self.metadata.is_none() {
+                                AppState::DownloadingMetadata
+                            } else {
+                                AppState::Downloading
+                            }
                         }
                     };
                     self.dht_paused.store(false, Ordering::Relaxed);

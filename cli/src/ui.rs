@@ -36,6 +36,14 @@ pub enum ProgressState {
         download_throughput: f64,
     },
     Seeding,
+    PausedSeeding,
+    PausedDownloading {
+        pieces_completed: usize,
+        total_pieces: usize,
+    },
+    PausedMetadata {
+        metadata_progress: MetadataProgress,
+    },
 }
 
 pub struct ProgressBar {
@@ -60,6 +68,28 @@ impl ProgressBar {
                 (pct, "Downloading metadata...".to_string(), Color::Gray)
             }
             ProgressState::Seeding => (100, "Seeding".to_string(), Color::Cyan),
+            ProgressState::PausedSeeding => (100, "Paused".to_string(), Color::Yellow),
+            ProgressState::PausedDownloading {
+                pieces_completed,
+                total_pieces,
+            } => {
+                let pct = (100.0 * (pieces_completed as f64 / total_pieces as f64)) as u16;
+                (pct, format!("Paused ({pct}%)"), Color::Yellow)
+            }
+            ProgressState::PausedMetadata { metadata_progress } => {
+                let pct = if metadata_progress.total_piece == 0 {
+                    0
+                } else {
+                    (100.0
+                        * (metadata_progress.completed_pieces as f64
+                            / metadata_progress.total_piece as f64)) as u16
+                };
+                (
+                    pct,
+                    format!("Paused (downloading metadata {pct}%)"),
+                    Color::Yellow,
+                )
+            }
             ProgressState::Downloading {
                 pieces_completed,
                 total_pieces,
