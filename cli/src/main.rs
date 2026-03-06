@@ -1,6 +1,16 @@
 use std::{
-    fs::OpenOptions, io::ErrorKind, net::TcpListener, num::ParseIntError, path::PathBuf,
-    process::Command as ProcessCommand, sync::mpsc::SyncSender, time::Duration,
+    fs::OpenOptions,
+    io::ErrorKind,
+    net::TcpListener,
+    num::ParseIntError,
+    path::PathBuf,
+    process::Command as ProcessCommand,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::SyncSender,
+    },
+    time::Duration,
 };
 
 use clap::{Args, Parser};
@@ -21,7 +31,7 @@ mod ui;
 
 use app::{AppState, VortexApp};
 use ui::{
-    InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData, ThroughputGraph,
+    Footer, InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData, ThroughputGraph,
     extract_throughput_data,
 };
 
@@ -49,6 +59,7 @@ fn dht_thread(
     shutdown_signal_rc: Receiver<()>,
     dht_cache_path: PathBuf,
     skip_dht_cache: bool,
+    paused: Arc<AtomicBool>,
 ) -> color_eyre::eyre::Result<()> {
     let mut builder = Dht::builder();
     if dht_cache_path.exists() && !skip_dht_cache {
@@ -82,11 +93,15 @@ fn dht_thread(
     loop {
         select! {
             recv(fetch_interval) -> _ => {
-                query();
+                if !paused.load(Ordering::Relaxed) {
+                    query();
+                }
             }
             recv(announce_interval) -> _ => {
-                dht_client.announce_peer(info_hash_id, Some(port))
-                    .wrap_err("Failed to announce ourself on the DHT")?;
+                if !paused.load(Ordering::Relaxed) {
+                    dht_client.announce_peer(info_hash_id, Some(port))
+                        .wrap_err("Failed to announce ourself on the DHT")?;
+                }
             }
             recv(shutdown_signal_rc) -> _ => {
                 let bootstrap_nodes = dht_client.to_bootstrap();
@@ -342,6 +357,7 @@ fn main() -> color_eyre::Result<()> {
     let is_complete = state.is_complete();
     let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
+    let dht_paused = Arc::new(AtomicBool::new(false));
 
     let dht_cache_path = paths.dht_cache.clone();
     std::thread::scope(|s| {
@@ -349,6 +365,7 @@ fn main() -> color_eyre::Result<()> {
             torrent.start(event_tx, command_rc, listener).unwrap();
         });
         let cmd_tx_clone = command_tx.clone();
+        let dht_paused_clone = Arc::clone(&dht_paused);
         s.spawn(move || {
             dht_thread(
                 info_hash_id,
@@ -357,6 +374,7 @@ fn main() -> color_eyre::Result<()> {
                 shutdown_signal_rc,
                 dht_cache_path,
                 cli.skip_dht_cache,
+                dht_paused_clone,
             )
             .expect("DHT thread failed")
         });
@@ -368,6 +386,7 @@ fn main() -> color_eyre::Result<()> {
             metadata,
             root,
             is_complete,
+            dht_paused,
         );
         let terminal = ratatui::init();
         let result = app.run(terminal);
