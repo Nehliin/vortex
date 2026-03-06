@@ -133,10 +133,19 @@ impl<'queue> VortexApp<'queue> {
                     self.state = AppState::Seeding;
                 }
                 TorrentEvent::Running { port: _ } => {
-                    self.state = if self.metadata.is_none() {
-                        AppState::DownloadingMetadata
-                    } else {
-                        AppState::Downloading
+                    self.state = match self.state {
+                        AppState::Paused { was_seeding } => {
+                            if was_seeding {
+                                AppState::Seeding
+                            } else if self.metadata.is_none() {
+                                AppState::DownloadingMetadata
+                            } else {
+                                AppState::Downloading
+                            }
+                        }
+                        _ => {
+                            panic!("Unexpected resume from state: {:?}", self.state);
+                        }
                     };
                     self.dht_paused.store(false, Ordering::Relaxed);
                 }
