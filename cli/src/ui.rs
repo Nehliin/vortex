@@ -68,13 +68,13 @@ impl ProgressBar {
                 (pct, "Downloading metadata...".to_string(), Color::Gray)
             }
             ProgressState::Seeding => (100, "Seeding".to_string(), Color::Cyan),
-            ProgressState::PausedSeeding => (100, "Paused".to_string(), Color::Yellow),
+            ProgressState::PausedSeeding => (100, "Paused".to_string(), Color::DarkGray),
             ProgressState::PausedDownloading {
                 pieces_completed,
                 total_pieces,
             } => {
                 let pct = (100.0 * (pieces_completed as f64 / total_pieces as f64)) as u16;
-                (pct, format!("Paused ({pct}%)"), Color::Yellow)
+                (pct, format!("Paused ({pct}%)"), Color::DarkGray)
             }
             ProgressState::PausedMetadata { metadata_progress } => {
                 let pct = if metadata_progress.total_piece == 0 {
@@ -87,7 +87,7 @@ impl ProgressBar {
                 (
                     pct,
                     format!("Paused (downloading metadata {pct}%)"),
-                    Color::Yellow,
+                    Color::DarkGray,
                 )
             }
             ProgressState::Downloading {
