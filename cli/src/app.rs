@@ -3,7 +3,11 @@
 use std::{
     io,
     path::PathBuf,
-    sync::mpsc::SyncSender,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::SyncSender,
+    },
     time::{Duration, Instant, SystemTime},
 };
 
@@ -26,6 +30,13 @@ pub enum AppState {
     Downloading,
     /// Download complete, seeding to other peers
     Seeding,
+    /// Torrent is paused
+    Paused {
+        // To ensure we return to the correct state
+        was_seeding: bool,
+        // Keep track of the last simulated data to the graph
+        last_simulated_update: Instant,
+    },
 }
 
 pub struct VortexApp<'queue> {
@@ -51,11 +62,11 @@ pub struct VortexApp<'queue> {
     pub best_metadata_progress: MetadataProgress,
     /// Root directory for downloads
     pub root: PathBuf,
-    /// Whether the torrent download is complete
-    pub is_complete: bool,
     pub time_field: Time,
     /// Signal sender to shutdown other threads
     pub shutdown_signal_tx: Sender<()>,
+    pub state: AppState,
+    pub dht_paused: Arc<AtomicBool>,
 }
 
 impl<'queue> VortexApp<'queue> {
@@ -66,7 +77,15 @@ impl<'queue> VortexApp<'queue> {
         metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
         root: PathBuf,
         is_complete: bool,
+        dht_paused: Arc<AtomicBool>,
     ) -> Self {
+        let state = if is_complete {
+            AppState::Seeding
+        } else if metadata.is_none() {
+            AppState::DownloadingMetadata
+        } else {
+            AppState::Downloading
+        };
         Self {
             cmd_tx,
             event_rc,
@@ -76,22 +95,13 @@ impl<'queue> VortexApp<'queue> {
             total_download_throughput: Box::new(HistoryBuf::new()),
             total_upload_throughput: Box::new(HistoryBuf::new()),
             num_connections: 0,
-            is_complete,
             best_metadata_progress: Default::default(),
             metadata,
             time_field: Time::StartedAt(SystemTime::now()),
             root,
             shutdown_signal_tx,
-        }
-    }
-
-    pub fn state(&self) -> AppState {
-        if self.metadata.is_none() {
-            AppState::DownloadingMetadata
-        } else if self.is_complete {
-            AppState::Seeding
-        } else {
-            AppState::Downloading
+            state,
+            dht_paused,
         }
     }
 
@@ -122,16 +132,39 @@ impl<'queue> VortexApp<'queue> {
                         Time::DownloadTime(duration) => duration,
                     };
                     self.time_field = Time::DownloadTime(download_time);
-                    self.is_complete = true;
+                    self.state = AppState::Seeding;
                 }
                 TorrentEvent::Running { port: _ } => {
-                    // Nothing to do here
+                    self.state = match self.state {
+                        AppState::Paused { was_seeding, .. } => {
+                            if was_seeding {
+                                AppState::Seeding
+                            } else if self.metadata.is_none() {
+                                AppState::DownloadingMetadata
+                            } else {
+                                AppState::Downloading
+                            }
+                        }
+                        _ => {
+                            if self.metadata.is_none() {
+                                AppState::DownloadingMetadata
+                            } else {
+                                AppState::Downloading
+                            }
+                        }
+                    };
+                    self.dht_paused.store(false, Ordering::Relaxed);
                 }
                 TorrentEvent::Paused => {
-                    // TODO
+                    self.state = AppState::Paused {
+                        was_seeding: matches!(self.state, AppState::Seeding),
+                        last_simulated_update: Instant::now(),
+                    };
+                    self.dht_paused.store(true, Ordering::Relaxed);
                 }
                 TorrentEvent::MetadataComplete(metadata) => {
                     self.metadata = Some(metadata.clone());
+                    self.state = AppState::Downloading;
                     self.time_field = Time::StartedAt(SystemTime::now());
                     let root = self.root.clone();
                     // Store the metadata as the info hash in the download folder, that will
@@ -169,6 +202,19 @@ impl<'queue> VortexApp<'queue> {
             }
         }
 
+        match &mut self.state {
+            AppState::Paused {
+                last_simulated_update,
+                ..
+            } if last_simulated_update.elapsed() >= Duration::from_secs(1) => {
+                // Simulate data so the graph isn't static
+                let curr_time = self.start_time.elapsed().as_secs_f64();
+                self.total_download_throughput.write((curr_time, 0.0));
+                self.total_upload_throughput.write((curr_time, 0.0));
+                *last_simulated_update = Instant::now();
+            }
+            _ => {}
+        }
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 // it's important to check that the event is a key press event as
@@ -184,8 +230,15 @@ impl<'queue> VortexApp<'queue> {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if let KeyCode::Char('q') = key_event.code {
-            self.shutdown()
+        match key_event.code {
+            KeyCode::Char('q') => self.shutdown(),
+            KeyCode::Char('p') if !matches!(self.state, AppState::Paused { .. }) => {
+                let _ = self.cmd_tx.send(Command::Pause);
+            }
+            KeyCode::Char('r') if matches!(self.state, AppState::Paused { .. }) => {
+                let _ = self.cmd_tx.send(Command::Resume);
+            }
+            _ => {}
         }
     }
 }

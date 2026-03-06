@@ -13,6 +13,8 @@ use ratatui::{
 };
 use vortex_bittorrent::MetadataProgress;
 
+use crate::app::AppState;
+
 fn download_style() -> Style {
     Style::default().fg(Color::Green)
 }
@@ -34,6 +36,14 @@ pub enum ProgressState {
         download_throughput: f64,
     },
     Seeding,
+    PausedSeeding,
+    PausedDownloading {
+        pieces_completed: usize,
+        total_pieces: usize,
+    },
+    PausedMetadata {
+        metadata_progress: MetadataProgress,
+    },
 }
 
 pub struct ProgressBar {
@@ -58,6 +68,28 @@ impl ProgressBar {
                 (pct, "Downloading metadata...".to_string(), Color::Gray)
             }
             ProgressState::Seeding => (100, "Seeding".to_string(), Color::Cyan),
+            ProgressState::PausedSeeding => (100, "Paused".to_string(), Color::DarkGray),
+            ProgressState::PausedDownloading {
+                pieces_completed,
+                total_pieces,
+            } => {
+                let pct = (100.0 * (pieces_completed as f64 / total_pieces as f64)) as u16;
+                (pct, format!("Paused ({pct}%)"), Color::DarkGray)
+            }
+            ProgressState::PausedMetadata { metadata_progress } => {
+                let pct = if metadata_progress.total_piece == 0 {
+                    0
+                } else {
+                    (100.0
+                        * (metadata_progress.completed_pieces as f64
+                            / metadata_progress.total_piece as f64)) as u16
+                };
+                (
+                    pct,
+                    format!("Paused (downloading metadata {pct}%)"),
+                    Color::DarkGray,
+                )
+            }
             ProgressState::Downloading {
                 pieces_completed,
                 total_pieces,
@@ -274,8 +306,47 @@ impl Widget for InfoPanel {
 
         Table::new(vec![row], [ratatui::layout::Constraint::Fill(1); 5])
             .header(Row::new(headers).style(default_style))
-            .block(Block::default().borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                    .border_type(ratatui::widgets::BorderType::Rounded),
+            )
             .style(default_style)
+            .render(area, buf);
+    }
+}
+
+pub struct Footer {
+    pub state: AppState,
+}
+
+impl Widget for Footer {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let key_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let desc_style = Style::default().fg(Color::Gray);
+        let sep_style = Style::default().fg(Color::DarkGray);
+
+        let mut spans = vec![
+            Span::styled(" q ", key_style),
+            Span::styled("quit", desc_style),
+            Span::styled(" │ ", sep_style),
+        ];
+
+        if matches!(self.state, AppState::Paused { .. }) {
+            spans.push(Span::styled("r ", key_style));
+            spans.push(Span::styled("resume ", desc_style));
+        } else {
+            spans.push(Span::styled("p ", key_style));
+            spans.push(Span::styled("pause ", desc_style));
+        }
+
+        let title = ratatui::text::Line::from(spans);
+        Block::default()
+            .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title_bottom(title.centered())
             .render(area, buf);
     }
 }
