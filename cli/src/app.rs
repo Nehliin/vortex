@@ -34,6 +34,8 @@ pub enum AppState {
     Paused {
         // To ensure we return to the correct state
         was_seeding: bool,
+        // Keep track of the last simulated data to the graph
+        last_simulated_update: Instant,
     },
 }
 
@@ -134,7 +136,7 @@ impl<'queue> VortexApp<'queue> {
                 }
                 TorrentEvent::Running { port: _ } => {
                     self.state = match self.state {
-                        AppState::Paused { was_seeding } => {
+                        AppState::Paused { was_seeding, .. } => {
                             if was_seeding {
                                 AppState::Seeding
                             } else if self.metadata.is_none() {
@@ -156,6 +158,7 @@ impl<'queue> VortexApp<'queue> {
                 TorrentEvent::Paused => {
                     self.state = AppState::Paused {
                         was_seeding: matches!(self.state, AppState::Seeding),
+                        last_simulated_update: Instant::now(),
                     };
                     self.dht_paused.store(true, Ordering::Relaxed);
                 }
@@ -199,6 +202,19 @@ impl<'queue> VortexApp<'queue> {
             }
         }
 
+        match &mut self.state {
+            AppState::Paused {
+                last_simulated_update,
+                ..
+            } if last_simulated_update.elapsed() >= Duration::from_secs(1) => {
+                // Simulate data so the graph isn't static
+                let curr_time = self.start_time.elapsed().as_secs_f64();
+                self.total_download_throughput.write((curr_time, 0.0));
+                self.total_upload_throughput.write((curr_time, 0.0));
+                *last_simulated_update = Instant::now();
+            }
+            _ => {}
+        }
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 // it's important to check that the event is a key press event as

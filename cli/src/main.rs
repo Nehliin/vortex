@@ -431,8 +431,13 @@ impl Widget for &mut VortexApp<'_> {
                     }
                 }
             }
-            AppState::Paused { was_seeding: true } => ProgressState::PausedSeeding,
-            AppState::Paused { was_seeding: false } => {
+            AppState::Paused {
+                was_seeding: true, ..
+            } => ProgressState::PausedSeeding,
+            AppState::Paused {
+                was_seeding: false, ..
+            } => {
+                self.num_connections = 0;
                 if let Some(metadata) = &self.metadata {
                     ProgressState::PausedDownloading {
                         pieces_completed: self.pieces_completed,
