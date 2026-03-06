@@ -306,7 +306,11 @@ impl Widget for InfoPanel {
 
         Table::new(vec![row], [ratatui::layout::Constraint::Fill(1); 5])
             .header(Row::new(headers).style(default_style))
-            .block(Block::default().borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                    .border_type(ratatui::widgets::BorderType::Rounded),
+            )
             .style(default_style)
             .render(area, buf);
     }
@@ -331,15 +335,19 @@ impl Widget for Footer {
         ];
 
         if matches!(self.state, AppState::Paused { .. }) {
-            spans.push(Span::styled(" r ", key_style));
-            spans.push(Span::styled("resume", desc_style));
+            spans.push(Span::styled("r ", key_style));
+            spans.push(Span::styled("resume ", desc_style));
         } else {
-            spans.push(Span::styled(" p ", key_style));
-            spans.push(Span::styled("pause", desc_style));
+            spans.push(Span::styled("p ", key_style));
+            spans.push(Span::styled("pause ", desc_style));
         }
 
-        let line = ratatui::text::Line::from(spans).alignment(Alignment::Center);
-        line.render(area, buf);
+        let title = ratatui::text::Line::from(spans);
+        Block::default()
+            .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title_bottom(title.centered())
+            .render(area, buf);
     }
 }
 
