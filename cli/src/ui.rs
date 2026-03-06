@@ -13,6 +13,8 @@ use ratatui::{
 };
 use vortex_bittorrent::MetadataProgress;
 
+use crate::app::AppState;
+
 fn download_style() -> Style {
     Style::default().fg(Color::Green)
 }
@@ -277,6 +279,35 @@ impl Widget for InfoPanel {
             .block(Block::default().borders(Borders::ALL))
             .style(default_style)
             .render(area, buf);
+    }
+}
+
+pub struct Footer {
+    pub state: AppState,
+}
+
+impl Widget for Footer {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let key_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let desc_style = Style::default().fg(Color::Gray);
+        let sep_style = Style::default().fg(Color::DarkGray);
+
+        let mut spans = vec![
+            Span::styled(" q ", key_style),
+            Span::styled("quit", desc_style),
+            Span::styled(" │ ", sep_style),
+        ];
+
+        if self.state == AppState::Paused {
+            spans.push(Span::styled(" r ", key_style));
+            spans.push(Span::styled("resume", desc_style));
+        } else {
+            spans.push(Span::styled(" p ", key_style));
+            spans.push(Span::styled("pause", desc_style));
+        }
+
+        let line = ratatui::text::Line::from(spans).alignment(Alignment::Center);
+        line.render(area, buf);
     }
 }
 

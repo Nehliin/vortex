@@ -397,19 +397,20 @@ fn main() -> color_eyre::Result<()> {
 
 impl Widget for &mut VortexApp<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let [progress_area, graph_area, info_area] = Layout::vertical([
+        let [progress_area, graph_area, info_area, footer_area] = Layout::vertical([
             Constraint::Length(4),
             Constraint::Fill(1),
             Constraint::Max(5),
+            Constraint::Length(1),
         ])
         .areas(area);
 
-        let progress_state = match self.state() {
+        let progress_state = match self.state {
             AppState::DownloadingMetadata => ProgressState::DownloadingMetadata {
                 metadata_progress: self.best_metadata_progress,
             },
             AppState::Seeding => ProgressState::Seeding,
-            AppState::Downloading => {
+            AppState::Paused | AppState::Downloading => {
                 if let Some(metadata) = &self.metadata {
                     let download_throughput = self
                         .total_download_throughput
@@ -464,6 +465,11 @@ impl Widget for &mut VortexApp<'_> {
         };
 
         InfoPanel::new(info_data).render(info_area, buf);
+
+        Footer {
+            state: self.state,
+        }
+        .render(footer_area, buf);
     }
 }
 
