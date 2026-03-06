@@ -31,7 +31,10 @@ pub enum AppState {
     /// Download complete, seeding to other peers
     Seeding,
     /// Torrent is paused
-    Paused,
+    Paused {
+        // To ensure we return to the correct state
+        was_seeding: bool,
+    },
 }
 
 pub struct VortexApp<'queue> {
@@ -57,8 +60,6 @@ pub struct VortexApp<'queue> {
     pub best_metadata_progress: MetadataProgress,
     /// Root directory for downloads
     pub root: PathBuf,
-    /// Whether the torrent download is complete
-    pub is_complete: bool,
     pub time_field: Time,
     /// Signal sender to shutdown other threads
     pub shutdown_signal_tx: Sender<()>,
@@ -92,7 +93,6 @@ impl<'queue> VortexApp<'queue> {
             total_download_throughput: Box::new(HistoryBuf::new()),
             total_upload_throughput: Box::new(HistoryBuf::new()),
             num_connections: 0,
-            is_complete,
             best_metadata_progress: Default::default(),
             metadata,
             time_field: Time::StartedAt(SystemTime::now()),
@@ -130,7 +130,6 @@ impl<'queue> VortexApp<'queue> {
                         Time::DownloadTime(duration) => duration,
                     };
                     self.time_field = Time::DownloadTime(download_time);
-                    self.is_complete = true;
                     self.state = AppState::Seeding;
                 }
                 TorrentEvent::Running { port: _ } => {
@@ -142,7 +141,9 @@ impl<'queue> VortexApp<'queue> {
                     self.dht_paused.store(false, Ordering::Relaxed);
                 }
                 TorrentEvent::Paused => {
-                    self.state = AppState::Paused;
+                    self.state = AppState::Paused {
+                        was_seeding: matches!(self.state, AppState::Seeding),
+                    };
                     self.dht_paused.store(true, Ordering::Relaxed);
                 }
                 TorrentEvent::MetadataComplete(metadata) => {
@@ -202,10 +203,10 @@ impl<'queue> VortexApp<'queue> {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => self.shutdown(),
-            KeyCode::Char('p') if self.state != AppState::Paused => {
+            KeyCode::Char('p') if !matches!(self.state, AppState::Paused { .. }) => {
                 let _ = self.cmd_tx.send(Command::Pause);
             }
-            KeyCode::Char('r') if self.state == AppState::Paused => {
+            KeyCode::Char('r') if matches!(self.state, AppState::Paused { .. }) => {
                 let _ = self.cmd_tx.send(Command::Resume);
             }
             _ => {}

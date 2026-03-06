@@ -288,7 +288,9 @@ pub struct Footer {
 
 impl Widget for Footer {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let key_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let key_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
         let desc_style = Style::default().fg(Color::Gray);
         let sep_style = Style::default().fg(Color::DarkGray);
 
@@ -298,7 +300,7 @@ impl Widget for Footer {
             Span::styled(" │ ", sep_style),
         ];
 
-        if self.state == AppState::Paused {
+        if matches!(self.state, AppState::Paused { .. }) {
             spans.push(Span::styled(" r ", key_style));
             spans.push(Span::styled("resume", desc_style));
         } else {

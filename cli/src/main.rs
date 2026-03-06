@@ -410,7 +410,7 @@ impl Widget for &mut VortexApp<'_> {
                 metadata_progress: self.best_metadata_progress,
             },
             AppState::Seeding => ProgressState::Seeding,
-            AppState::Paused | AppState::Downloading => {
+            AppState::Paused { .. } | AppState::Downloading => {
                 if let Some(metadata) = &self.metadata {
                     let download_throughput = self
                         .total_download_throughput
@@ -466,10 +466,7 @@ impl Widget for &mut VortexApp<'_> {
 
         InfoPanel::new(info_data).render(info_area, buf);
 
-        Footer {
-            state: self.state,
-        }
-        .render(footer_area, buf);
+        Footer { state: self.state }.render(footer_area, buf);
     }
 }
 
