@@ -12,7 +12,7 @@
 
 ## Project status
 
-The project could be considered in a BETA state. The core of the implementation is fast and stable but there are features missing (for example [pausing torrents](https://github.com/Nehliin/vortex/issues/92) or [PEX peer exchange](https://github.com/Nehliin/vortex/issues/91)). The implementation is also thouroughly tested with unit, fuzz and integration tests and I have tested it manually on various hardware. With that said, `vortex-bittorrent` is not yet widely used. I expect there to be some stability issues as the project matures. Bug reports and feedback is welcome!
+The project could be considered in a BETA state. The core of the implementation is fast and stable but there are features missing (for example [PEX peer exchange](https://github.com/Nehliin/vortex/issues/91)). The implementation is also thouroughly tested with unit, fuzz and integration tests and I have tested it manually on various hardware. With that said, `vortex-bittorrent` is not yet widely used. I expect there to be some stability issues as the project matures. Bug reports and feedback is welcome!
 
 ## System Requirements
 
