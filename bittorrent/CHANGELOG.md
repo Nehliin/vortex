@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.5.0...vortex-bittorrent-v0.6.0) - 2026-03-07
+
+### Added
+
+- Support pausing and resuming torrents ([#110](https://github.com/Nehliin/vortex/pull/110))
+
+### Fixed
+
+- Guarantee cancellation before socket closure ([#114](https://github.com/Nehliin/vortex/pull/114))
+
+### Other
+
+- Update deps ([#112](https://github.com/Nehliin/vortex/pull/112))
+
 ## [0.5.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.4.0...vortex-bittorrent-v0.5.0) - 2026-02-08
 
 ### Added

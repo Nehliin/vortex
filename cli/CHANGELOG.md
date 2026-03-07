@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/Nehliin/vortex/compare/vortex-cli-v0.3.1...vortex-cli-v0.4.0) - 2026-03-07
+
+### Added
+
+- Support pausing in the cli ([#115](https://github.com/Nehliin/vortex/pull/115))
+- Support pausing and resuming torrents ([#110](https://github.com/Nehliin/vortex/pull/110))
+- Add command for registering magnet link handler (`register-magnet-handler`) ([#109](https://github.com/Nehliin/vortex/pull/109))
+- Add magnet link support (`--magnet-link`) ([#108](https://github.com/Nehliin/vortex/pull/108))
+
+### Other
+
+- Migrate to mimalloc ([#113](https://github.com/Nehliin/vortex/pull/113))
+- Update deps ([#112](https://github.com/Nehliin/vortex/pull/112))
+
+### Fixed
+
+- Fix info crash when providing torrent file ([#111](https://github.com/Nehliin/vortex/pull/111))
+
 ## [0.3.1](https://github.com/Nehliin/vortex/compare/vortex-cli-v0.3.0...vortex-cli-v0.3.1) - 2026-02-08
 
 ### Changed 
