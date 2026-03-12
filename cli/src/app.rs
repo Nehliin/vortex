@@ -67,9 +67,11 @@ pub struct VortexApp<'queue> {
     pub shutdown_signal_tx: Sender<()>,
     pub state: AppState,
     pub dht_paused: Arc<AtomicBool>,
+    pub magnet_name: Option<String>,
 }
 
 impl<'queue> VortexApp<'queue> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cmd_tx: SyncSender<Command>,
         event_rc: Consumer<'queue, TorrentEvent>,
@@ -78,6 +80,7 @@ impl<'queue> VortexApp<'queue> {
         root: PathBuf,
         is_complete: bool,
         dht_paused: Arc<AtomicBool>,
+        initial_name: Option<String>,
     ) -> Self {
         let state = if is_complete {
             AppState::Seeding
@@ -86,6 +89,14 @@ impl<'queue> VortexApp<'queue> {
         } else {
             AppState::Downloading
         };
+
+        let display_name = initial_name.unwrap_or_else(|| {
+            metadata
+                .as_ref()
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| "unknown".to_string())
+        });
+
         Self {
             cmd_tx,
             event_rc,
@@ -102,6 +113,7 @@ impl<'queue> VortexApp<'queue> {
             shutdown_signal_tx,
             state,
             dht_paused,
+            magnet_name: Some(display_name),
         }
     }
 
