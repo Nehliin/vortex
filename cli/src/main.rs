@@ -115,7 +115,7 @@ fn dht_thread(
     }
 }
 
-fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<String> {
+fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<MagentInfo> {
     if !magnet.starts_with("magnet:?") {
         return Err(eyre!("Invalid magnet link"));
     }
@@ -132,7 +132,7 @@ fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<String> {
         .next()
         .wrap_err("Info hash not found in magent link")?;
 
-    match hash_part.len() {
+    let final_hash = match hash_part.len() {
         32 => {
             let bytes = data_encoding::BASE32
                 .decode(hash_part.to_uppercase().as_bytes())
@@ -142,7 +142,18 @@ fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<String> {
         }
         40 => Ok(hash_part.to_lowercase()),
         _ => Err(eyre!("Invalid info hash length in magnet link")),
-    }
+    };
+
+    let dn = magnet
+        .split("&dn=")
+        .nth(1)
+        .map(|s| s.split('&').next().unwrap_or(s))
+        .map(|s| s.replace("%20", " "));
+
+    Ok(MagentInfo {
+        info_hash: final_hash?,
+        name: dn,
+    })
 }
 
 #[derive(Debug, Args)]
@@ -193,6 +204,11 @@ struct Cli {
     skip_dht_cache: bool,
     #[command(subcommand)]
     command: Option<CliCommand>,
+}
+
+struct MagentInfo {
+    info_hash: String,
+    name: Option<String>,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -300,6 +316,8 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
+    let mut magnet_name: Option<String> = None;
+
     let mut state = match cli.torrent_info {
         TorrentInfo {
             info_hash: None,
@@ -316,7 +334,11 @@ fn main() -> color_eyre::Result<()> {
                 .torrent_info
                 .magnet_link
                 .as_deref()
-                .map(parse_magnet_link)
+                .map(|m| -> color_eyre::Result<String> {
+                    let info = parse_magnet_link(m)?;
+                    magnet_name = info.name;
+                    Ok(info.info_hash)
+                })
                 .transpose()?
                 .or_else(|| cli.torrent_info.info_hash.clone())
                 .expect("Info hash or magnet link must be provided");
@@ -387,6 +409,7 @@ fn main() -> color_eyre::Result<()> {
             root,
             is_complete,
             dht_paused,
+            magnet_name,
         );
         let terminal = ratatui::init();
         let result = app.run(terminal);
@@ -478,6 +501,7 @@ impl Widget for &mut VortexApp<'_> {
                 .metadata
                 .as_ref()
                 .map(|meta| meta.name.to_owned())
+                .or_else(|| self.magnet_name.clone())
                 .unwrap_or("unknown".to_owned()),
             time: self.time_field,
         };
@@ -495,19 +519,23 @@ mod tests {
     #[test]
     fn test_parse_valid_hex_magnet() {
         let link = "magnet:?xt=urn:btih:ABCDEF1234567890ABCDEF1234567890ABCDEF12&dn=test_file";
+        let magnet_info = parse_magnet_link(link).unwrap();
         assert_eq!(
-            parse_magnet_link(link).unwrap(),
-            "abcdef1234567890abcdef1234567890abcdef12".to_string()
+            magnet_info.info_hash,
+            "abcdef1234567890abcdef1234567890abcdef12"
         );
+        assert_eq!(magnet_info.name, Some("test_file".to_string()));
     }
 
     #[test]
     fn test_parse_valid_base32_magnet() {
         let link = "magnet:?xt=urn:btih:MFRG2ZDFMZTWQ2LKNNWG23TPOBYXE4LY&dn=test_file&dn=test_file";
+        let magnet_info = parse_magnet_link(link).unwrap();
         assert_eq!(
-            parse_magnet_link(link).unwrap(),
-            "61626d6465666768696a6b6c6d6e6f7071727178".to_string()
+            magnet_info.info_hash,
+            "61626d6465666768696a6b6c6d6e6f7071727178"
         );
+        assert_eq!(magnet_info.name, Some("test_file".to_string()));
     }
 
     #[test]
@@ -515,5 +543,16 @@ mod tests {
         let link =
             "magnet:?xt=urn:btmh:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
         assert!(parse_magnet_link(link).is_err());
+    }
+
+    #[test]
+    fn test_parse_magnet_without_name() {
+        let link = "magnet:?xt=urn:btih:abcdef1234567890abcdef1234567890abcdef12";
+        let magnet_info = parse_magnet_link(link).unwrap();
+        assert_eq!(
+            magnet_info.info_hash,
+            "abcdef1234567890abcdef1234567890abcdef12"
+        );
+        assert_eq!(magnet_info.name, None);
     }
 }
