@@ -39,6 +39,21 @@ pub enum AppState {
     },
 }
 
+pub enum Metadata {
+    /// Full metadata is available
+    Full(Box<lava_torrent::torrent::v1::Torrent>),
+    /// Metadata is being downloaded, with the name of the torrent if available
+    Partial { name: String },
+    /// No metadata available
+    None,
+}
+
+impl Metadata {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Metadata::None)
+    }
+}
+
 pub struct VortexApp<'queue> {
     /// Command sender to the torrent event loop
     pub cmd_tx: SyncSender<Command>,
@@ -57,7 +72,7 @@ pub struct VortexApp<'queue> {
     /// Number of active peer connections
     pub num_connections: usize,
     /// Torrent metadata (available after metadata download)
-    pub metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
+    pub metadata: Metadata,
     /// The progress for downloading metada from the furthest along peer
     pub best_metadata_progress: MetadataProgress,
     /// Root directory for downloads
@@ -74,7 +89,7 @@ impl<'queue> VortexApp<'queue> {
         cmd_tx: SyncSender<Command>,
         event_rc: Consumer<'queue, TorrentEvent>,
         shutdown_signal_tx: Sender<()>,
-        metadata: Option<Box<lava_torrent::torrent::v1::Torrent>>,
+        metadata: Metadata,
         root: PathBuf,
         is_complete: bool,
         dht_paused: Arc<AtomicBool>,
@@ -86,6 +101,7 @@ impl<'queue> VortexApp<'queue> {
         } else {
             AppState::Downloading
         };
+
         Self {
             cmd_tx,
             event_rc,
@@ -163,7 +179,7 @@ impl<'queue> VortexApp<'queue> {
                     self.dht_paused.store(true, Ordering::Relaxed);
                 }
                 TorrentEvent::MetadataComplete(metadata) => {
-                    self.metadata = Some(metadata.clone());
+                    self.metadata = Metadata::Full(Box::new((*metadata).clone()));
                     self.state = AppState::Downloading;
                     self.time_field = Time::StartedAt(SystemTime::now());
                     let root = self.root.clone();

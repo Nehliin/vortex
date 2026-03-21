@@ -29,7 +29,7 @@ mod app;
 mod config;
 mod ui;
 
-use app::{AppState, VortexApp};
+use app::{AppState, Metadata, VortexApp};
 use ui::{
     Footer, InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData, ThroughputGraph,
     extract_throughput_data,
@@ -115,7 +115,7 @@ fn dht_thread(
     }
 }
 
-fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<String> {
+fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<MagentInfo> {
     if !magnet.starts_with("magnet:?") {
         return Err(eyre!("Invalid magnet link"));
     }
@@ -132,7 +132,7 @@ fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<String> {
         .next()
         .wrap_err("Info hash not found in magent link")?;
 
-    match hash_part.len() {
+    let final_hash = match hash_part.len() {
         32 => {
             let bytes = data_encoding::BASE32
                 .decode(hash_part.to_uppercase().as_bytes())
@@ -142,7 +142,19 @@ fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<String> {
         }
         40 => Ok(hash_part.to_lowercase()),
         _ => Err(eyre!("Invalid info hash length in magnet link")),
-    }
+    };
+
+    let dn = magnet
+        .split("&dn=")
+        .nth(1)
+        .map(|s| s.split('&').next().unwrap_or(s))
+        .map(|s| s.replace("%20", " "))
+        .filter(|s| !s.trim().is_empty());
+
+    Ok(MagentInfo {
+        info_hash: final_hash?,
+        name: dn,
+    })
 }
 
 #[derive(Debug, Args)]
@@ -193,6 +205,11 @@ struct Cli {
     skip_dht_cache: bool,
     #[command(subcommand)]
     command: Option<CliCommand>,
+}
+
+struct MagentInfo {
+    info_hash: String,
+    name: Option<String>,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -300,7 +317,7 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
-    let mut state = match cli.torrent_info {
+    let (state, metadata) = match cli.torrent_info {
         TorrentInfo {
             info_hash: None,
             magnet_link: None,
@@ -308,29 +325,46 @@ fn main() -> color_eyre::Result<()> {
         } => {
             let parsed_metadata = lava_torrent::torrent::v1::Torrent::read_from_file(metadata)
                 .wrap_err("Invalid torrent file")?;
-            State::from_metadata_and_root(parsed_metadata, root.clone(), bt_config)
-                .wrap_err("Failed initialzing state")?
+            let state =
+                State::from_metadata_and_root(parsed_metadata.clone(), root.clone(), bt_config)
+                    .wrap_err("Failed initialzing state")?;
+
+            (state, Metadata::Full(Box::new(parsed_metadata)))
         }
         _ => {
+            let mut magnet_name = None;
             let info_hash_str = cli
                 .torrent_info
                 .magnet_link
                 .as_deref()
-                .map(parse_magnet_link)
+                .map(|m| -> color_eyre::Result<String> {
+                    let info = parse_magnet_link(m)?;
+                    magnet_name = info.name;
+                    Ok(info.info_hash)
+                })
                 .transpose()?
                 .or_else(|| cli.torrent_info.info_hash.clone())
                 .expect("Info hash or magnet link must be provided");
             match lava_torrent::torrent::v1::Torrent::read_from_file(
                 root.join(info_hash_str.to_lowercase()),
             ) {
-                Ok(metadata) => State::from_metadata_and_root(metadata, root.clone(), bt_config)?,
+                Ok(metadata) => {
+                    let state =
+                        State::from_metadata_and_root(metadata.clone(), root.clone(), bt_config)?;
+                    (state, Metadata::Full(Box::new(metadata)))
+                }
                 Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
                     if io_err.kind() == ErrorKind::NotFound {
-                        State::unstarted(
+                        let state = State::unstarted(
                             decode_info_hash_hex(&info_hash_str).wrap_err("Invalid info hash")?,
                             root.clone(),
                             bt_config,
-                        )
+                        );
+                        let meta_varient = match magnet_name {
+                            Some(name) => Metadata::Partial { name },
+                            None => Metadata::None,
+                        };
+                        (state, meta_varient)
                     } else {
                         return Err(eyre!("Failed looking for stored metadata {io_err}"));
                     }
@@ -353,7 +387,6 @@ fn main() -> color_eyre::Result<()> {
 
     let port = listener.local_addr().unwrap().port();
     let id = PeerId::generate();
-    let metadata = state.as_ref().metadata().cloned();
     let is_complete = state.is_complete();
     let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
@@ -411,7 +444,7 @@ impl Widget for &mut VortexApp<'_> {
             },
             AppState::Seeding => ProgressState::Seeding,
             AppState::Downloading => {
-                if let Some(metadata) = &self.metadata {
+                if let Metadata::Full(metadata) = &self.metadata {
                     let download_throughput = self
                         .total_download_throughput
                         .recent()
@@ -438,7 +471,7 @@ impl Widget for &mut VortexApp<'_> {
                 was_seeding: false, ..
             } => {
                 self.num_connections = 0;
-                if let Some(metadata) = &self.metadata {
+                if let Metadata::Full(metadata) = &self.metadata {
                     ProgressState::PausedDownloading {
                         pieces_completed: self.pieces_completed,
                         total_pieces: metadata.pieces.len(),
@@ -474,11 +507,12 @@ impl Widget for &mut VortexApp<'_> {
                 .map(|(_, v)| v)
                 .unwrap_or_default(),
             num_connections: self.num_connections,
-            name: self
-                .metadata
-                .as_ref()
-                .map(|meta| meta.name.to_owned())
-                .unwrap_or("unknown".to_owned()),
+            name: match &self.metadata {
+                Metadata::Full(metadata) => metadata.name.clone(),
+                Metadata::Partial { name } => name.clone(),
+                Metadata::None => "Unknown".to_string(),
+            },
+
             time: self.time_field,
         };
 
@@ -495,19 +529,23 @@ mod tests {
     #[test]
     fn test_parse_valid_hex_magnet() {
         let link = "magnet:?xt=urn:btih:ABCDEF1234567890ABCDEF1234567890ABCDEF12&dn=test_file";
+        let magnet_info = parse_magnet_link(link).unwrap();
         assert_eq!(
-            parse_magnet_link(link).unwrap(),
-            "abcdef1234567890abcdef1234567890abcdef12".to_string()
+            magnet_info.info_hash,
+            "abcdef1234567890abcdef1234567890abcdef12"
         );
+        assert_eq!(magnet_info.name, Some("test_file".to_string()));
     }
 
     #[test]
     fn test_parse_valid_base32_magnet() {
         let link = "magnet:?xt=urn:btih:MFRG2ZDFMZTWQ2LKNNWG23TPOBYXE4LY&dn=test_file&dn=test_file";
+        let magnet_info = parse_magnet_link(link).unwrap();
         assert_eq!(
-            parse_magnet_link(link).unwrap(),
-            "61626d6465666768696a6b6c6d6e6f7071727178".to_string()
+            magnet_info.info_hash,
+            "61626d6465666768696a6b6c6d6e6f7071727178"
         );
+        assert_eq!(magnet_info.name, Some("test_file".to_string()));
     }
 
     #[test]
@@ -515,5 +553,38 @@ mod tests {
         let link =
             "magnet:?xt=urn:btmh:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
         assert!(parse_magnet_link(link).is_err());
+    }
+
+    #[test]
+    fn test_parse_magnet_without_name() {
+        let link = "magnet:?xt=urn:btih:abcdef1234567890abcdef1234567890abcdef12";
+        let magnet_info = parse_magnet_link(link).unwrap();
+        assert_eq!(
+            magnet_info.info_hash,
+            "abcdef1234567890abcdef1234567890abcdef12"
+        );
+        assert_eq!(magnet_info.name, None);
+    }
+
+    #[test]
+    fn test_parse_magnet_empty_dn() {
+        let link = "magnet:?xt=urn:btih:abcdef1234567890abcdef1234567890abcdef12&dn=";
+        let magnet_info = parse_magnet_link(link).unwrap();
+
+        assert_eq!(
+            magnet_info.info_hash,
+            "abcdef1234567890abcdef1234567890abcdef12"
+        );
+        assert_eq!(magnet_info.name, None);
+    }
+
+    #[test]
+    fn test_parse_magnet_dn_in_middle() {
+        // The dn tag is followed by other parameters
+        let link = "magnet:?xt=urn:btih:abcdef1234567890abcdef1234567890abcdef12&dn=MyFile&tr=udp://tracker.com&xl=123";
+        let magnet_info = parse_magnet_link(link).unwrap();
+
+        // This ensures you don't accidentally include "&tr=udp://..." in the name
+        assert_eq!(magnet_info.name, Some("MyFile".to_string()));
     }
 }
