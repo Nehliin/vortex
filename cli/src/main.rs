@@ -29,7 +29,7 @@ mod app;
 mod config;
 mod ui;
 
-use app::{AppState, VortexApp, Metadata};
+use app::{AppState, Metadata, VortexApp};
 use ui::{
     Footer, InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData, ThroughputGraph,
     extract_throughput_data,
@@ -325,9 +325,10 @@ fn main() -> color_eyre::Result<()> {
         } => {
             let parsed_metadata = lava_torrent::torrent::v1::Torrent::read_from_file(metadata)
                 .wrap_err("Invalid torrent file")?;
-            let state = State::from_metadata_and_root(parsed_metadata.clone(), root.clone(), bt_config)
-                .wrap_err("Failed initialzing state")?;
-            
+            let state =
+                State::from_metadata_and_root(parsed_metadata.clone(), root.clone(), bt_config)
+                    .wrap_err("Failed initialzing state")?;
+
             (state, Metadata::Full(Box::new(parsed_metadata)))
         }
         _ => {
@@ -348,7 +349,8 @@ fn main() -> color_eyre::Result<()> {
                 root.join(info_hash_str.to_lowercase()),
             ) {
                 Ok(metadata) => {
-                    let state = State::from_metadata_and_root(metadata.clone(), root.clone(), bt_config)?;
+                    let state =
+                        State::from_metadata_and_root(metadata.clone(), root.clone(), bt_config)?;
                     (state, Metadata::Full(Box::new(metadata)))
                 }
                 Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
@@ -505,12 +507,12 @@ impl Widget for &mut VortexApp<'_> {
                 .map(|(_, v)| v)
                 .unwrap_or_default(),
             num_connections: self.num_connections,
-            name: match &self.metadata{
+            name: match &self.metadata {
                 Metadata::Full(metadata) => metadata.name.clone(),
                 Metadata::Partial { name } => name.clone(),
                 Metadata::None => "Unknown".to_string(),
             },
-            
+
             time: self.time_field,
         };
 
@@ -564,25 +566,25 @@ mod tests {
         assert_eq!(magnet_info.name, None);
     }
 
-   #[test]
+    #[test]
     fn test_parse_magnet_empty_dn() {
         let link = "magnet:?xt=urn:btih:abcdef1234567890abcdef1234567890abcdef12&dn=";
         let magnet_info = parse_magnet_link(link).unwrap();
-    
+
         assert_eq!(
             magnet_info.info_hash,
             "abcdef1234567890abcdef1234567890abcdef12"
         );
-    assert_eq!(magnet_info.name, None);
+        assert_eq!(magnet_info.name, None);
     }
 
     #[test]
     fn test_parse_magnet_dn_in_middle() {
-    // The dn tag is followed by other parameters
-    let link = "magnet:?xt=urn:btih:abcdef1234567890abcdef1234567890abcdef12&dn=MyFile&tr=udp://tracker.com&xl=123";
-    let magnet_info = parse_magnet_link(link).unwrap();
-    
-    // This ensures you don't accidentally include "&tr=udp://..." in the name
-    assert_eq!(magnet_info.name, Some("MyFile".to_string()));
+        // The dn tag is followed by other parameters
+        let link = "magnet:?xt=urn:btih:abcdef1234567890abcdef1234567890abcdef12&dn=MyFile&tr=udp://tracker.com&xl=123";
+        let magnet_info = parse_magnet_link(link).unwrap();
+
+        // This ensures you don't accidentally include "&tr=udp://..." in the name
+        assert_eq!(magnet_info.name, Some("MyFile".to_string()));
     }
 }
