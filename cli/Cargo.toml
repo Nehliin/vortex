@@ -18,7 +18,7 @@ heapless = { workspace = true }
 mimalloc = { version = "0.1.48", features = ["v3"] }
 mainline = { version = "6", default-features = false, features = ["node"]}
 metrics-exporter-prometheus = { workspace = true, optional = true }
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 ratatui = "0.30.0"
 human_bytes = "0.4.3"
