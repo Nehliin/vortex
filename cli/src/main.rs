@@ -158,7 +158,7 @@ fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<MagentInfo> {
 }
 
 #[derive(Debug, Args)]
-#[group(required = true, multiple = false)]
+#[group(multiple = false)]
 struct TorrentInfo {
     /// Info hash of the torrent you want to download.
     /// The metadata will be automatically downloaded
@@ -317,7 +317,25 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
-    let (state, metadata) = match cli.torrent_info {
+    let torrent_info = if cli.torrent_info.info_hash.is_none()
+        && cli.torrent_info.magnet_link.is_none()
+        && cli.torrent_info.torrent_file.is_none()
+    {
+        let metadata_path = paths.download_folder.join("metadata");
+        let selected_hash = match ui::select_torrent(metadata_path, root.clone())? {
+            Some(hash) => hash,
+            None => return Ok(()),
+        };
+        TorrentInfo {
+            info_hash: Some(selected_hash),
+            magnet_link: None,
+            torrent_file: None,
+        }
+    } else {
+        cli.torrent_info
+    };
+
+    let (state, metadata) = match torrent_info {
         TorrentInfo {
             info_hash: None,
             magnet_link: None,
@@ -333,8 +351,7 @@ fn main() -> color_eyre::Result<()> {
         }
         _ => {
             let mut magnet_name = None;
-            let info_hash_str = cli
-                .torrent_info
+            let info_hash_str = torrent_info
                 .magnet_link
                 .as_deref()
                 .map(|m| -> color_eyre::Result<String> {
@@ -343,10 +360,17 @@ fn main() -> color_eyre::Result<()> {
                     Ok(info.info_hash)
                 })
                 .transpose()?
-                .or_else(|| cli.torrent_info.info_hash.clone())
-                .expect("Info hash or magnet link must be provided");
+                .or_else(|| torrent_info.info_hash.clone());
+            let info_hash = if let Some(hash) = info_hash_str {
+                hash
+            } else {
+                return Err(eyre!(
+                    "No torrent info provided and no saved torrents found."
+                ));
+            };
+
             match lava_torrent::torrent::v1::Torrent::read_from_file(
-                root.join(info_hash_str.to_lowercase()),
+                root.join("metadata").join(info_hash.to_lowercase()),
             ) {
                 Ok(metadata) => {
                     let state =
@@ -356,7 +380,7 @@ fn main() -> color_eyre::Result<()> {
                 Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
                     if io_err.kind() == ErrorKind::NotFound {
                         let state = State::unstarted(
-                            decode_info_hash_hex(&info_hash_str).wrap_err("Invalid info hash")?,
+                            decode_info_hash_hex(&info_hash).wrap_err("Invalid info hash")?,
                             root.clone(),
                             bt_config,
                         );

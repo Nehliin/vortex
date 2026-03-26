@@ -186,12 +186,15 @@ impl<'queue> VortexApp<'queue> {
                     // Store the metadata as the info hash in the download folder, that will
                     // ensure it's possible to recover from downloads that's already started
                     // The thread is used to keep this non blocking
-                    std::thread::spawn(move || {
-                        let path = root.join(metadata.info_hash());
+                    let metadata_dir = root.join("metadata");
+                    if let Err(err) = std::fs::create_dir_all(&metadata_dir) {
+                        log::error!("Failed to create metadata directory: {err}");
+                    } else {
+                        let path = metadata_dir.join(metadata.info_hash());
                         if let Err(err) = metadata.write_into_file(path) {
-                            log::error!("Failed to save metadata to disk: {err}")
+                            log::error!("Failed to save metadata to disk: {err}");
                         }
-                    });
+                    }
                 }
                 TorrentEvent::TorrentMetrics {
                     pieces_completed,

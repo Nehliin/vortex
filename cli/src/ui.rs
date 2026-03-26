@@ -1,15 +1,24 @@
 //! UI components for the TUI application.
 
-use std::time::{Duration, SystemTime};
+use std::{
+    path::PathBuf,
+    time::{Duration, SystemTime},
+};
 
+use color_eyre::eyre::{Result as EyreResult, eyre};
 use heapless::HistoryBuf;
 use human_bytes::human_bytes;
 use ratatui::{
-    layout::Alignment,
+    DefaultTerminal, Frame,
+    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    layout::{Alignment, Constraint, Layout},
     prelude::{Buffer, Rect},
     style::{Color, Modifier, Style, Stylize, palette::tailwind},
     text::Span,
-    widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, Row, Table, Widget},
+    widgets::{
+        Axis, Block, Borders, Chart, Dataset, Gauge, List, ListItem, ListState, Paragraph, Row,
+        Table, Widget,
+    },
 };
 use vortex_bittorrent::MetadataProgress;
 
@@ -353,4 +362,204 @@ impl Widget for Footer {
 
 pub fn extract_throughput_data(buf: &HistoryBuf<(f64, f64), 256>) -> Vec<(f64, f64)> {
     buf.oldest_ordered().copied().collect()
+}
+
+pub fn select_torrent(
+    metadata_path: PathBuf,
+    download_root: PathBuf,
+) -> EyreResult<Option<String>> {
+    std::fs::create_dir_all(&metadata_path)?;
+
+    let mut items = Vec::new();
+    for entry in std::fs::read_dir(&metadata_path)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let name_str = file_name.to_string_lossy();
+        if name_str.len() == 40 && name_str.chars().all(|c| c.is_ascii_hexdigit()) {
+            let hash = name_str.to_string();
+            let display_name = lava_torrent::torrent::v1::Torrent::read_from_file(entry.path())
+                .ok()
+                .map(|t| t.name)
+                .unwrap_or_else(|| hash.clone());
+
+            items.push((hash, display_name));
+        }
+    }
+
+    if items.is_empty() {
+        return Err(eyre!(
+            "No torrent provide and no downloads founds in {}",
+            metadata_path.display()
+        ));
+    }
+
+    let mut terminal = ratatui::init();
+    let result = run_selection_menu(&mut terminal, items, metadata_path, download_root)?;
+    ratatui::restore();
+    Ok(result)
+}
+
+struct SelectionState {
+    items: Vec<(String, String)>,
+    selected_index: usize,
+    should_quit: bool,
+    selected_hash: Option<String>,
+    delete_pending: bool,
+    pending_delete_index: Option<usize>,
+    metadata_path: PathBuf,
+    download_root: PathBuf,
+}
+
+pub fn run_selection_menu(
+    terminal: &mut DefaultTerminal,
+    items: Vec<(String, String)>,
+    metadata_path: PathBuf,
+    download_root: PathBuf,
+) -> EyreResult<Option<String>> {
+    let mut state = SelectionState {
+        items,
+        selected_index: 0,
+        should_quit: false,
+        selected_hash: None,
+        delete_pending: false,
+        pending_delete_index: None,
+        metadata_path,
+        download_root,
+    };
+
+    while !state.should_quit {
+        terminal.draw(|f| draw_selection(f, &state))?;
+        handle_selection_events(&mut state)?;
+    }
+
+    Ok(state.selected_hash)
+}
+
+fn draw_selection(frame: &mut Frame, state: &SelectionState) {
+    let area = frame.area();
+    let [list_area, help_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
+
+    let list_items: Vec<ListItem> = state
+        .items
+        .iter()
+        .map(|(_, name)| ListItem::new(name.as_str()))
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.selected_index));
+
+    let list = List::new(list_items)
+        .block(Block::bordered().title("Select a torrent"))
+        .highlight_style(Style::new().bg(Color::Yellow).fg(Color::Black))
+        .highlight_symbol(">> ");
+
+    frame.render_stateful_widget(list, list_area, &mut list_state);
+
+    let help_text = if state.delete_pending {
+        format!(
+            "Delete '{}'? (y/n)",
+            state.items[state.pending_delete_index.unwrap_or(state.selected_index)].1
+        )
+    } else {
+        "↑/↓: navigate, Enter: select, d: delete, q: quit".to_string()
+    };
+
+    let help = Paragraph::new(help_text)
+        .block(Block::bordered())
+        .alignment(Alignment::Center);
+    frame.render_widget(help, help_area);
+}
+
+fn handle_selection_events(state: &mut SelectionState) -> EyreResult<()> {
+    if event::poll(Duration::from_millis(16))?
+        && let Event::Key(key) = event::read()?
+        && key.kind == KeyEventKind::Press
+    {
+        if state.delete_pending {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let idx = state.pending_delete_index.unwrap_or(state.selected_index);
+                    let (hash, name) = &state.items[idx];
+
+                    let base_name = if name.is_empty() {
+                        hash.as_str()
+                    } else {
+                        name.as_str()
+                    };
+                    let download_root = &state.download_root;
+
+                    let file_path = download_root.join(base_name);
+                    if file_path.exists() && file_path.is_file() {
+                        if let Err(e) = std::fs::remove_file(&file_path) {
+                            log::error!("Failed to delete file {}: {}", file_path.display(), e);
+                        } else {
+                            log::info!("Deleted file: {}", file_path.display());
+                        }
+                    }
+
+                    let dir_path = download_root.join(base_name);
+                    if dir_path.exists() && dir_path.is_dir() {
+                        if let Err(e) = std::fs::remove_dir_all(&dir_path) {
+                            log::error!("Failed to delete directory {}: {}", dir_path.display(), e);
+                        } else {
+                            log::info!("Deleted directory: {}", dir_path.display());
+                        }
+                    }
+
+                    let metadata_file = state.metadata_path.join(hash);
+                    if let Err(e) = std::fs::remove_file(&metadata_file) {
+                        log::error!(
+                            "Failed to delete metadata file {}: {}",
+                            metadata_file.display(),
+                            e
+                        );
+                    } else {
+                        log::info!("Deleted metadata file: {}", metadata_file.display());
+                    }
+
+                    state.items.remove(idx);
+
+                    if state.selected_index >= state.items.len() {
+                        state.selected_index = state.items.len().saturating_sub(1);
+                    }
+
+                    state.delete_pending = false;
+                    state.pending_delete_index = None;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    state.delete_pending = false;
+                    state.pending_delete_index = None;
+                }
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Up => {
+                    if state.selected_index > 0 {
+                        state.selected_index -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if state.selected_index + 1 < state.items.len() {
+                        state.selected_index += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let (hash, _) = state.items[state.selected_index].clone();
+                    state.selected_hash = Some(hash);
+                    state.should_quit = true;
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    state.delete_pending = true;
+                    state.pending_delete_index = Some(state.selected_index);
+                }
+                KeyCode::Char('q') => {
+                    state.should_quit = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
