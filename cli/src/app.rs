@@ -161,6 +161,7 @@ impl<'queue> VortexApp<'queue> {
                                 AppState::Downloading
                             }
                         }
+                        AppState::Seeding => AppState::Seeding,
                         _ => {
                             if self.metadata.is_none() {
                                 AppState::DownloadingMetadata
