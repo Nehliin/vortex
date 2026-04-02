@@ -39,6 +39,8 @@ pub enum AppState {
     },
 }
 
+pub const METADATA_DIR: &str = "metadata";
+
 pub enum Metadata {
     /// Full metadata is available
     Full(Box<lava_torrent::torrent::v1::Torrent>),
@@ -186,14 +188,16 @@ impl<'queue> VortexApp<'queue> {
                     // Store the metadata as the info hash in the download folder, that will
                     // ensure it's possible to recover from downloads that's already started
                     // The thread is used to keep this non blocking
-                    let metadata_dir = root.join("metadata");
+                    let metadata_dir = root.join(METADATA_DIR);
                     if let Err(err) = std::fs::create_dir_all(&metadata_dir) {
                         log::error!("Failed to create metadata directory: {err}");
                     } else {
                         let path = metadata_dir.join(metadata.info_hash());
-                        if let Err(err) = metadata.write_into_file(path) {
-                            log::error!("Failed to save metadata to disk: {err}");
-                        }
+                        std::thread::spawn(move || {
+                            if let Err(err) = metadata.write_into_file(path) {
+                                log::error!("Failed to save metadata to disk: {err}");
+                            }
+                        });
                     }
                 }
                 TorrentEvent::TorrentMetrics {

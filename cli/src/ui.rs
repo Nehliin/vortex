@@ -5,7 +5,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use color_eyre::eyre::{Result as EyreResult, eyre};
+use clap::CommandFactory;
+use color_eyre::eyre::Result as EyreResult;
 use heapless::HistoryBuf;
 use human_bytes::human_bytes;
 use ratatui::{
@@ -22,7 +23,7 @@ use ratatui::{
 };
 use vortex_bittorrent::MetadataProgress;
 
-use crate::app::AppState;
+use crate::{Cli, app::AppState};
 
 fn download_style() -> Style {
     Style::default().fg(Color::Green)
@@ -387,10 +388,9 @@ pub fn select_torrent(
     }
 
     if items.is_empty() {
-        return Err(eyre!(
-            "No torrent provide and no downloads founds in {}",
-            metadata_path.display()
-        ));
+        Cli::command().print_help().unwrap();
+        println!();
+        return Ok(None);
     }
 
     let mut terminal = ratatui::init();

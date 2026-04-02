@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use clap::{Args, Parser};
+use clap::{Args, CommandFactory, Parser};
 use color_eyre::eyre::{ContextCompat, WrapErr, eyre};
 use crossbeam_channel::{Receiver, bounded, select, tick};
 use heapless::spsc::Queue;
@@ -364,9 +364,9 @@ fn main() -> color_eyre::Result<()> {
             let info_hash = if let Some(hash) = info_hash_str {
                 hash
             } else {
-                return Err(eyre!(
-                    "No torrent info provided and no saved torrents found."
-                ));
+                Cli::command().print_help()?;
+                println!();
+                return Ok(());
             };
 
             match lava_torrent::torrent::v1::Torrent::read_from_file(
