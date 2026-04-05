@@ -20,7 +20,10 @@ pub struct Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        if self.inner.is_some() && self.pool_alive.load(std::sync::atomic::Ordering::Acquire) {
+        if self.inner.is_some()
+            && self.pool_alive.load(std::sync::atomic::Ordering::Acquire)
+            && !std::thread::panicking()
+        {
             panic!("Buffer must be returned to the pool before being dropped!");
         }
     }
