@@ -395,7 +395,9 @@ pub fn select_torrent(
 
     let mut terminal = ratatui::init();
     let result = run_selection_menu(&mut terminal, items, metadata_path, download_root)?;
-    ratatui::restore();
+    if result.is_none() {
+        ratatui::restore();
+    }
     Ok(result)
 }
 
@@ -520,6 +522,11 @@ fn handle_selection_events(state: &mut SelectionState) -> EyreResult<()> {
 
                     state.items.remove(idx);
 
+                    if state.items.is_empty() {
+                        state.should_quit = true;
+                        return Ok(());
+                    }
+
                     if state.selected_index >= state.items.len() {
                         state.selected_index = state.items.len().saturating_sub(1);
                     }
@@ -534,6 +541,13 @@ fn handle_selection_events(state: &mut SelectionState) -> EyreResult<()> {
                 _ => {}
             }
         } else {
+            if state.items.is_empty() {
+                match key.code {
+                    KeyCode::Char('q') => state.should_quit = true,
+                    _ => {}
+                }
+                return Ok(());
+            }
             match key.code {
                 KeyCode::Up => {
                     if state.selected_index > 0 {

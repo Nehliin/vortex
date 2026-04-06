@@ -37,6 +37,8 @@ use ui::{
 
 use mimalloc::MiMalloc;
 
+use crate::app::METADATA_DIR;
+
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -321,7 +323,7 @@ fn main() -> color_eyre::Result<()> {
         && cli.torrent_info.magnet_link.is_none()
         && cli.torrent_info.torrent_file.is_none()
     {
-        let metadata_path = paths.download_folder.join("metadata");
+        let metadata_path = paths.download_folder.join(METADATA_DIR);
         let selected_hash = match ui::select_torrent(metadata_path, root.clone())? {
             Some(hash) => hash,
             None => return Ok(()),
@@ -370,7 +372,7 @@ fn main() -> color_eyre::Result<()> {
             };
 
             match lava_torrent::torrent::v1::Torrent::read_from_file(
-                root.join("metadata").join(info_hash.to_lowercase()),
+                root.join(METADATA_DIR).join(info_hash.to_lowercase()),
             ) {
                 Ok(metadata) => {
                     let state =
