@@ -542,9 +542,8 @@ fn handle_selection_events(state: &mut SelectionState) -> EyreResult<()> {
             }
         } else {
             if state.items.is_empty() {
-                match key.code {
-                    KeyCode::Char('q') => state.should_quit = true,
-                    _ => {}
+                if let KeyCode::Char('q') = key.code {
+                    state.should_quit = true
                 }
                 return Ok(());
             }
