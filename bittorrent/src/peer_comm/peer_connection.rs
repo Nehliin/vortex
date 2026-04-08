@@ -605,15 +605,28 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     #[inline]
-    fn is_valid_piece_req(&self, index: i32, begin: i32, length: i32, num_pieces: i32) -> bool {
-        index >= 0 && index <= num_pieces && begin % SUBPIECE_SIZE == 0 && length <= SUBPIECE_SIZE
+    fn is_valid_piece_req(
+        &self,
+        index: i32,
+        begin: i32,
+        length: i32,
+        num_pieces: i32,
+        piece_len: u32,
+    ) -> bool {
+        let begin = begin as u32;
+        index >= 0
+            && index <= num_pieces
+            && begin.is_multiple_of(SUBPIECE_SIZE as u32)
+            && length <= SUBPIECE_SIZE
+            && begin + length as u32 <= piece_len
     }
 
     #[inline]
     fn is_valid_piece(&self, index: i32, begin: i32, data_len: usize, num_pieces: usize) -> bool {
+        let begin = begin as u32;
         index >= 0
             && index <= num_pieces as i32
-            && begin % SUBPIECE_SIZE == 0
+            && begin.is_multiple_of(SUBPIECE_SIZE as u32)
             && data_len <= SUBPIECE_SIZE as usize
     }
 
@@ -905,11 +918,13 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     let Some(torrent_state) = state_ref.state() else {
                         return false;
                     };
+                    let piece_len = torrent_state.piece_selector.piece_len(index);
                     if !self.is_valid_piece_req(
                         index,
                         begin,
                         length,
                         torrent_state.num_pieces() as i32,
+                        piece_len,
                     ) {
                         log::warn!(
                             "[Peer: {}] Piece request ignored/rejected, invalid request",
@@ -942,7 +957,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             // TODO: cache the entire piece and store it with some TTL
                             // to avoid reading the entire piece for each subpiece request
                             let data = torrent_state.piece_buffer_pool.get_buffer();
-                            let piece_len = torrent_state.piece_selector.piece_len(index);
                             torrent_state.file_store.queue_piece_disk_operation(
                                 index,
                                 data,
@@ -985,8 +999,14 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     );
                     return;
                 };
-                if !self.is_valid_piece_req(index, begin, length, torrent_state.num_pieces() as i32)
-                {
+                let piece_len = torrent_state.piece_selector.piece_len(index);
+                if !self.is_valid_piece_req(
+                    index,
+                    begin,
+                    length,
+                    torrent_state.num_pieces() as i32,
+                    piece_len,
+                ) {
                     log::error!(
                         "[Peer: {}] Piece Reject request was invalid, index={index} begin={begin} length={length}",
                         self.peer_id
