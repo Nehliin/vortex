@@ -4596,3 +4596,107 @@ fn seeding_quota_complete_peers_deprioritized() {
         assert_eq!(torrent_state.num_unchoked as usize, 2);
     });
 }
+
+#[test]
+fn request_rejected_when_begin_plus_length_exceeds_piece_len() {
+    // piece_length = SUBPIECE_SIZE * 2 in the seeding test setup
+    let mut download_state = setup_seeding_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        state_ref.state().unwrap().piece_buffer_pool.stop_tracking();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+
+        // Setup: peer has no pieces and is interested
+        connections[key].handle_message(
+            PeerMessage::HaveNone,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Interested,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+
+        // Valid request: begin=0, length=SUBPIECE_SIZE within piece_len (SUBPIECE_SIZE * 2)
+        connections[key].handle_message(
+            PeerMessage::Request {
+                index: 0,
+                begin: 0,
+                length: SUBPIECE_SIZE,
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        // Should trigger disk reads (valid request accepted)
+        assert!(
+            !pending_disk_operations.is_empty(),
+            "Valid request should queue disk operations"
+        );
+
+        pending_disk_operations.clear();
+        connections[key].outgoing_msgs_buffer.clear();
+
+        // Invalid request: length=SUBPIECE_SIZE+1 exceeds subpiece size
+        connections[key].handle_message(
+            PeerMessage::Request {
+                index: 0,
+                begin: 0,
+                length: SUBPIECE_SIZE + 1,
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        // Should NOT trigger any disk reads (invalid request rejected)
+        assert!(
+            pending_disk_operations.is_empty(),
+            "Request exceeding piece boundary should be rejected"
+        );
+        // With fast_ext enabled, a RejectRequest should be queued
+        assert!(
+            connections[key]
+                .outgoing_msgs_buffer
+                .contains(&PeerMessage::RejectRequest {
+                    index: 0,
+                    begin: 0,
+                    length: SUBPIECE_SIZE + 1,
+                }),
+            "Should queue RejectRequest for invalid request when fast_ext is enabled"
+        );
+
+        connections[key].outgoing_msgs_buffer.clear();
+
+        // Invalid request: begin at the very end of the piece, any nonzero length overflows
+        connections[key].handle_message(
+            PeerMessage::Request {
+                index: 0,
+                begin: SUBPIECE_SIZE * 2,
+                length: 123,
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        assert!(
+            pending_disk_operations.is_empty(),
+            "Request at piece boundary should be rejected"
+        );
+        assert!(
+            connections[key]
+                .outgoing_msgs_buffer
+                .contains(&PeerMessage::RejectRequest {
+                    index: 0,
+                    begin: SUBPIECE_SIZE * 2,
+                    length: 123,
+                }),
+            "Should queue RejectRequest for request at piece boundary"
+        );
+    });
+}
