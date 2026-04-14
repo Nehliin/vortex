@@ -1027,8 +1027,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                     if let Some(connection) = self.connections.get_mut(connection_idx) {
                         let start_idx = piece_offset as usize;
                         let piece_len = state.piece_selector.piece_len(piece_idx) as usize;
-                        let end_idx =
-                            (start_idx + SUBPIECE_SIZE as usize).min(piece_len);
+                        let end_idx = (start_idx + SUBPIECE_SIZE as usize).min(piece_len);
                         connection.send_piece(
                             piece_idx,
                             piece_offset,
