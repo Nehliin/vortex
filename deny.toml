@@ -11,10 +11,6 @@ deny = [
 ]
 allow = []
 skip = [
-    # Windows stuff shouldn't be used so I assume it's feature gated out regardles
-    { name = "windows-sys", version = "*"},
-    { name = "anstyle-parse", version = "*"},
-    { name = "anstream", version = "*"},
     { name = "thiserror-impl" },
     { name = "thiserror" },
     { name = "digest", version = "*" },
