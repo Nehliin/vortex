@@ -30,7 +30,11 @@ fn basic_seeding() {
             "file2.txt".to_string(),
             b"BitTorrent Test Data!".repeat(200),
         ),
-        ("subdir/file3.txt".to_string(), vec![42u8; 16384 * 5_000]),
+        // Ensure the data is not a multiple of piece_length
+        (
+            "subdir/file3.txt".to_string(),
+            vec![42u8; 16384 * 5_000 + 20_000],
+        ),
     ]
     .into_iter()
     .collect();
@@ -41,7 +45,7 @@ fn basic_seeding() {
     let torrent_name = format!("test_seeding_{}", rand::random::<u32>());
 
     // Create seeder directory with test files and build torrent metadata
-    let (seeder_dir, metadata) = create_test_torrent(&test_files, &torrent_name, 16384);
+    let (seeder_dir, metadata) = create_test_torrent(&test_files, &torrent_name, 16384 * 8);
     let tmp_dir_path = seeder_dir.path().clone();
 
     // Create downloader directory (empty initially)
