@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.6.0...vortex-bittorrent-v0.6.1) - 2026-04-15
+
+### Fixed
+
+- Correct subpiece slice bounds for non-power-of-2 piece lengths ([#124](https://github.com/Nehliin/vortex/pull/124))
+- Expand piece request validation ([#129](https://github.com/Nehliin/vortex/pull/129))
+
+### Other
+
+- Update seeding test ([#131](https://github.com/Nehliin/vortex/pull/131))
+
 ## [0.6.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.5.0...vortex-bittorrent-v0.6.0) - 2026-03-07
 
 ### Added
