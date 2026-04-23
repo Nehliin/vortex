@@ -319,17 +319,76 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
-    let torrent_info = if cli.torrent_info.info_hash.is_none()
+    let needs_selection = cli.torrent_info.info_hash.is_none()
         && cli.torrent_info.magnet_link.is_none()
-        && cli.torrent_info.torrent_file.is_none()
-    {
+        && cli.torrent_info.torrent_file.is_none();
+
+    let selection_data = if needs_selection {
         let metadata_path = paths.download_folder.join(METADATA_DIR);
-        let selected_hash = match ui::select_torrent(metadata_path, root.clone())? {
-            Some(hash) => hash,
-            None => return Ok(()),
-        };
+        let mut items = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&metadata_path) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                let name_str = file_name.to_string_lossy();
+                if name_str.len() == 40 && name_str.chars().all(|c| c.is_ascii_hexdigit()) {
+                    let hash = name_str.to_string();
+                    let display_name =
+                        lava_torrent::torrent::v1::Torrent::read_from_file(entry.path())
+                            .ok()
+                            .map(|t| t.name)
+                            .unwrap_or_else(|| hash.clone());
+                    items.push((hash, display_name));
+                }
+            }
+        }
+        if items.is_empty() {
+            Cli::command().print_help()?;
+            println!();
+            return Ok(());
+        }
+        Some((items, metadata_path, paths.download_folder.clone()))
+    } else {
+        None
+    };
+
+    let mut terminal = ratatui::init();
+
+    let selected_hash = if let Some((ref items, ref meta_path, ref down_root)) = selection_data {
+        let (cmd_tx, _) = std::sync::mpsc::sync_channel(1);
+        let mut event_q: Queue<TorrentEvent, 512> = heapless::spsc::Queue::new();
+        let (_, event_rc) = event_q.split();
+        let (shutdown_signal_tx, _) = bounded(1);
+        let dht_paused = Arc::new(AtomicBool::new(false));
+
+        let mut selection_app = VortexApp::new(
+            cmd_tx,
+            event_rc,
+            shutdown_signal_tx,
+            Metadata::None,
+            down_root.clone(),
+            false,
+            dht_paused,
+            Some((
+                items.to_vec(),
+                meta_path.to_path_buf(),
+                down_root.to_path_buf(),
+            )),
+        );
+
+        selection_app.run(&mut terminal)?;
+        selection_app.selected_hash.clone()
+    } else {
+        None
+    };
+
+    if selection_data.is_some() && selected_hash.is_none() {
+        ratatui::restore();
+        return Ok(());
+    }
+
+    let torrent_info = if let Some(hash) = selected_hash {
         TorrentInfo {
-            info_hash: Some(selected_hash),
+            info_hash: Some(hash),
             magnet_link: None,
             torrent_file: None,
         }
@@ -446,9 +505,9 @@ fn main() -> color_eyre::Result<()> {
             root,
             is_complete,
             dht_paused,
+            None,
         );
-        let terminal = ratatui::init();
-        let result = app.run(terminal);
+        let result = app.run(&mut terminal);
         ratatui::restore();
         result
     })
@@ -508,6 +567,7 @@ impl Widget for &mut VortexApp<'_> {
                     }
                 }
             }
+            AppState::SelectingTorrent { .. } => unreachable!(),
         };
 
         ProgressBar::new(progress_state).render(progress_area, buf);
@@ -544,7 +604,7 @@ impl Widget for &mut VortexApp<'_> {
 
         InfoPanel::new(info_data).render(info_area, buf);
 
-        Footer { state: self.state }.render(footer_area, buf);
+        Footer { state: &self.state }.render(footer_area, buf);
     }
 }
 
