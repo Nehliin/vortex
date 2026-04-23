@@ -19,10 +19,10 @@ use ratatui::{
 };
 use vortex_bittorrent::{Command, MetadataProgress, TorrentEvent};
 
-use crate::ui::Time;
+use crate::ui::{self, Time};
 
 /// Current state of the torrent application.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppState {
     /// Downloading torrent metadata from peers
     DownloadingMetadata,
@@ -36,6 +36,14 @@ pub enum AppState {
         was_seeding: bool,
         // Keep track of the last simulated data to the graph
         last_simulated_update: Instant,
+    },
+    SelectingTorrent {
+        items: Vec<(String, String)>,
+        selected_index: usize,
+        delete_pending: bool,
+        pending_delete_index: Option<usize>,
+        metadata_path: PathBuf,
+        download_root: PathBuf,
     },
 }
 
@@ -105,7 +113,16 @@ pub struct AppSetup<'queue> {
 
 impl<'queue, F: FnOnce()> VortexApp<'queue, F> {
     pub fn new(setup: AppSetup<'queue>, spawn_torrent_threads: F) -> Self {
-        let state = if setup.is_complete {
+        let state = if let Some((items, metadata_path, download_root)) = initial_selection {
+            AppState::SelectingTorrent {
+                items,
+                selected_index: 0,
+                delete_pending: false,
+                pending_delete_index: None,
+                metadata_path,
+                download_root,
+            }
+        } else if is_complete {
             AppState::Seeding
         } else if setup.metadata.is_none() {
             AppState::DownloadingMetadata
@@ -125,10 +142,11 @@ impl<'queue, F: FnOnce()> VortexApp<'queue, F> {
             time_field: Time::StartedAt(SystemTime::now()),
             spawn_torrent_threads: Some(spawn_torrent_threads),
             state,
+            selected_hash: None,
         }
     }
 
-    pub fn run(&mut self, mut terminal: DefaultTerminal) -> color_eyre::Result<()> {
+    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> color_eyre::Result<()> {
         while !self.should_exit {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
@@ -137,7 +155,11 @@ impl<'queue, F: FnOnce()> VortexApp<'queue, F> {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
+        if let AppState::SelectingTorrent { .. } = self.state {
+            self.draw_selection(frame);
+        } else {
+            frame.render_widget(self, frame.area());
+        }
     }
 
     pub fn handle_events(&mut self) -> io::Result<()> {
@@ -149,6 +171,10 @@ impl<'queue, F: FnOnce()> VortexApp<'queue, F> {
             spawn_torrent_threads();
         }
         while let Some(event) = self.setup.event_rc.dequeue() {
+        // if matches!(self.state, AppState::SelectingTorrent { .. }) {
+        //     return self.handle_selection_events();
+        // }
+        while let Some(event) = self.event_rc.dequeue() {
             match event {
                 TorrentEvent::TorrentComplete => {
                     let download_time = match self.time_field {
@@ -268,6 +294,116 @@ impl<'queue, F: FnOnce()> VortexApp<'queue, F> {
             }
             _ => {}
         }
+    }
+
+    fn draw_selection(&self, frame: &mut Frame) {
+        if let AppState::SelectingTorrent {
+            items,
+            selected_index,
+            delete_pending,
+            pending_delete_index,
+            ..
+        } = &self.state
+        {
+            let data = ui::SelectionData {
+                items: items.as_slice(),
+                selected_index: *selected_index,
+                delete_pending: *delete_pending,
+                pending_delete_index: *pending_delete_index,
+            };
+            ui::draw_torrent_selection(frame, frame.area(), &data);
+        }
+    }
+
+    fn handle_selection_events(&mut self) -> io::Result<()> {
+        if event::poll(Duration::from_millis(16))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && let AppState::SelectingTorrent {
+                items,
+                selected_index,
+                delete_pending,
+                pending_delete_index,
+                metadata_path,
+                download_root,
+            } = &mut self.state
+        {
+            if *delete_pending {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        let idx = pending_delete_index.unwrap_or(*selected_index);
+                        let (hash, name) = &items[idx];
+
+                        let base_name = if name.is_empty() {
+                            hash.as_str()
+                        } else {
+                            name.as_str()
+                        };
+                        let file_path = download_root.join(base_name);
+                        if file_path.exists() {
+                            if file_path.is_file() {
+                                let _ = std::fs::remove_file(&file_path);
+                            } else if file_path.is_dir() {
+                                let _ = std::fs::remove_dir_all(&file_path);
+                            }
+                        }
+
+                        let metadata_file = metadata_path.join(hash);
+                        let _ = std::fs::remove_file(&metadata_file);
+
+                        items.remove(idx);
+
+                        if items.is_empty() {
+                            self.should_exit = true;
+                            return Ok(());
+                        }
+
+                        if *selected_index >= items.len() {
+                            *selected_index = items.len().saturating_sub(1);
+                        }
+
+                        *delete_pending = false;
+                        *pending_delete_index = None;
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        *delete_pending = false;
+                        *pending_delete_index = None;
+                    }
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Up => {
+                        if *selected_index > 0 {
+                            *selected_index -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if *selected_index + 1 < items.len() {
+                            *selected_index += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if !items.is_empty() {
+                            let (hash, _) = items[*selected_index].clone();
+                            self.selected_hash = Some(hash);
+                            self.should_exit = true;
+                        }
+                    }
+                    KeyCode::Char('d') | KeyCode::Char('D') => {
+                        if !items.is_empty() {
+                            *delete_pending = true;
+                            *pending_delete_index = Some(*selected_index);
+                        }
+                    }
+                    KeyCode::Char('q') => {
+                        self.should_exit = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
     }
 }
 

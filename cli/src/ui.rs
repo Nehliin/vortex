@@ -1,29 +1,23 @@
 //! UI components for the TUI application.
 
-use std::{
-    path::PathBuf,
-    time::{Duration, SystemTime},
-};
+use std::time::{Duration, SystemTime};
 
-use clap::CommandFactory;
-use color_eyre::eyre::Result as EyreResult;
 use heapless::HistoryBuf;
 use human_bytes::human_bytes;
 use ratatui::{
-    DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEventKind},
-    layout::{Alignment, Constraint, Layout},
+    Frame,
+    layout::Alignment,
+    layout::{Constraint, Layout},
     prelude::{Buffer, Rect},
     style::{Color, Modifier, Style, Stylize, palette::tailwind},
     text::Span,
-    widgets::{
-        Axis, Block, Borders, Chart, Dataset, Gauge, List, ListItem, ListState, Paragraph, Row,
-        Table, Widget,
-    },
+    widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, Row, Table, Widget},
+    widgets::{List, ListItem, ListState, Paragraph},
 };
+
 use vortex_bittorrent::MetadataProgress;
 
-use crate::{Cli, app::AppState};
+use crate::app::AppState;
 
 fn download_style() -> Style {
     Style::default().fg(Color::Green)
@@ -326,11 +320,11 @@ impl Widget for InfoPanel {
     }
 }
 
-pub struct Footer {
-    pub state: AppState,
+pub struct Footer<'a> {
+    pub state: &'a AppState,
 }
 
-impl Widget for Footer {
+impl Widget for Footer<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let key_style = Style::default()
             .fg(Color::Yellow)
@@ -365,91 +359,25 @@ pub fn extract_throughput_data(buf: &HistoryBuf<(f64, f64), 256>) -> Vec<(f64, f
     buf.oldest_ordered().copied().collect()
 }
 
-pub fn select_torrent(
-    metadata_path: PathBuf,
-    download_root: PathBuf,
-) -> EyreResult<Option<String>> {
-    std::fs::create_dir_all(&metadata_path)?;
-
-    let mut items = Vec::new();
-    for entry in std::fs::read_dir(&metadata_path)? {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let name_str = file_name.to_string_lossy();
-        if name_str.len() == 40 && name_str.chars().all(|c| c.is_ascii_hexdigit()) {
-            let hash = name_str.to_string();
-            let display_name = lava_torrent::torrent::v1::Torrent::read_from_file(entry.path())
-                .ok()
-                .map(|t| t.name)
-                .unwrap_or_else(|| hash.clone());
-
-            items.push((hash, display_name));
-        }
-    }
-
-    if items.is_empty() {
-        Cli::command().print_help().unwrap();
-        println!();
-        return Ok(None);
-    }
-
-    let mut terminal = ratatui::init();
-    let result = run_selection_menu(&mut terminal, items, metadata_path, download_root)?;
-    if result.is_none() {
-        ratatui::restore();
-    }
-    Ok(result)
+pub struct SelectionData<'a> {
+    pub items: &'a [(String, String)],
+    pub selected_index: usize,
+    pub delete_pending: bool,
+    pub pending_delete_index: Option<usize>,
 }
 
-struct SelectionState {
-    items: Vec<(String, String)>,
-    selected_index: usize,
-    should_quit: bool,
-    selected_hash: Option<String>,
-    delete_pending: bool,
-    pending_delete_index: Option<usize>,
-    metadata_path: PathBuf,
-    download_root: PathBuf,
-}
-
-pub fn run_selection_menu(
-    terminal: &mut DefaultTerminal,
-    items: Vec<(String, String)>,
-    metadata_path: PathBuf,
-    download_root: PathBuf,
-) -> EyreResult<Option<String>> {
-    let mut state = SelectionState {
-        items,
-        selected_index: 0,
-        should_quit: false,
-        selected_hash: None,
-        delete_pending: false,
-        pending_delete_index: None,
-        metadata_path,
-        download_root,
-    };
-
-    while !state.should_quit {
-        terminal.draw(|f| draw_selection(f, &state))?;
-        handle_selection_events(&mut state)?;
-    }
-
-    Ok(state.selected_hash)
-}
-
-fn draw_selection(frame: &mut Frame, state: &SelectionState) {
-    let area = frame.area();
+pub fn draw_torrent_selection(frame: &mut Frame, area: Rect, selection: &SelectionData) {
     let [list_area, help_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
 
-    let list_items: Vec<ListItem> = state
+    let list_items: Vec<ListItem> = selection
         .items
         .iter()
         .map(|(_, name)| ListItem::new(name.as_str()))
         .collect();
 
     let mut list_state = ListState::default();
-    list_state.select(Some(state.selected_index));
+    list_state.select(Some(selection.selected_index));
 
     let list = List::new(list_items)
         .block(Block::bordered().title("Select a torrent"))
@@ -458,11 +386,11 @@ fn draw_selection(frame: &mut Frame, state: &SelectionState) {
 
     frame.render_stateful_widget(list, list_area, &mut list_state);
 
-    let help_text = if state.delete_pending {
-        format!(
-            "Delete '{}'? (y/n)",
-            state.items[state.pending_delete_index.unwrap_or(state.selected_index)].1
-        )
+    let help_text = if selection.delete_pending {
+        let idx = selection
+            .pending_delete_index
+            .unwrap_or(selection.selected_index);
+        format!("Delete '{}'? (y/n)", selection.items[idx].1)
     } else {
         "↑/↓: navigate, Enter: select, d: delete, q: quit".to_string()
     };
