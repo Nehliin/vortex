@@ -251,6 +251,13 @@ impl PieceSelector {
         self.downloaded_pieces.clone()
     }
 
+    /// A clone of the completed-piece bitfield (downloaded *and*
+    /// hash-verified). Bit `i` is set when piece `i` is complete.
+    #[inline]
+    pub fn completed_clone(&self) -> BitBox<u8, Msb0> {
+        self.completed_pieces.clone()
+    }
+
     #[inline]
     pub fn has_downloaded(&self, index: usize) -> bool {
         self.downloaded_pieces[index]

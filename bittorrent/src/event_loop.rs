@@ -1277,12 +1277,21 @@ fn report_tick_metrics(
 ) {
     let mut pieces_completed = 0;
     let mut pieces_allocated = 0;
+    let mut num_pieces = 0;
+    let mut piece_completion: Box<[u8]> = Box::default();
 
     if let Some(torrent_state) = state.state() {
         let total_completed = torrent_state.piece_selector.total_completed();
         let total_allocated = torrent_state.piece_selector.total_allocated();
         pieces_completed = total_completed;
         pieces_allocated = total_allocated;
+        num_pieces = torrent_state.num_pieces();
+        piece_completion = torrent_state
+            .piece_selector
+            .completed_clone()
+            .as_raw_slice()
+            .to_vec()
+            .into_boxed_slice();
         #[cfg(feature = "metrics")]
         {
             let counter = metrics::counter!("pieces_completed");
@@ -1305,6 +1314,8 @@ fn report_tick_metrics(
             pieces_completed,
             pieces_allocated,
             peer_metrics,
+            num_pieces,
+            piece_completion,
         })
         .is_err()
     {

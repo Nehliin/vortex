@@ -73,11 +73,7 @@ fn basic_seeded_download() {
                     TorrentEvent::MetadataComplete(_torrent) => {
                         log::info!("METADATA COMPLETE");
                     }
-                    TorrentEvent::TorrentMetrics {
-                        pieces_completed: _,
-                        pieces_allocated: _,
-                        peer_metrics: _,
-                    } => {}
+                    TorrentEvent::TorrentMetrics { .. } => {}
                     TorrentEvent::Running { port: _ } => {}
                     TorrentEvent::Paused => panic!("Should never pause"),
                 }

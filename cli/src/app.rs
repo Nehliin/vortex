@@ -201,8 +201,8 @@ impl<'queue> VortexApp<'queue> {
                 }
                 TorrentEvent::TorrentMetrics {
                     pieces_completed,
-                    pieces_allocated: _,
                     peer_metrics,
+                    ..
                 } => {
                     self.pieces_completed = pieces_completed;
                     self.num_connections = peer_metrics.len();

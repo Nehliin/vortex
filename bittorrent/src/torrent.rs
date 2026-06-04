@@ -216,6 +216,20 @@ pub enum TorrentEvent {
         pieces_allocated: usize,
         /// Peer metrics for all currently connected peers
         peer_metrics: Vec<PeerMetrics>,
+        /// Total number of pieces in the torrent, or 0 if the torrent
+        /// has not been initialized yet (e.g. a magnet still fetching
+        /// metadata). Use this to know how many bits of
+        /// `piece_completion` are meaningful (the rest are padding).
+        num_pieces: usize,
+        /// Which pieces have been completed (downloaded and
+        /// hash-verified), as an MSB0-packed bitfield: bit `i`
+        /// (`piece_completion[i / 8] & (0x80 >> (i % 8))`) is set when
+        /// piece `i` is complete. Length is `num_pieces.div_ceil(8)`,
+        /// or empty when the torrent is not yet initialized. This is
+        /// populated both while downloading and by the startup hashing
+        /// scan in [`State::from_metadata_and_root`], so it is
+        /// meaningful immediately after a resume.
+        piece_completion: Box<[u8]>,
     },
 }
 
@@ -589,6 +603,27 @@ impl State {
         self.torrent_state
             .as_ref()
             .is_some_and(|state| state.is_complete)
+    }
+
+    /// Returns which pieces have been completed (downloaded and
+    /// hash-verified) as a `Vec<bool>` of length `num_pieces`, or
+    /// `None` if the torrent has not been initialized yet (e.g. a
+    /// magnet still fetching metadata).
+    ///
+    /// This reflects the startup hashing scan performed by
+    /// [`State::from_metadata_and_root`], so it is meaningful before
+    /// the event loop is started and is useful for inspecting on-disk
+    /// progress or for tests. During an active download, prefer the
+    /// `piece_completion` field of [`TorrentEvent::TorrentMetrics`].
+    pub fn completed_pieces(&self) -> Option<Vec<bool>> {
+        self.torrent_state.as_ref().map(|state| {
+            state
+                .piece_selector
+                .completed_clone()
+                .iter()
+                .by_vals()
+                .collect()
+        })
     }
 
     /// Use this constructor if you have access to the torrent metadata
