@@ -548,15 +548,11 @@ fn handle_selection_events(state: &mut SelectionState) -> EyreResult<()> {
                 return Ok(());
             }
             match key.code {
-                KeyCode::Up => {
-                    if state.selected_index > 0 {
-                        state.selected_index -= 1;
-                    }
+                KeyCode::Up if state.selected_index > 0 => {
+                    state.selected_index -= 1;
                 }
-                KeyCode::Down => {
-                    if state.selected_index + 1 < state.items.len() {
-                        state.selected_index += 1;
-                    }
+                KeyCode::Down if state.selected_index + 1 < state.items.len() => {
+                    state.selected_index += 1;
                 }
                 KeyCode::Enter => {
                     let (hash, _) = state.items[state.selected_index].clone();
