@@ -2431,7 +2431,7 @@ fn metadata_extension_data_message() {
             .as_bytes()
             .to_vec();
         // Append some dummy metadata
-        data_msg.extend_from_slice(&vec![0u8; expected_size as usize]);
+        data_msg.extend_from_slice(&vec![0u8; expected_size]);
 
         connections[key_a].handle_message(
             PeerMessage::Extended {
