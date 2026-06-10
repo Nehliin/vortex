@@ -20,6 +20,9 @@ skip = [
     { name = "getrandom", version = "*" },
     { name = "cpufeatures", version = "*" },
     { name = "r-efi", version = "*" },
+    { name = "hashbrown", version = "*" },
+    { name = "lru", version = "*" },
+    { name = "wit-bindgen", version = "*" },
 ]
 
 [advisories]
