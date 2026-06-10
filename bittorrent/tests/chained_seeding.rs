@@ -201,11 +201,14 @@ fn chained_seeding() {
                             completed = true;
                         }
                         TorrentEvent::TorrentMetrics {
-                            pieces_completed,
+                            progress,
                             peer_metrics,
                             ..
                         } => {
-                            log::debug!("Middle peer progress: {}", pieces_completed,);
+                            log::debug!(
+                                "Middle peer progress: {}",
+                                progress.as_ref().map_or(0, |p| p.total_completed()),
+                            );
                             for metrics in peer_metrics {
                                 if metrics.upload_throughput > 0 {
                                     log::info!(
@@ -273,10 +276,11 @@ fn chained_seeding() {
                             seeder_shutting_down_clone.store(true, Ordering::Release);
                             return;
                         }
-                        TorrentEvent::TorrentMetrics {
-                            pieces_completed, ..
-                        } => {
-                            log::debug!("Leecher progress: {} pieces", pieces_completed,);
+                        TorrentEvent::TorrentMetrics { progress, .. } => {
+                            log::debug!(
+                                "Leecher progress: {} pieces",
+                                progress.as_ref().map_or(0, |p| p.total_completed()),
+                            );
                         }
                         TorrentEvent::MetadataComplete(_) => {
                             log::info!("Leecher: Metadata complete");

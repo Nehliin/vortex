@@ -158,10 +158,12 @@ fn pause_resume() {
                     while let Some(event) = downloader_event_rc.dequeue() {
                         match event {
                             TorrentEvent::TorrentMetrics {
-                                pieces_completed,
+                                progress,
                                 pieces_allocated,
                                 ..
                             } => {
+                                let pieces_completed =
+                                    progress.as_ref().map_or(0, |p| p.total_completed());
                                 log::debug!(
                                     "Downloader progress: {}/{} pieces (pause_sent={}, saw_paused={}, resume_sent={}, saw_resumed={})",
                                     pieces_completed,

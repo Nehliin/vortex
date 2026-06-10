@@ -12,7 +12,10 @@ use peer_comm::*;
 pub use lava_torrent::torrent::v1::Torrent as TorrentMetadata;
 pub use peer_comm::extended_protocol::MetadataProgress;
 pub use peer_protocol::PeerId;
-pub use torrent::{CQE_WAIT_TIME_NS, Command, Config, PeerMetrics, State, Torrent, TorrentEvent};
+pub use torrent::{
+    CQE_WAIT_TIME_NS, Command, Config, PeerMetrics, ProgressIter, State, Torrent, TorrentEvent,
+    TorrentProgress,
+};
 
 #[cfg(feature = "fuzzing")]
 pub use peer_protocol::*;

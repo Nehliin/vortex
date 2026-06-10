@@ -200,11 +200,11 @@ impl<'queue> VortexApp<'queue> {
                     });
                 }
                 TorrentEvent::TorrentMetrics {
-                    pieces_completed,
+                    progress,
                     peer_metrics,
                     ..
                 } => {
-                    self.pieces_completed = pieces_completed;
+                    self.pieces_completed = progress.as_ref().map_or(0, |p| p.total_completed());
                     self.num_connections = peer_metrics.len();
                     self.best_metadata_progress = peer_metrics
                         .iter()
