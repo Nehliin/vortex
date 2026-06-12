@@ -252,16 +252,10 @@ impl PieceSelector {
     }
 
     /// Per-piece completion progress (downloaded *and* hash-verified),
-    /// built directly from the completed-piece bitfield.
+    /// built by cloning the completed-piece bitfield directly.
     #[inline]
     pub fn progress(&self) -> TorrentProgress {
-        TorrentProgress::new(
-            self.completed_pieces
-                .as_raw_slice()
-                .to_vec()
-                .into_boxed_slice(),
-            self.completed_pieces.len(),
-        )
+        TorrentProgress::new(self.completed_pieces.clone())
     }
 
     #[inline]
