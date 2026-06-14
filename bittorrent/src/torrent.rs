@@ -188,6 +188,91 @@ pub struct PeerMetrics {
     pub metadata_progress: Option<MetadataProgress>,
 }
 
+/// Per-piece download progress for a torrent: which pieces are complete
+/// (downloaded *and* hash-verified) and how many.
+///
+/// This hides the underlying MSB0-packed bitfield: query individual pieces
+/// with [`TorrentProgress::get`], the completed count with
+/// [`TorrentProgress::total_completed`], and iterate over every piece's
+/// completion state via [`TorrentProgress::iter`] (or `&progress` directly).
+#[derive(Debug, Clone)]
+pub struct TorrentProgress {
+    /// Completed-piece bitfield, one bit per piece: bit `i` is set when piece
+    /// `i` is complete. Its length equals the torrent's piece count.
+    completed: BitBox<u8, Msb0>,
+    /// Cached count of completed pieces.
+    completed_count: usize,
+}
+
+impl TorrentProgress {
+    /// Builds progress from the completed-piece bitfield (one bit per piece).
+    pub(crate) fn new(completed: BitBox<u8, Msb0>) -> Self {
+        let completed_count = completed.count_ones();
+        Self {
+            completed,
+            completed_count,
+        }
+    }
+
+    /// Total number of pieces in the torrent.
+    #[inline]
+    pub fn num_pieces(&self) -> usize {
+        self.completed.len()
+    }
+
+    /// Number of completed (downloaded and hash-verified) pieces.
+    #[inline]
+    pub fn total_completed(&self) -> usize {
+        self.completed_count
+    }
+
+    /// Whether piece `index` is complete. Returns `false` for out-of-range
+    /// indices.
+    #[inline]
+    pub fn get(&self, index: usize) -> bool {
+        self.completed.get(index).is_some_and(|bit| *bit)
+    }
+
+    /// Iterates over the completion state of every piece, in order.
+    #[inline]
+    pub fn iter(&self) -> ProgressIter<'_> {
+        ProgressIter {
+            inner: self.completed.iter().by_vals(),
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a TorrentProgress {
+    type Item = bool;
+    type IntoIter = ProgressIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Iterator over the per-piece completion state of a [`TorrentProgress`],
+/// yielding `true` for each complete piece and `false` otherwise.
+pub struct ProgressIter<'a> {
+    inner: bitvec::slice::BitValIter<'a, u8, Msb0>,
+}
+
+impl Iterator for ProgressIter<'_> {
+    type Item = bool;
+
+    #[inline]
+    fn next(&mut self) -> Option<bool> {
+        self.inner.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for ProgressIter<'_> {}
+
 /// Events from the torrent
 #[derive(Debug)]
 pub enum TorrentEvent {
@@ -209,13 +294,19 @@ pub enum TorrentEvent {
     Paused,
     /// Over all metrics for the torrent, sent every tick.
     TorrentMetrics {
-        /// How many pieces have currently been completed
-        pieces_completed: usize,
         /// How many pieces have been allocated by peers for
         /// download
         pieces_allocated: usize,
         /// Peer metrics for all currently connected peers
         peer_metrics: Vec<PeerMetrics>,
+        /// Per-piece completion progress (which pieces are complete and how
+        /// many), or `None` if the torrent has not been initialized yet
+        /// (e.g. a magnet still fetching metadata). Populated both while
+        /// downloading and by the startup hashing scan in
+        /// [`State::from_metadata_and_root`], so it is meaningful immediately
+        /// after a resume. Read the completed count via
+        /// [`TorrentProgress::total_completed`].
+        progress: Option<TorrentProgress>,
     },
 }
 
@@ -591,6 +682,23 @@ impl State {
             .is_some_and(|state| state.is_complete)
     }
 
+    /// Returns the per-piece completion progress (which pieces are complete
+    /// and how many), or `None` if the torrent has not been initialized yet
+    /// (e.g. a magnet still fetching metadata).
+    ///
+    /// This is an at-rest accessor reflecting the startup hashing scan
+    /// performed by [`State::from_metadata_and_root`], so it is meaningful
+    /// *before* the event loop is started — useful for rendering accurate
+    /// progress for a resumed torrent without waiting for the first metrics
+    /// tick, and for inspecting on-disk progress or for tests. During an
+    /// active download the same information arrives via the `progress` field
+    /// of [`TorrentEvent::TorrentMetrics`].
+    pub fn progress(&self) -> Option<TorrentProgress> {
+        self.torrent_state
+            .as_ref()
+            .map(|state| state.piece_selector.progress())
+    }
+
     /// Use this constructor if you have access to the torrent metadata
     /// and/or if the torrent has already started.
     ///
@@ -715,5 +823,50 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
             .set(Box::new(metadata))
             .map_err(|_e| io::Error::other("State initialized twice"))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TorrentProgress;
+    use bitvec::prelude::{Msb0, bitbox};
+
+    #[test]
+    fn progress_get_is_msb0_and_bounds_checked() {
+        // Pieces 0 and 2 complete, others clear.
+        let progress = TorrentProgress::new(bitbox![u8, Msb0; 1, 0, 1, 0]);
+        assert!(progress.get(0));
+        assert!(!progress.get(1));
+        assert!(progress.get(2));
+        assert!(!progress.get(3));
+        // Out-of-range indices read as incomplete.
+        assert!(!progress.get(4));
+        assert!(!progress.get(100));
+    }
+
+    #[test]
+    fn progress_total_completed_counts_set_bits() {
+        let progress = TorrentProgress::new(bitbox![u8, Msb0; 1, 0, 1, 0]);
+        assert_eq!(progress.num_pieces(), 4);
+        assert_eq!(progress.total_completed(), 2);
+    }
+
+    #[test]
+    fn progress_iter_yields_each_piece_in_order() {
+        let progress = TorrentProgress::new(bitbox![u8, Msb0; 1, 0, 1, 0]);
+        let states: Vec<bool> = progress.iter().collect();
+        assert_eq!(states, vec![true, false, true, false]);
+        // `&progress` iterates too, and reports an exact length.
+        assert_eq!((&progress).into_iter().count(), 4);
+        assert_eq!(progress.iter().len(), 4);
+    }
+
+    #[test]
+    fn empty_progress_has_no_pieces() {
+        let progress = TorrentProgress::new(bitbox![u8, Msb0;]);
+        assert_eq!(progress.num_pieces(), 0);
+        assert_eq!(progress.total_completed(), 0);
+        assert!(!progress.get(0));
+        assert_eq!(progress.iter().count(), 0);
     }
 }

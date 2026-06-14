@@ -10,7 +10,7 @@ use rand::SeedableRng;
 use rand::{RngExt, rngs::SmallRng};
 use slotmap::SecondaryMap;
 
-use crate::{buf_pool::Buffer, event_loop::ConnectionId};
+use crate::{buf_pool::Buffer, event_loop::ConnectionId, torrent::TorrentProgress};
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
 
@@ -249,6 +249,13 @@ impl PieceSelector {
     #[inline]
     pub fn downloaded_clone(&self) -> BitBox<u8, Msb0> {
         self.downloaded_pieces.clone()
+    }
+
+    /// Per-piece completion progress (downloaded *and* hash-verified),
+    /// built by cloning the completed-piece bitfield directly.
+    #[inline]
+    pub fn progress(&self) -> TorrentProgress {
+        TorrentProgress::new(self.completed_pieces.clone())
     }
 
     #[inline]

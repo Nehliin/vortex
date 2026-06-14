@@ -1275,20 +1275,18 @@ fn report_tick_metrics(
     _num_connections: usize,
     event_tx: &mut Producer<TorrentEvent>,
 ) {
-    let mut pieces_completed = 0;
     let mut pieces_allocated = 0;
+    let mut progress = None;
 
     if let Some(torrent_state) = state.state() {
-        let total_completed = torrent_state.piece_selector.total_completed();
-        let total_allocated = torrent_state.piece_selector.total_allocated();
-        pieces_completed = total_completed;
-        pieces_allocated = total_allocated;
+        pieces_allocated = torrent_state.piece_selector.total_allocated();
+        progress = Some(torrent_state.piece_selector.progress());
         #[cfg(feature = "metrics")]
         {
             let counter = metrics::counter!("pieces_completed");
-            counter.absolute(total_completed as u64);
+            counter.absolute(torrent_state.piece_selector.total_completed() as u64);
             let gauge = metrics::gauge!("pieces_allocated");
-            gauge.set(total_allocated as u32);
+            gauge.set(pieces_allocated as u32);
             let gauge = metrics::gauge!("num_unchoked");
             gauge.set(torrent_state.num_unchoked);
         }
@@ -1302,9 +1300,9 @@ fn report_tick_metrics(
     }
     if event_tx
         .enqueue(TorrentEvent::TorrentMetrics {
-            pieces_completed,
             pieces_allocated,
             peer_metrics,
+            progress,
         })
         .is_err()
     {

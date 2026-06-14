@@ -180,13 +180,13 @@ fn basic_seeding() {
                                 return;
                             }
                             TorrentEvent::TorrentMetrics {
-                                pieces_completed,
+                                progress,
                                 pieces_allocated,
                                 ..
                             } => {
                                 log::debug!(
                                     "Downloader progress: {}/{} pieces",
-                                    pieces_completed,
+                                    progress.as_ref().map_or(0, |p| p.total_completed()),
                                     pieces_allocated
                                 );
                             }
