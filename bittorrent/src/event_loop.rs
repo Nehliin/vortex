@@ -168,6 +168,8 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             let socket = match event.typ {
                 EventType::Connect { socket, addr } => {
                     log::debug!("[{}] Connect timed out!", addr.as_socket().unwrap());
+                    // Since we are connecting the connection MUST exist in the pending_connections
+                    // vector
                     assert!(pending_connections.remove(&addr));
                     #[cfg(feature = "metrics")]
                     {
@@ -178,7 +180,8 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                 }
                 EventType::Recv { socket, addr } => {
                     log::debug!("[{}] Handshake timed out!", addr.as_socket().unwrap());
-                    assert!(pending_connections.remove(&addr));
+                    // Remove from pending connections if this was an outgoing connection
+                    pending_connections.remove(&addr);
                     #[cfg(feature = "metrics")]
                     {
                         let handshake_timeout_counter = metrics::counter!("peer_handshake_timeout");
@@ -201,7 +204,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         "[{}] Connection reset before handshake completed",
                         addr.as_socket().unwrap()
                     );
-                    assert!(pending_connections.remove(&addr));
+                    pending_connections.remove(&addr);
                     io_utils::close_socket(sq, socket, None, events);
                 }
                 EventType::ConnectedRecv { connection_idx }
@@ -224,7 +227,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         "[{}] Attempted to write to closed connection",
                         addr.as_socket().unwrap()
                     );
-                    assert!(pending_connections.remove(&addr));
+                    pending_connections.remove(&addr);
                     io_utils::close_socket(sq, socket, None, events);
                 }
                 EventType::ConnectedWriteV { connection_idx, .. } => {
@@ -254,6 +257,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         "[{}] Connection failed {event_data_idx:?}",
                         addr.as_socket().unwrap()
                     );
+                    // Since we are connecting the connection MUST exist in the pending_connections
                     assert!(pending_connections.remove(&addr));
                     io_utils::close_socket(sq, socket, None, events);
                 }
