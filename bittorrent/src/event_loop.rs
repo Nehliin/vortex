@@ -281,6 +281,9 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                     | EventType::Write { socket, addr, .. }
                     | EventType::Recv { socket, addr } => {
                         log::error!("[{}] {err_str}", addr.as_socket().unwrap());
+                        // If this error came from an outgoing branch it should be in
+                        // pending_connections
+                        pending_connections.remove(&addr);
                         io_utils::close_socket(sq, socket, None, events);
                     }
                     EventType::ConnectedWriteV { connection_idx, .. }
