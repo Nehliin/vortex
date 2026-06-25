@@ -37,7 +37,7 @@ use ui::{
 
 use mimalloc::MiMalloc;
 
-use crate::app::METADATA_DIR;
+use crate::app::{AppSetup, METADATA_DIR};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -404,7 +404,7 @@ fn main() -> color_eyre::Result<()> {
 
     let mut event_q: Queue<TorrentEvent, 512> = heapless::spsc::Queue::new();
 
-    let (command_tx, command_rc) = std::sync::mpsc::sync_channel(256);
+    let (cmd_tx, cmd_rc) = std::sync::mpsc::sync_channel(256);
     let (event_tx, event_rc) = event_q.split();
 
     let addr = format!("0.0.0.0:{}", vortex_config.port.unwrap_or_default());
@@ -416,37 +416,43 @@ fn main() -> color_eyre::Result<()> {
     let is_complete = state.is_complete();
     let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
-    let dht_paused = Arc::new(AtomicBool::new(false));
+    let pause_dht = Arc::new(AtomicBool::new(false));
 
     let dht_cache_path = paths.dht_cache.clone();
+    let skip_dht_cache = cli.skip_dht_cache;
     std::thread::scope(|s| {
-        s.spawn(move || {
-            torrent.start(event_tx, command_rc, listener).unwrap();
-        });
-        let cmd_tx_clone = command_tx.clone();
-        let dht_paused_clone = Arc::clone(&dht_paused);
-        s.spawn(move || {
-            dht_thread(
-                info_hash_id,
-                port,
-                cmd_tx_clone,
-                shutdown_signal_rc,
-                dht_cache_path,
-                cli.skip_dht_cache,
-                dht_paused_clone,
-            )
-            .expect("DHT thread failed")
-        });
+        let cmd_tx_clone = cmd_tx.clone();
+        let pause_dht_clone = Arc::clone(&pause_dht);
+        // Use a closure to allow for spawning the torrent threads later in the cli lifecycle
+        let spawn_torrent_threads = move || {
+            s.spawn(move || {
+                torrent.start(event_tx, cmd_rc, listener).unwrap();
+            });
+            s.spawn(move || {
+                dht_thread(
+                    info_hash_id,
+                    port,
+                    cmd_tx_clone,
+                    shutdown_signal_rc,
+                    dht_cache_path,
+                    skip_dht_cache,
+                    pause_dht_clone,
+                )
+                .expect("DHT thread failed")
+            });
+        };
 
-        let mut app = VortexApp::new(
-            command_tx,
+        let setup = AppSetup {
+            cmd_tx,
             event_rc,
             shutdown_signal_tx,
             metadata,
             root,
             is_complete,
-            dht_paused,
-        );
+            pause_dht,
+        };
+
+        let mut app = VortexApp::new(setup, spawn_torrent_threads);
         let terminal = ratatui::init();
         let result = app.run(terminal);
         ratatui::restore();
@@ -454,7 +460,7 @@ fn main() -> color_eyre::Result<()> {
     })
 }
 
-impl Widget for &mut VortexApp<'_> {
+impl<F> Widget for &mut VortexApp<'_, F> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let [progress_area, graph_area, info_area, footer_area] = Layout::vertical([
             Constraint::Length(4),
@@ -470,7 +476,7 @@ impl Widget for &mut VortexApp<'_> {
             },
             AppState::Seeding => ProgressState::Seeding,
             AppState::Downloading => {
-                if let Metadata::Full(metadata) = &self.metadata {
+                if let Metadata::Full(metadata) = &self.setup.metadata {
                     let download_throughput = self
                         .total_download_throughput
                         .recent()
@@ -497,7 +503,7 @@ impl Widget for &mut VortexApp<'_> {
                 was_seeding: false, ..
             } => {
                 self.num_connections = 0;
-                if let Metadata::Full(metadata) = &self.metadata {
+                if let Metadata::Full(metadata) = &self.setup.metadata {
                     ProgressState::PausedDownloading {
                         pieces_completed: self.pieces_completed,
                         total_pieces: metadata.pieces.len(),
@@ -533,7 +539,7 @@ impl Widget for &mut VortexApp<'_> {
                 .map(|(_, v)| v)
                 .unwrap_or_default(),
             num_connections: self.num_connections,
-            name: match &self.metadata {
+            name: match &self.setup.metadata {
                 Metadata::Full(metadata) => metadata.name.clone(),
                 Metadata::Partial { name } => name.clone(),
                 Metadata::None => "Unknown".to_string(),

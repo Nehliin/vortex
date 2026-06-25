@@ -56,11 +56,8 @@ impl Metadata {
     }
 }
 
-pub struct VortexApp<'queue> {
-    /// Command sender to the torrent event loop
-    pub cmd_tx: SyncSender<Command>,
-    /// Event receiver from the torrent event loop
-    pub event_rc: Consumer<'queue, TorrentEvent>,
+pub struct VortexApp<'queue, F> {
+    pub setup: AppSetup<'queue>,
     /// Flag to signal application shutdown
     pub should_exit: bool,
     /// Application start time for elapsed time calculations
@@ -73,40 +70,51 @@ pub struct VortexApp<'queue> {
     pub pieces_completed: usize,
     /// Number of active peer connections
     pub num_connections: usize,
-    /// Torrent metadata (available after metadata download)
-    pub metadata: Metadata,
     /// The progress for downloading metada from the furthest along peer
     pub best_metadata_progress: MetadataProgress,
-    /// Root directory for downloads
-    pub root: PathBuf,
     pub time_field: Time,
-    /// Signal sender to shutdown other threads
-    pub shutdown_signal_tx: Sender<()>,
     pub state: AppState,
-    pub dht_paused: Arc<AtomicBool>,
+    /// Used to kick of the vortex bittorrent threads
+    pub spawn_torrent_threads: Option<F>,
 }
 
-impl<'queue> VortexApp<'queue> {
-    pub fn new(
-        cmd_tx: SyncSender<Command>,
-        event_rc: Consumer<'queue, TorrentEvent>,
-        shutdown_signal_tx: Sender<()>,
-        metadata: Metadata,
-        root: PathBuf,
-        is_complete: bool,
-        dht_paused: Arc<AtomicBool>,
-    ) -> Self {
-        let state = if is_complete {
+impl<'queue, F> VortexApp<'queue, F> {
+    pub fn shutdown(&mut self) {
+        let _ = self.setup.cmd_tx.send(Command::Stop);
+        let _ = self.setup.shutdown_signal_tx.send(());
+        self.should_exit = true;
+    }
+}
+
+pub struct AppSetup<'queue> {
+    /// Command sender to the torrent event loop
+    pub cmd_tx: SyncSender<Command>,
+    /// Event receiver from the torrent event loop
+    pub event_rc: Consumer<'queue, TorrentEvent>,
+    /// Signal sender to shutdown other threads
+    pub shutdown_signal_tx: Sender<()>,
+    /// Torrent metadata (available after metadata download)
+    pub metadata: Metadata,
+    /// Root directory for downloads
+    pub root: PathBuf,
+    /// If the torrent is already downloaded
+    pub is_complete: bool,
+    /// Flag stating if the dht should pause or not
+    pub pause_dht: Arc<AtomicBool>,
+}
+
+impl<'queue, F: FnOnce()> VortexApp<'queue, F> {
+    pub fn new(setup: AppSetup<'queue>, spawn_torrent_threads: F) -> Self {
+        let state = if setup.is_complete {
             AppState::Seeding
-        } else if metadata.is_none() {
+        } else if setup.metadata.is_none() {
             AppState::DownloadingMetadata
         } else {
             AppState::Downloading
         };
 
         Self {
-            cmd_tx,
-            event_rc,
+            setup,
             should_exit: false,
             start_time: Instant::now(),
             pieces_completed: 0,
@@ -114,12 +122,9 @@ impl<'queue> VortexApp<'queue> {
             total_upload_throughput: Box::new(HistoryBuf::new()),
             num_connections: 0,
             best_metadata_progress: Default::default(),
-            metadata,
             time_field: Time::StartedAt(SystemTime::now()),
-            root,
-            shutdown_signal_tx,
+            spawn_torrent_threads: Some(spawn_torrent_threads),
             state,
-            dht_paused,
         }
     }
 
@@ -131,18 +136,19 @@ impl<'queue> VortexApp<'queue> {
         Ok(())
     }
 
-    pub fn shutdown(&mut self) {
-        let _ = self.cmd_tx.send(Command::Stop);
-        let _ = self.shutdown_signal_tx.send(());
-        self.should_exit = true;
-    }
-
     fn draw(&mut self, frame: &mut Frame) {
         frame.render_widget(self, frame.area());
     }
 
     pub fn handle_events(&mut self) -> io::Result<()> {
-        while let Some(event) = self.event_rc.dequeue() {
+        // Spawn the torrent threads the first time we reach the event handler.
+        // Keeping this here (rather than before the loop) means the spawning
+        // lives alongside the rest of the event handling and can later be gated
+        // on application state.
+        if let Some(spawn_torrent_threads) = self.spawn_torrent_threads.take() {
+            spawn_torrent_threads();
+        }
+        while let Some(event) = self.setup.event_rc.dequeue() {
             match event {
                 TorrentEvent::TorrentComplete => {
                     let download_time = match self.time_field {
@@ -157,7 +163,7 @@ impl<'queue> VortexApp<'queue> {
                         AppState::Paused { was_seeding, .. } => {
                             if was_seeding {
                                 AppState::Seeding
-                            } else if self.metadata.is_none() {
+                            } else if self.setup.metadata.is_none() {
                                 AppState::DownloadingMetadata
                             } else {
                                 AppState::Downloading
@@ -165,27 +171,27 @@ impl<'queue> VortexApp<'queue> {
                         }
                         AppState::Seeding => AppState::Seeding,
                         _ => {
-                            if self.metadata.is_none() {
+                            if self.setup.metadata.is_none() {
                                 AppState::DownloadingMetadata
                             } else {
                                 AppState::Downloading
                             }
                         }
                     };
-                    self.dht_paused.store(false, Ordering::Relaxed);
+                    self.setup.pause_dht.store(false, Ordering::Relaxed);
                 }
                 TorrentEvent::Paused => {
                     self.state = AppState::Paused {
                         was_seeding: matches!(self.state, AppState::Seeding),
                         last_simulated_update: Instant::now(),
                     };
-                    self.dht_paused.store(true, Ordering::Relaxed);
+                    self.setup.pause_dht.store(true, Ordering::Relaxed);
                 }
                 TorrentEvent::MetadataComplete(metadata) => {
-                    self.metadata = Metadata::Full(Box::new((*metadata).clone()));
+                    self.setup.metadata = Metadata::Full(Box::new((*metadata).clone()));
                     self.state = AppState::Downloading;
                     self.time_field = Time::StartedAt(SystemTime::now());
-                    let root = self.root.clone();
+                    let root = self.setup.root.clone();
                     // Store the metadata as the info hash in the download folder, that will
                     // ensure it's possible to recover from downloads that's already started
                     // The thread is used to keep this non blocking
@@ -255,17 +261,17 @@ impl<'queue> VortexApp<'queue> {
         match key_event.code {
             KeyCode::Char('q') => self.shutdown(),
             KeyCode::Char('p') if !matches!(self.state, AppState::Paused { .. }) => {
-                let _ = self.cmd_tx.send(Command::Pause);
+                let _ = self.setup.cmd_tx.send(Command::Pause);
             }
             KeyCode::Char('r') if matches!(self.state, AppState::Paused { .. }) => {
-                let _ = self.cmd_tx.send(Command::Resume);
+                let _ = self.setup.cmd_tx.send(Command::Resume);
             }
             _ => {}
         }
     }
 }
 
-impl Drop for VortexApp<'_> {
+impl<F> Drop for VortexApp<'_, F> {
     fn drop(&mut self) {
         self.shutdown();
     }
