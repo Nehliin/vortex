@@ -419,7 +419,6 @@ fn main() -> color_eyre::Result<()> {
     let pause_dht = Arc::new(AtomicBool::new(false));
 
     let dht_cache_path = paths.dht_cache.clone();
-    let skip_dht_cache = cli.skip_dht_cache;
     std::thread::scope(|s| {
         let cmd_tx_clone = cmd_tx.clone();
         let pause_dht_clone = Arc::clone(&pause_dht);
@@ -435,7 +434,7 @@ fn main() -> color_eyre::Result<()> {
                     cmd_tx_clone,
                     shutdown_signal_rc,
                     dht_cache_path,
-                    skip_dht_cache,
+                    cli.skip_dht_cache,
                     pause_dht_clone,
                 )
                 .expect("DHT thread failed")
