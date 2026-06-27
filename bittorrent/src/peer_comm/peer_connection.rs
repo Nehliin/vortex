@@ -505,6 +505,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             log::error!("Received unexpected piece message, index: {m_index}");
             return;
         };
+        let rtt = self.last_received_subpiece.take().unwrap().elapsed();
+        if rtt < self.request_timeout() && self.snubbed {
+            self.snubbed = false;
+        }
+
         if self.slow_start {
             self.update_target_inflight(self.target_inflight + 1);
         }
@@ -512,7 +517,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.network_stats.downloaded_in_last_round += length as u64;
         let request = self.inflight.remove(pos).unwrap();
         log::trace!("Subpiece completed: {}, {}", request.index, request.offset);
-        let rtt = self.last_received_subpiece.take().unwrap().elapsed();
         if !self.inflight.is_empty() {
             self.last_received_subpiece = Some(Instant::now());
         }
