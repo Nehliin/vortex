@@ -1875,7 +1875,7 @@ fn choked_peer_with_empty_inflight_is_not_snubbed() {
         connections[key].last_received_subpiece = Some(Instant::now() - Duration::from_secs(3));
 
         // The peer is choking us and we have nothing in flight, so the adaptive
-        // timeout must NOT fire. 
+        // timeout must NOT fire.
         tick(
             &Duration::from_secs(1),
             &mut connections,
