@@ -1352,7 +1352,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
         .filter(|conn| conn.pending_disconnect.is_none())
     {
         if connection.last_seen.elapsed() > Duration::from_secs(120) {
-            log::warn!("Timeout due to inactivity: {}", connection.peer_id);
+            log::warn!("Inactivity timeout: {}", connection.peer_id);
             // TODO: This will not release it's unchoke slot until next interval
             connection.pending_disconnect = Some(DisconnectReason::Idle);
             continue;
@@ -1370,16 +1370,13 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
                 as u64;
 
         if let Some(torrent_state) = torrent_state.state() {
-            // TODO: If we are not using fast extension this might be triggered by a snub
-            if let Some(time) = connection.last_received_subpiece {
-                if time.elapsed() > connection.request_timeout() {
-                    // warn just to make more visible
-                    log::warn!("TIMEOUT: {}", connection.peer_id);
-                    connection.on_request_timeout(torrent_state);
-                } else if connection.snubbed {
-                    // Did not timeout
-                    connection.snubbed = false;
-                }
+            if let Some(time) = connection.last_received_subpiece
+                && time.elapsed() > connection.request_timeout()
+                && !connection.inflight.is_empty()
+            {
+                // warn just to make more visible
+                log::warn!("Adaptive timeout: {}", connection.peer_id);
+                connection.on_request_timeout(torrent_state);
             }
             if !connection.peer_choking {
                 // slow start win size increase is handled in update_stats
