@@ -1377,6 +1377,11 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
                 // warn just to make more visible
                 log::warn!("Adaptive timeout: {}", connection.peer_id);
                 connection.on_request_timeout(torrent_state);
+            } else if connection.last_req_resp.elapsed() > Duration::from_secs(15)
+                && !connection.inflight.is_empty()
+            {
+                log::warn!("Stalled connection timeout: {}", connection.peer_id);
+                connection.on_request_timeout(torrent_state);
             }
             if !connection.peer_choking {
                 // slow start win size increase is handled in update_stats
