@@ -214,6 +214,8 @@ pub struct PeerConnection {
     // Time since last received subpiece request, used to timeout
     // requests
     pub last_received_subpiece: Option<Instant>,
+    // Time since any request/response at all
+    pub last_req_resp: Instant,
     pub slow_start: bool,
     pub snubbed: bool,
     // The averge time between pieces being received
@@ -287,6 +289,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             max_queue_size: 200,
             moving_rtt: Default::default(),
             pending_disconnect: None,
+            // this isn't totally accurate but doesn't matter
+            // when the connection is starting up
+            last_req_resp: Instant::now(),
             // We've just connected which is good enough as a last keep alive
             last_keepalive_sent: Instant::now(),
             network_stats: Default::default(),
@@ -441,6 +446,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     &mut self.outgoing_msgs_buffer,
                     &mut self.inflight,
                     &mut self.last_received_subpiece,
+                    &mut self.last_req_resp,
                     subpiece,
                 );
             } else {
@@ -450,7 +456,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     pub fn request_timeout(&mut self) -> Duration {
-        const ADAPTIVE_TIMEOUT_CEILING: Duration = Duration::from_secs(40);
+        const ADAPTIVE_TIMEOUT_CEILING: Duration = Duration::from_secs(45);
         let timeout_threshold = if self.moving_rtt.num_samples < 2 {
             if self.moving_rtt.num_samples == 0 {
                 ADAPTIVE_TIMEOUT_CEILING
@@ -469,6 +475,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         outgoing_msgs_buffer: &mut Vec<PeerMessage>,
         inflight: &mut VecDeque<Subpiece>,
         timeout_timer: &mut Option<Instant>,
+        req_resp_timer: &mut Instant,
         subpiece: Subpiece,
     ) {
         let subpiece_request = PeerMessage::Request {
@@ -477,9 +484,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             length: subpiece.size,
         };
         inflight.push_back(subpiece);
+        let time = Instant::now();
+        *req_resp_timer = time;
         // only if we didnt previously have
         if timeout_timer.is_none() {
-            *timeout_timer = Some(Instant::now());
+            *timeout_timer = Some(time);
         }
 
         outgoing_msgs_buffer.push(subpiece_request);
@@ -508,6 +517,8 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             log::error!("Received unexpected piece message, index: {m_index}");
             return;
         };
+        let time = Instant::now();
+        self.last_req_resp = time;
         let rtt = self.last_received_subpiece.take().unwrap().elapsed();
         if rtt < self.request_timeout() && self.snubbed {
             self.snubbed = false;
@@ -521,7 +532,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         let request = self.inflight.remove(pos).unwrap();
         log::trace!("Subpiece completed: {}, {}", request.index, request.offset);
         if !self.inflight.is_empty() {
-            self.last_received_subpiece = Some(Instant::now());
+            self.last_received_subpiece = Some(time);
         }
         self.moving_rtt.add_sample(&rtt);
     }

@@ -1984,6 +1984,69 @@ fn fast_ext_peer_rejecting_while_choked_is_not_snubbed() {
 }
 
 #[test]
+fn stalled_connection_is_snubbed() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        // Hack to prevent the unchoke from auto-requesting so the inflight queue
+        // can be set up manually below.
+        connections[key].is_interesting = false;
+        connections[key].handle_message(
+            PeerMessage::Unchoke,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        connections[key].is_interesting = true;
+
+        let torrent_state = state_ref.state().unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
+        let mut subpieces = torrent_state.allocate_piece(index, key);
+        connections[key].append_and_fill(&mut subpieces);
+        assert!(!connections[key].inflight.is_empty());
+        assert!(!connections[key].snubbed);
+        assert!(connections[key].slow_start);
+
+        // No subpiece is ever delivered, so there are no rtt samples and the
+        // adaptive timeout sits at its ceiling, far above the stall window - it
+        // must NOT be what triggers here.
+        assert!(connections[key].request_timeout() > Duration::from_secs(16));
+
+        // The peer goes silent: no request sent and no response received for
+        // longer than the stall window. Both anchors age together, but only the
+        // coarse last_req_resp timer has elapsed.
+        connections[key].last_req_resp = Instant::now() - Duration::from_secs(16);
+        connections[key].last_received_subpiece = Some(Instant::now() - Duration::from_secs(16));
+
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &Default::default(),
+            &mut state_ref,
+            &mut event_tx,
+        );
+        // The stall timeout fired and snubbed the peer (also dropping slow start).
+        assert!(connections[key].snubbed);
+        assert!(!connections[key].slow_start);
+    });
+}
+
+#[test]
 fn reject_request_requests_new() {
     let mut download_state = setup_test();
 
