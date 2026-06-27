@@ -1770,6 +1770,25 @@ fn snubbed_peer() {
             &mut pending_disk_operations,
             scope,
         );
+        // Still snubbed since adaptive timeout needs more samples haven't recovered yet
+        assert!(connections[key].snubbed);
+
+        // simulate the first piece arriving
+        let second = connections[key].inflight[0];
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: second.index,
+                begin: second.offset,
+                data: vec![3; second.size as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        // snub is cleared since it's within adaptive timeout
+        assert!(!connections[key].snubbed);
+        assert_eq!(connections[key].inflight.len(), 0);
+
         tick(
             &Duration::from_secs(1),
             &mut connections,
@@ -1777,7 +1796,7 @@ fn snubbed_peer() {
             &mut state_ref,
             &mut event_tx,
         );
-        assert!(!connections[key].snubbed);
+        // target is recalculated based off adaptive timeout
         assert!(connections[key].target_inflight > 1);
     });
 }

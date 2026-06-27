@@ -113,7 +113,7 @@ then
         -v "${tr_watch_dir}:/watch:z" \
         -p 51413:51413 \
         --detach \
-        linuxserver/transmission
+        docker.io/linuxserver/transmission
 
     seed_ip="$(get_container_ip "${name}")"
     echo "Seed available on local net at IP: ${seed_ip}"

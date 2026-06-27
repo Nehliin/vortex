@@ -450,16 +450,19 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     pub fn request_timeout(&mut self) -> Duration {
+        const ADAPTIVE_TIMEOUT_CEILING: Duration = Duration::from_secs(40);
         let timeout_threshold = if self.moving_rtt.num_samples < 2 {
             if self.moving_rtt.num_samples == 0 {
-                Duration::from_secs(2)
+                ADAPTIVE_TIMEOUT_CEILING
             } else {
                 self.moving_rtt.mean() + self.moving_rtt.mean() / 5
             }
         } else {
             self.moving_rtt.mean() + (self.moving_rtt.average_deviation() * 4)
         };
-        timeout_threshold.max(Duration::from_secs(2))
+        let capped_timeout = timeout_threshold.min(ADAPTIVE_TIMEOUT_CEILING);
+        // Timeout floor
+        capped_timeout.max(Duration::from_secs(2))
     }
 
     fn push_subpiece_request(
@@ -505,6 +508,11 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             log::error!("Received unexpected piece message, index: {m_index}");
             return;
         };
+        let rtt = self.last_received_subpiece.take().unwrap().elapsed();
+        if rtt < self.request_timeout() && self.snubbed {
+            self.snubbed = false;
+        }
+
         if self.slow_start {
             self.update_target_inflight(self.target_inflight + 1);
         }
@@ -512,7 +520,6 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.network_stats.downloaded_in_last_round += length as u64;
         let request = self.inflight.remove(pos).unwrap();
         log::trace!("Subpiece completed: {}, {}", request.index, request.offset);
-        let rtt = self.last_received_subpiece.take().unwrap().elapsed();
         if !self.inflight.is_empty() {
             self.last_received_subpiece = Some(Instant::now());
         }
