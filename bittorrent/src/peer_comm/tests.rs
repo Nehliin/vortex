@@ -1801,6 +1801,188 @@ fn snubbed_peer() {
     });
 }
 
+// Regression test: a peer that chokes us must not be timed out / snubbed.
+// A non fast_ext Choke clears our outstanding requests (inflight) but leaves the
+// adaptive timeout counter (last_received_subpiece) stale. The tick must therefore guard
+// the adaptive timeout with `!inflight.is_empty()`, otherwise on_request_timeout
+// fires on a peer we have nothing outstanding with and spuriously snubs it.
+#[test]
+fn choked_peer_with_empty_inflight_is_not_snubbed() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(false, k));
+
+        let num_pieces = state_ref.state().unwrap().num_pieces();
+        let field = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
+        connections[key].handle_message(
+            PeerMessage::Bitfield(field),
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        // Hack to prevent the unchoke from auto-requesting so the inflight queue
+        // can be set up manually below.
+        connections[key].is_interesting = false;
+        connections[key].handle_message(
+            PeerMessage::Unchoke,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        connections[key].is_interesting = true;
+
+        let torrent_state = state_ref.state().unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
+        let mut subpieces = torrent_state.allocate_piece(index, key);
+        connections[key].append_and_fill(&mut subpieces);
+        // Receive a subpiece so we have an rtt sample (request_timeout drops to
+        // its 2s floor) and a populated timeout anchor.
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        assert!(!connections[key].inflight.is_empty());
+        assert!(connections[key].last_received_subpiece.is_some());
+
+        // The peer chokes us. As a non fast_ext peer this clears inflight but
+        // does NOT reset the timeout anchor (last_received_subpiece).
+        connections[key].handle_message(
+            PeerMessage::Choke,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        assert!(connections[key].peer_choking);
+        assert!(connections[key].inflight.is_empty());
+        assert!(connections[key].last_received_subpiece.is_some());
+
+        // Let the timeout window elapse on the now-stale anchor.
+        connections[key].last_received_subpiece = Some(Instant::now() - Duration::from_secs(3));
+
+        // The peer is choking us and we have nothing in flight, so the adaptive
+        // timeout must NOT fire.
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &Default::default(),
+            &mut state_ref,
+            &mut event_tx,
+        );
+        assert!(!connections[key].snubbed);
+        assert!(connections[key].slow_start);
+    });
+}
+
+// Regression test, fast_ext variant of the above. Here the RejectRequests are needed
+// to reach an empty inflight queue
+#[test]
+fn fast_ext_peer_rejecting_while_choked_is_not_snubbed() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        // Hack to prevent the unchoke from auto-requesting so the inflight queue
+        // can be set up manually below.
+        connections[key].is_interesting = false;
+        connections[key].handle_message(
+            PeerMessage::Unchoke,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        connections[key].is_interesting = true;
+
+        let torrent_state = state_ref.state().unwrap();
+        let index = torrent_state
+            .piece_selector
+            .next_piece(key, &mut connections[key].endgame)
+            .unwrap();
+        let mut subpieces = torrent_state.allocate_piece(index, key);
+        connections[key].append_and_fill(&mut subpieces);
+        // Receive a subpiece so we have an rtt sample (request_timeout drops to
+        // its 2s floor) and a populated timeout anchor.
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+
+        // The peer chokes us. Unlike a non fast_ext peer, inflight is kept.
+        connections[key].handle_message(
+            PeerMessage::Choke,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        assert!(connections[key].peer_choking);
+        assert!(!connections[key].inflight.is_empty());
+
+        // It then explicitly rejects every still-outstanding request. While
+        // choked these are removed from inflight without refilling.
+        while let Some(subpiece) = connections[key].inflight.front().copied() {
+            connections[key].handle_message(
+                PeerMessage::RejectRequest {
+                    index: subpiece.index,
+                    begin: subpiece.offset,
+                    length: subpiece.size,
+                },
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+        }
+        assert!(connections[key].pending_disconnect.is_none());
+        assert!(connections[key].inflight.is_empty());
+        assert!(connections[key].last_received_subpiece.is_some());
+
+        // Let the timeout window elapse on the now-stale anchor.
+        connections[key].last_received_subpiece = Some(Instant::now() - Duration::from_secs(3));
+
+        // Nothing is in flight, so the adaptive timeout must NOT fire even though
+        // the anchor is stale.
+        tick(
+            &Duration::from_secs(1),
+            &mut connections,
+            &Default::default(),
+            &mut state_ref,
+            &mut event_tx,
+        );
+        assert!(!connections[key].snubbed);
+        assert!(connections[key].slow_start);
+    });
+}
+
 #[test]
 fn reject_request_requests_new() {
     let mut download_state = setup_test();
