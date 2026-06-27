@@ -450,16 +450,19 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     pub fn request_timeout(&mut self) -> Duration {
+        const ADAPTIVE_TIMEOUT_CEILING: Duration = Duration::from_secs(40);
         let timeout_threshold = if self.moving_rtt.num_samples < 2 {
             if self.moving_rtt.num_samples == 0 {
-                Duration::from_secs(2)
+                ADAPTIVE_TIMEOUT_CEILING
             } else {
                 self.moving_rtt.mean() + self.moving_rtt.mean() / 5
             }
         } else {
             self.moving_rtt.mean() + (self.moving_rtt.average_deviation() * 4)
         };
-        timeout_threshold.max(Duration::from_secs(2))
+        let capped_timeout = timeout_threshold.min(ADAPTIVE_TIMEOUT_CEILING);
+        // Timeout floor
+        capped_timeout.max(Duration::from_secs(2))
     }
 
     fn push_subpiece_request(
