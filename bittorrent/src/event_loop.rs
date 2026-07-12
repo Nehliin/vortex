@@ -17,7 +17,7 @@ use io_uring::{
     opcode,
     types::{self, CancelBuilder, Fd, Timespec},
 };
-use libc::ECANCELED;
+use libc::{ECANCELED, ENOENT};
 use rayon::Scope;
 use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -40,6 +40,16 @@ use crate::{
 
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
 const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
+
+// A CQE is "orphan" when its event id has already been removed from `events`.
+// This is expected for the second half of a linked (Recv|Connect + LinkTimeout) pair
+// (they share user_data) and for trailing CQEs of a cancelled multishot recv.
+// The kernel reports ECANCELED in the common path, but the linked-timeout half can
+// surface as ENOENT when the target was already cancelled before the timeout was
+// armed (observed when tearing down connections via AsyncCancel(fd).all()).
+fn is_expected_orphan_error(err: u32) -> bool {
+    matches!(err as i32, ECANCELED | ENOENT)
+}
 
 #[derive(Debug)]
 pub enum EventType {
@@ -574,15 +584,17 @@ impl<'scope, 'state: 'scope> EventLoop {
                         }
                     } else {
                         let err = io_event.result.unwrap_err();
-                        // Only cancellation errors are expected here
-                        // since linked timeouts share event id with
-                        // the event being on a timer
-                        //
-                        // TODO: We might also end up here if we remove event id for a
-                        // reoccuring event like recv_multi even though we've cancelled
-                        // all events + close the socket if we've received multiple cqe for
-                        // the event in one submission
-                        assert_eq!(err as i32, ECANCELED);
+                        // The event was already removed by an earlier CQE in this batch.
+                        // Legitimate causes (see `is_expected_orphan_error`):
+                        //  - the linked-timeout half of an IO_LINK'd Recv/Connect
+                        //    (both share user_data),
+                        //  - a trailing CQE from a multishot op (recv_multi) after we
+                        //    cancelled it and closed the socket.
+                        assert!(
+                            is_expected_orphan_error(err),
+                            "unexpected orphan CQE errno {err} for event id {:?}",
+                            io_event.event_data_idx
+                        );
                     }
                     // Ensure bids are always returned
                     if let Some(bid) = io_event.read_bid {
@@ -1473,6 +1485,34 @@ mod tests {
     use metrics_util::{CompositeKey, MetricKind};
     use std::net::{SocketAddrV4, TcpListener};
     use std::time::Duration;
+
+    #[test]
+    fn orphan_cqe_accepts_ecanceled_enoent() {
+        assert!(is_expected_orphan_error(libc::ECANCELED as u32));
+
+        // Regression: linked-timeout half of a cancelled Recv/Connect chain can
+        // surface as ENOENT instead of ECANCELED on some kernel paths.
+        assert!(is_expected_orphan_error(libc::ENOENT as u32));
+    }
+
+    #[test]
+    fn orphan_cqe_rejects_other_errnos() {
+        for errno in [
+            libc::EFAULT,
+            libc::EINVAL,
+            libc::ECONNRESET,
+            libc::EPIPE,
+            libc::ETIME,
+            libc::ENOBUFS,
+            libc::EHOSTUNREACH,
+            libc::ECONNREFUSED,
+        ] {
+            assert!(
+                !is_expected_orphan_error(errno as u32),
+                "errno {errno} must not be accepted as an orphan CQE cause",
+            );
+        }
+    }
 
     #[test]
     #[cfg(feature = "metrics")]
