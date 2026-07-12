@@ -47,9 +47,9 @@ const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
 //     user_data), so the second CQE lands after the first removed the event;
 //   * a trailing CQE from a cancelled multishot recv. (ECANCELED)
 //
-// The linked-timeout half normally completes with ECANCELED but
-// may return  ENOENT in the race where the timer fires *and* the target completes
-// at nearly the same instant.
+// The linked-timeout half normally completes with ECANCELED but may return ENOENT
+// in the race where the timer fires *and* the target completes at nearly the same
+// instant (observed when tearing down connections via AsyncCancel(fd).all()).
 fn is_expected_orphan_error(err: u32) -> bool {
     matches!(err as i32, ECANCELED | ENOENT)
 }
@@ -588,6 +588,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                     } else {
                         let err = io_event.result.unwrap_err();
                         // The event was already removed by an earlier CQE in this batch.
+                        // Legitimate causes (see `is_expected_orphan_error`):
+                        //  - the linked-timeout half of an IO_LINK'd Recv/Connect
+                        //    (both share user_data),
+                        //  - a trailing CQE from a multishot op (recv_multi) after we
+                        //    cancelled it and closed the socket.
                         assert!(
                             is_expected_orphan_error(err),
                             "unexpected orphan CQE errno {err} for event id {:?}",
@@ -1483,6 +1488,34 @@ mod tests {
     use metrics_util::{CompositeKey, MetricKind};
     use std::net::{SocketAddrV4, TcpListener};
     use std::time::Duration;
+
+    #[test]
+    fn orphan_cqe_accepts_ecanceled_enoent() {
+        assert!(is_expected_orphan_error(libc::ECANCELED as u32));
+
+        // Regression: linked-timeout half of a cancelled Recv/Connect chain can
+        // surface as ENOENT instead of ECANCELED on some kernel paths.
+        assert!(is_expected_orphan_error(libc::ENOENT as u32));
+    }
+
+    #[test]
+    fn orphan_cqe_rejects_other_errnos() {
+        for errno in [
+            libc::EFAULT,
+            libc::EINVAL,
+            libc::ECONNRESET,
+            libc::EPIPE,
+            libc::ETIME,
+            libc::ENOBUFS,
+            libc::EHOSTUNREACH,
+            libc::ECONNREFUSED,
+        ] {
+            assert!(
+                !is_expected_orphan_error(errno as u32),
+                "errno {errno} must not be accepted as an orphan CQE cause",
+            );
+        }
+    }
 
     #[test]
     #[cfg(feature = "metrics")]
