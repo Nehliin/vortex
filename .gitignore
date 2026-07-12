@@ -3,3 +3,8 @@
 /downloaded
 .cargo/config.toml
 routing_table.json
+
+# Nix
+/result
+/result-*
+.direnv/
