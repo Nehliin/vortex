@@ -21,7 +21,7 @@ use mainline::{Dht, Id};
 use ratatui::{
     layout::{Constraint, Layout},
     prelude::{Buffer, Rect},
-    widgets::Widget,
+    widgets::{ListState, StatefulWidget, Widget},
 };
 use vortex_bittorrent::{Command, PeerId, State, Torrent, TorrentEvent};
 
@@ -31,8 +31,8 @@ mod ui;
 
 use app::{AppState, Metadata, VortexApp};
 use ui::{
-    Footer, InfoData, InfoPanel, ProgressBar, ProgressState, ThroughputData, ThroughputGraph,
-    extract_throughput_data,
+    Footer, InfoData, InfoPanel, ProgressBar, ProgressState, SelectionData, ThroughputData,
+    ThroughputGraph, extract_throughput_data,
 };
 
 use mimalloc::MiMalloc;
@@ -319,84 +319,7 @@ fn main() -> color_eyre::Result<()> {
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
 
-    let needs_selection = cli.torrent_info.info_hash.is_none()
-        && cli.torrent_info.magnet_link.is_none()
-        && cli.torrent_info.torrent_file.is_none();
-
-    let selection_data = if needs_selection {
-        let metadata_path = paths.download_folder.join(METADATA_DIR);
-        let mut items = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&metadata_path) {
-            for entry in entries.flatten() {
-                let file_name = entry.file_name();
-                let name_str = file_name.to_string_lossy();
-                if name_str.len() == 40 && name_str.chars().all(|c| c.is_ascii_hexdigit()) {
-                    let hash = name_str.to_string();
-                    let display_name =
-                        lava_torrent::torrent::v1::Torrent::read_from_file(entry.path())
-                            .ok()
-                            .map(|t| t.name)
-                            .unwrap_or_else(|| hash.clone());
-                    items.push((hash, display_name));
-                }
-            }
-        }
-        if items.is_empty() {
-            Cli::command().print_help()?;
-            println!();
-            return Ok(());
-        }
-        Some((items, metadata_path, paths.download_folder.clone()))
-    } else {
-        None
-    };
-
-    let mut terminal = ratatui::init();
-
-    let selected_hash = if let Some((ref items, ref meta_path, ref down_root)) = selection_data {
-        let (cmd_tx, _) = std::sync::mpsc::sync_channel(1);
-        let mut event_q: Queue<TorrentEvent, 512> = heapless::spsc::Queue::new();
-        let (_, event_rc) = event_q.split();
-        let (shutdown_signal_tx, _) = bounded(1);
-        let dht_paused = Arc::new(AtomicBool::new(false));
-
-        let mut selection_app = VortexApp::new(
-            cmd_tx,
-            event_rc,
-            shutdown_signal_tx,
-            Metadata::None,
-            down_root.clone(),
-            false,
-            dht_paused,
-            Some((
-                items.to_vec(),
-                meta_path.to_path_buf(),
-                down_root.to_path_buf(),
-            )),
-        );
-
-        selection_app.run(&mut terminal)?;
-        selection_app.selected_hash.clone()
-    } else {
-        None
-    };
-
-    if selection_data.is_some() && selected_hash.is_none() {
-        ratatui::restore();
-        return Ok(());
-    }
-
-    let torrent_info = if let Some(hash) = selected_hash {
-        TorrentInfo {
-            info_hash: Some(hash),
-            magnet_link: None,
-            torrent_file: None,
-        }
-    } else {
-        cli.torrent_info
-    };
-
-    let (state, metadata) = match torrent_info {
+    let (app_state, initial_metadata) = match cli.torrent_info {
         TorrentInfo {
             info_hash: None,
             magnet_link: None,
@@ -408,11 +331,15 @@ fn main() -> color_eyre::Result<()> {
                 State::from_metadata_and_root(parsed_metadata.clone(), root.clone(), bt_config)
                     .wrap_err("Failed initialzing state")?;
 
-            (state, Metadata::Full(Box::new(parsed_metadata)))
+            (
+                AppState::SelectedTorrent { state },
+                Metadata::Full(Box::new(parsed_metadata)),
+            )
         }
         _ => {
             let mut magnet_name = None;
-            let info_hash_str = torrent_info
+            let info_hash_str = cli
+                .torrent_info
                 .magnet_link
                 .as_deref()
                 .map(|m| -> color_eyre::Result<String> {
@@ -421,45 +348,77 @@ fn main() -> color_eyre::Result<()> {
                     Ok(info.info_hash)
                 })
                 .transpose()?
-                .or_else(|| torrent_info.info_hash.clone());
-            let info_hash = if let Some(hash) = info_hash_str {
-                hash
-            } else {
-                Cli::command().print_help()?;
-                println!();
-                return Ok(());
-            };
-
-            match lava_torrent::torrent::v1::Torrent::read_from_file(
-                root.join(METADATA_DIR).join(info_hash.to_lowercase()),
-            ) {
-                Ok(metadata) => {
-                    let state =
-                        State::from_metadata_and_root(metadata.clone(), root.clone(), bt_config)?;
-                    (state, Metadata::Full(Box::new(metadata)))
-                }
-                Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
-                    if io_err.kind() == ErrorKind::NotFound {
-                        let state = State::unstarted(
-                            decode_info_hash_hex(&info_hash).wrap_err("Invalid info hash")?,
+                .or_else(|| cli.torrent_info.info_hash.clone());
+            if let Some(info_hash) = info_hash_str {
+                match lava_torrent::torrent::v1::Torrent::read_from_file(
+                    root.join(METADATA_DIR).join(info_hash.to_lowercase()),
+                ) {
+                    Ok(metadata) => {
+                        let state = State::from_metadata_and_root(
+                            metadata.clone(),
                             root.clone(),
                             bt_config,
-                        );
-                        let meta_varient = match magnet_name {
-                            Some(name) => Metadata::Partial { name },
-                            None => Metadata::None,
-                        };
-                        (state, meta_varient)
-                    } else {
-                        return Err(eyre!("Failed looking for stored metadata {io_err}"));
+                        )?;
+                        (
+                            AppState::SelectedTorrent { state },
+                            Metadata::Full(Box::new(metadata)),
+                        )
+                    }
+                    Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
+                        if io_err.kind() == ErrorKind::NotFound {
+                            let state = State::unstarted(
+                                decode_info_hash_hex(&info_hash).wrap_err("Invalid info hash")?,
+                                root.clone(),
+                                bt_config,
+                            );
+                            let meta_variant = match magnet_name {
+                                Some(name) => Metadata::Partial { name },
+                                None => Metadata::None,
+                            };
+                            (AppState::SelectedTorrent { state }, meta_variant)
+                        } else {
+                            return Err(eyre!("Failed looking for stored metadata {io_err}"));
+                        }
+                    }
+                    Err(err) => return Err(eyre!("Failed looking for stored metadata {err}")),
+                }
+            } else {
+                let metadata_path = paths.download_folder.join(METADATA_DIR);
+                let mut items = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&metadata_path) {
+                    for entry in entries.flatten() {
+                        let file_name = entry.file_name();
+                        let name_str = file_name.to_string_lossy();
+                        if name_str.len() == 40 && name_str.chars().all(|c| c.is_ascii_hexdigit()) {
+                            let hash = name_str.to_string();
+                            let display_name =
+                                lava_torrent::torrent::v1::Torrent::read_from_file(entry.path())
+                                    .ok()
+                                    .map(|t| t.name)
+                                    .unwrap_or_else(|| hash.clone());
+                            items.push((hash, display_name));
+                        }
                     }
                 }
-                Err(err) => return Err(eyre!("Failed looking for stored metadata {err}")),
+                if items.is_empty() {
+                    Cli::command().print_help()?;
+                    println!();
+                    return Ok(());
+                }
+                // Nothing is selected yet, so there's no metadata to show
+                (
+                    AppState::SelectingTorrent {
+                        items,
+                        list_state: ListState::default().with_selected(Some(0)),
+                        pending_delete_index: None,
+                        metadata_path,
+                        download_root: paths.download_folder.clone(),
+                    },
+                    Metadata::None,
+                )
             }
         }
     };
-
-    let info_hash_id = Id::from_bytes(state.info_hash()).wrap_err("Invalid info_hash")?;
 
     let mut event_q: Queue<TorrentEvent, 512> = heapless::spsc::Queue::new();
 
@@ -472,8 +431,6 @@ fn main() -> color_eyre::Result<()> {
 
     let port = listener.local_addr().unwrap().port();
     let id = PeerId::generate();
-    let is_complete = state.is_complete();
-    let mut torrent = Torrent::new(id, state);
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
     let pause_dht = Arc::new(AtomicBool::new(false));
 
@@ -482,7 +439,9 @@ fn main() -> color_eyre::Result<()> {
         let cmd_tx_clone = cmd_tx.clone();
         let pause_dht_clone = Arc::clone(&pause_dht);
         // Use a closure to allow for spawning the torrent threads later in the cli lifecycle
-        let spawn_torrent_threads = move || {
+        let spawn_torrent_threads = move |state: State| -> color_eyre::Result<()> {
+            let info_hash_id = Id::from_bytes(state.info_hash()).wrap_err("Invalid info_hash")?;
+            let mut torrent = Torrent::new(id, state);
             s.spawn(move || {
                 torrent.start(event_tx, cmd_rc, listener).unwrap();
             });
@@ -498,19 +457,20 @@ fn main() -> color_eyre::Result<()> {
                 )
                 .expect("DHT thread failed")
             });
+            Ok(())
         };
 
         let setup = AppSetup {
             cmd_tx,
             event_rc,
             shutdown_signal_tx,
-            metadata,
+            metadata: initial_metadata,
             root,
-            is_complete,
             pause_dht,
+            config: bt_config,
         };
 
-        let mut app = VortexApp::new(setup, spawn_torrent_threads);
+        let mut app = VortexApp::new(setup, app_state, spawn_torrent_threads)?;
         let terminal = ratatui::init();
         let result = app.run(terminal);
         ratatui::restore();
@@ -520,6 +480,21 @@ fn main() -> color_eyre::Result<()> {
 
 impl<F> Widget for &mut VortexApp<'_, F> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        if let AppState::SelectingTorrent {
+            items,
+            list_state,
+            pending_delete_index,
+            ..
+        } = &mut self.state
+        {
+            let data = SelectionData {
+                items,
+                pending_delete_index: *pending_delete_index,
+            };
+            StatefulWidget::render(data, area, buf, list_state);
+            return;
+        }
+
         let [progress_area, graph_area, info_area, footer_area] = Layout::vertical([
             Constraint::Length(4),
             Constraint::Fill(1),
@@ -572,7 +547,10 @@ impl<F> Widget for &mut VortexApp<'_, F> {
                     }
                 }
             }
-            AppState::SelectingTorrent { .. } => unreachable!(),
+            // Handled above, before the download layout is laid out
+            AppState::SelectingTorrent { .. } => return,
+            // Transitional state
+            AppState::SelectedTorrent { .. } => return,
         };
 
         ProgressBar::new(progress_state).render(progress_area, buf);
