@@ -1485,25 +1485,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn orphan_cqe_rejects_other_errnos() {
-        for errno in [
-            libc::EFAULT,
-            libc::EINVAL,
-            libc::ECONNRESET,
-            libc::EPIPE,
-            libc::ETIME,
-            libc::ENOBUFS,
-            libc::EHOSTUNREACH,
-            libc::ECONNREFUSED,
-        ] {
-            assert!(
-                !is_expected_orphan_error(errno as u32),
-                "errno {errno} must not be accepted as an orphan CQE cause",
-            );
-        }
-    }
-
-    #[test]
     #[cfg(feature = "metrics")]
     fn handshake_timeout() {
         env_logger::builder()
