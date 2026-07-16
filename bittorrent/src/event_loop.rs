@@ -17,7 +17,7 @@ use io_uring::{
     opcode,
     types::{self, CancelBuilder, Fd, Timespec},
 };
-use libc::ECANCELED;
+use libc::{ECANCELED, ENOENT};
 use rayon::Scope;
 use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -40,6 +40,19 @@ use crate::{
 
 const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
 const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
+
+// A CQE is "orphan" when its event id has already been removed from `events`.
+// Expected causes:
+//   * the linked-timeout half of a Recv/Connect + LinkTimeout pair (both share
+//     user_data), so the second CQE lands after the first removed the event;
+//   * a trailing CQE from a cancelled multishot recv. (ECANCELED)
+//
+// The linked-timeout half normally completes with ECANCELED but
+// may return  ENOENT in the race where the timer fires *and* the target completes
+// at nearly the same instant.
+fn is_expected_orphan_error(err: u32) -> bool {
+    matches!(err as i32, ECANCELED | ENOENT)
+}
 
 #[derive(Debug)]
 pub enum EventType {
@@ -574,15 +587,12 @@ impl<'scope, 'state: 'scope> EventLoop {
                         }
                     } else {
                         let err = io_event.result.unwrap_err();
-                        // Only cancellation errors are expected here
-                        // since linked timeouts share event id with
-                        // the event being on a timer
-                        //
-                        // TODO: We might also end up here if we remove event id for a
-                        // reoccuring event like recv_multi even though we've cancelled
-                        // all events + close the socket if we've received multiple cqe for
-                        // the event in one submission
-                        assert_eq!(err as i32, ECANCELED);
+                        // The event was already removed by an earlier CQE in this batch.
+                        assert!(
+                            is_expected_orphan_error(err),
+                            "unexpected orphan CQE errno {err} for event id {:?}",
+                            io_event.event_data_idx
+                        );
                     }
                     // Ensure bids are always returned
                     if let Some(bid) = io_event.read_bid {
