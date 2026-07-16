@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/Nehliin/vortex/compare/vortex-cli-v0.4.0...vortex-cli-v0.5.0) - 2026-07-16
+
+### Added
+
+- Implement torrent selection menu and update application state management ([#133](https://github.com/Nehliin/vortex/pull/133))
+- surface per-piece completion to clients ([#135](https://github.com/Nehliin/vortex/pull/135))
+- Display name from magnet link when metadata is missing ([#119](https://github.com/Nehliin/vortex/pull/119))
+
+### Other
+
+- Update deps ([#140](https://github.com/Nehliin/vortex/pull/140))
+- Resume to seeding properly ([#122](https://github.com/Nehliin/vortex/pull/122))
+- Bump deps and update deny config ([#120](https://github.com/Nehliin/vortex/pull/120))
+
 ## [0.4.0](https://github.com/Nehliin/vortex/compare/vortex-cli-v0.3.1...vortex-cli-v0.4.0) - 2026-03-07
 
 ### Added

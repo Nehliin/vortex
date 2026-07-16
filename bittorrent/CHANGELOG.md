@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.6.1...vortex-bittorrent-v0.7.0) - 2026-07-16
+
+### Added
+
+- Add coarse grained stalled connection timeout ([#143](https://github.com/Nehliin/vortex/pull/143))
+- Surface per-piece completion to clients ([#135](https://github.com/Nehliin/vortex/pull/135))
+
+### Fixed
+
+- Accept ENOENT for orphan CQEs from linked timeouts in event_loop ([#145](https://github.com/Nehliin/vortex/pull/145))
+- Prevent incorrect timeouts/snubs ([#142](https://github.com/Nehliin/vortex/pull/142))
+- Differentiate between incoming and out going connections when asserting `pending_connections` removal ([#139](https://github.com/Nehliin/vortex/pull/139))
+
+### Perf
+
+- Improve snub recovery time ([#141](https://github.com/Nehliin/vortex/pull/141))
+
+### Other
+
+- Update dependencies ([#136](https://github.com/Nehliin/vortex/pull/136))
+
 ## [0.6.1](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.6.0...vortex-bittorrent-v0.6.1) - 2026-04-15
 
 ### Fixed
