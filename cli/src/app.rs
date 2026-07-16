@@ -93,7 +93,6 @@ pub struct VortexApp<'queue, F> {
 }
 
 impl<'queue, F> VortexApp<'queue, F> {
-
     fn started_state(state: &State, metadata: &Metadata) -> AppState {
         if state.is_complete() {
             AppState::Seeding
