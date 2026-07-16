@@ -47,7 +47,7 @@ const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
 //     user_data), so the second CQE lands after the first removed the event;
 //   * a trailing CQE from a cancelled multishot recv. (ECANCELED)
 //
-// The linked-timeout half normally completes with ECANCELED but 
+// The linked-timeout half normally completes with ECANCELED but
 // may return  ENOENT in the race where the timer fires *and* the target completes
 // at nearly the same instant.
 fn is_expected_orphan_error(err: u32) -> bool {
