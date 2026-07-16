@@ -385,7 +385,7 @@ impl InitializedState {
                     peer.pending_disconnect = Some(DisconnectReason::RedundantConnection);
                 }
                 // Notify all extensions that the torrent completed
-                for (_, extension) in peer.extensions.iter_mut() {
+                for extension in peer.extensions.values_mut() {
                     extension.on_torrent_complete(&mut peer.outgoing_msgs_buffer);
                 }
             }
