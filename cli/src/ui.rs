@@ -5,13 +5,12 @@ use std::time::{Duration, SystemTime};
 use heapless::HistoryBuf;
 use human_bytes::human_bytes;
 use ratatui::{
-    Frame,
     layout::Alignment,
     layout::{Constraint, Layout},
     prelude::{Buffer, Rect},
     style::{Color, Modifier, Style, Stylize, palette::tailwind},
     text::Span,
-    widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, Row, Table, Widget},
+    widgets::{Axis, Block, Borders, Chart, Dataset, Gauge, Row, StatefulWidget, Table, Widget},
     widgets::{List, ListItem, ListState, Paragraph},
 };
 
@@ -308,15 +307,15 @@ impl Widget for InfoPanel {
             ratatui::text::Text::styled(time_text, time_style),
         ]);
 
-        Table::new(vec![row], [ratatui::layout::Constraint::Fill(1); 5])
+        let table = Table::new(vec![row], [ratatui::layout::Constraint::Fill(1); 5])
             .header(Row::new(headers).style(default_style))
             .block(
                 Block::default()
                     .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
                     .border_type(ratatui::widgets::BorderType::Rounded),
             )
-            .style(default_style)
-            .render(area, buf);
+            .style(default_style);
+        Widget::render(table, area, buf);
     }
 }
 
@@ -361,142 +360,41 @@ pub fn extract_throughput_data(buf: &HistoryBuf<(f64, f64), 256>) -> Vec<(f64, f
 
 pub struct SelectionData<'a> {
     pub items: &'a [(String, String)],
-    pub selected_index: usize,
-    pub delete_pending: bool,
+    /// The item awaiting delete confirmation, if any
     pub pending_delete_index: Option<usize>,
 }
 
-pub fn draw_torrent_selection(frame: &mut Frame, area: Rect, selection: &SelectionData) {
-    let [list_area, help_area] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
+impl StatefulWidget for SelectionData<'_> {
+    type State = ListState;
 
-    let list_items: Vec<ListItem> = selection
-        .items
-        .iter()
-        .map(|(_, name)| ListItem::new(name.as_str()))
-        .collect();
+    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        let [list_area, help_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
 
-    let mut list_state = ListState::default();
-    list_state.select(Some(selection.selected_index));
-
-    let list = List::new(list_items)
+        let list = List::new(
+            self.items
+                .iter()
+                .map(|(_, name)| ListItem::new(name.as_str())),
+        )
         .block(Block::bordered().title("Select a torrent"))
         .highlight_style(Style::new().bg(Color::Yellow).fg(Color::Black))
         .highlight_symbol(">> ");
 
-    frame.render_stateful_widget(list, list_area, &mut list_state);
+        // Rendering the list clamps an out of bounds selection back into range and
+        // updates the scroll offset, so the state must outlive the frame.
+        StatefulWidget::render(list, list_area, buf, state);
 
-    let help_text = if selection.delete_pending {
-        let idx = selection
+        let help_text = match self
             .pending_delete_index
-            .unwrap_or(selection.selected_index);
-        format!("Delete '{}'? (y/n)", selection.items[idx].1)
-    } else {
-        "↑/↓: navigate, Enter: select, d: delete, q: quit".to_string()
-    };
+            .and_then(|idx| self.items.get(idx))
+        {
+            Some((_, name)) => format!("Delete '{name}'? (y/n)"),
+            None => "↑/↓: navigate, Enter: select, d: delete, q: quit".to_string(),
+        };
 
-    let help = Paragraph::new(help_text)
-        .block(Block::bordered())
-        .alignment(Alignment::Center);
-    frame.render_widget(help, help_area);
-}
-
-fn handle_selection_events(state: &mut SelectionState) -> EyreResult<()> {
-    if event::poll(Duration::from_millis(16))?
-        && let Event::Key(key) = event::read()?
-        && key.kind == KeyEventKind::Press
-    {
-        if state.delete_pending {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    let idx = state.pending_delete_index.unwrap_or(state.selected_index);
-                    let (hash, name) = &state.items[idx];
-
-                    let base_name = if name.is_empty() {
-                        hash.as_str()
-                    } else {
-                        name.as_str()
-                    };
-                    let download_root = &state.download_root;
-
-                    let file_path = download_root.join(base_name);
-                    if file_path.exists() && file_path.is_file() {
-                        if let Err(e) = std::fs::remove_file(&file_path) {
-                            log::error!("Failed to delete file {}: {}", file_path.display(), e);
-                        } else {
-                            log::info!("Deleted file: {}", file_path.display());
-                        }
-                    }
-
-                    let dir_path = download_root.join(base_name);
-                    if dir_path.exists() && dir_path.is_dir() {
-                        if let Err(e) = std::fs::remove_dir_all(&dir_path) {
-                            log::error!("Failed to delete directory {}: {}", dir_path.display(), e);
-                        } else {
-                            log::info!("Deleted directory: {}", dir_path.display());
-                        }
-                    }
-
-                    let metadata_file = state.metadata_path.join(hash);
-                    if let Err(e) = std::fs::remove_file(&metadata_file) {
-                        log::error!(
-                            "Failed to delete metadata file {}: {}",
-                            metadata_file.display(),
-                            e
-                        );
-                    } else {
-                        log::info!("Deleted metadata file: {}", metadata_file.display());
-                    }
-
-                    state.items.remove(idx);
-
-                    if state.items.is_empty() {
-                        state.should_quit = true;
-                        return Ok(());
-                    }
-
-                    if state.selected_index >= state.items.len() {
-                        state.selected_index = state.items.len().saturating_sub(1);
-                    }
-
-                    state.delete_pending = false;
-                    state.pending_delete_index = None;
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    state.delete_pending = false;
-                    state.pending_delete_index = None;
-                }
-                _ => {}
-            }
-        } else {
-            if state.items.is_empty() {
-                if let KeyCode::Char('q') = key.code {
-                    state.should_quit = true
-                }
-                return Ok(());
-            }
-            match key.code {
-                KeyCode::Up if state.selected_index > 0 => {
-                    state.selected_index -= 1;
-                }
-                KeyCode::Down if state.selected_index + 1 < state.items.len() => {
-                    state.selected_index += 1;
-                }
-                KeyCode::Enter => {
-                    let (hash, _) = state.items[state.selected_index].clone();
-                    state.selected_hash = Some(hash);
-                    state.should_quit = true;
-                }
-                KeyCode::Char('d') | KeyCode::Char('D') => {
-                    state.delete_pending = true;
-                    state.pending_delete_index = Some(state.selected_index);
-                }
-                KeyCode::Char('q') => {
-                    state.should_quit = true;
-                }
-                _ => {}
-            }
-        }
+        Paragraph::new(help_text)
+            .block(Block::bordered())
+            .alignment(Alignment::Center)
+            .render(help_area, buf);
     }
-    Ok(())
 }
