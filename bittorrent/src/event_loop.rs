@@ -45,18 +45,11 @@ const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
 // Expected causes:
 //   * the linked-timeout half of a Recv/Connect + LinkTimeout pair (both share
 //     user_data), so the second CQE lands after the first removed the event;
-//   * a trailing CQE from a cancelled multishot recv.
+//   * a trailing CQE from a cancelled multishot recv. (ECANCELED)
 //
-// The linked-timeout half normally completes with ECANCELED (kernel path
-// `io_disarm_next`, both the pre-arm REQ_F_ARM_LTIMEOUT and post-arm
-// REQ_F_LINK_TIMEOUT branches use ECANCELED). ENOENT is the race where the
-// timer fires *and* the target completes at nearly the same instant: after
-// `io_link_timeout_fn` captures the target under the timeout lock, but before
-// `io_req_task_link_timeout` runs, the target is reaped. `io_try_cancel` then
-// returns -ENOENT and that becomes the linked-timeout CQE result via
-// `io_req_set_res(req, ret ?: -ETIME, 0)`. Reported as an undocumented return
-// value in liburing#1208 (https://github.com/axboe/liburing/issues/1208);
-// kernel source: io_uring/timeout.c io_req_task_link_timeout.
+// The linked-timeout half normally completes with ECANCELED but 
+// may return  ENOENT in the race where the timer fires *and* the target completes
+// at nearly the same instant.
 fn is_expected_orphan_error(err: u32) -> bool {
     matches!(err as i32, ECANCELED | ENOENT)
 }
@@ -595,11 +588,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                     } else {
                         let err = io_event.result.unwrap_err();
                         // The event was already removed by an earlier CQE in this batch.
-                        // Legitimate causes (see `is_expected_orphan_error`):
-                        //  - the linked-timeout half of an IO_LINK'd Recv/Connect
-                        //    (both share user_data),
-                        //  - a trailing CQE from a multishot op (recv_multi) after we
-                        //    cancelled it and closed the socket.
                         assert!(
                             is_expected_orphan_error(err),
                             "unexpected orphan CQE errno {err} for event id {:?}",
