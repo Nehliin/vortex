@@ -90,7 +90,7 @@ const fn build_peer_id_prefix(major: &'static str, minor: &'static str) -> [u8; 
     let major_bytes = major.as_bytes();
     let minor_bytes = minor.as_bytes();
 
-    let mut prefix = [b'-', b'V', b'T', b'0', b'0', b'0', b'0', b'-'];
+    let mut prefix = *b"-VT0000-";
 
     // Parse major version (supports 0-99)
     match major_bytes.len() {
