@@ -1,0 +1,12 @@
+[toolchain]
+channel = "stable"
+components = [
+  "rustfmt",
+  "clippy",
+  "rust-src", # needed by rust-analyzer and many tools (replaces deprecated rust-analysis)
+  "llvm-tools", # renamed from llvm-tools-preview
+]
+# io-uring is Linux-only; keep targets restricted to Linux.
+targets = [
+  "x86_64-unknown-linux-gnu",
+]
