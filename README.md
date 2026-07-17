@@ -166,10 +166,12 @@ See the [basic_download integration test](https://github.com/Nehliin/vortex/blob
 
 ## AI policy
 
-As you may have noticed I have a `CLAUDE.md` file in the repo and I frequently use LLM myself for bouncing ideas, doing boring work like updating or writing tests and help with some UI code in `vortex-cli`. The core implementation of `vortex-bittorrent` is hand written and thouroughly reviewed. To get across acceptable LLM usage in this repo, I've copied over the policy `cargo-nextest` uses, which I thought was great:
+As you may have noticed I have a `CLAUDE.md` file in the repo and I frequently use LLM myself for bouncing ideas, doing boring work like updating or writing tests and help with some UI code in `vortex-cli`. The core implementation of `vortex-bittorrent` is hand written and thouroughly reviewed. To get across acceptable LLM usage in this repo, I've forked the policy `cargo-nextest` uses, which I thought was great:
 
 LLMs represent a tremendous breakthrough in software engineering. I welcome LLM-assisted contributions that abide by the following principles:
 
+- **State explicitly when using AI**. You can do this either via commit attribution or a small comment in your PR.
+- **All documentation must at least be edited by hand**. You may use AI to help with drafting but AI docs contains way to much fluff and usually have a very low signal to noise ratio. Please edit before submitting and consider writing the docs by hand instead.
 - **Aim for excellence**. For the vortex project, LLMs should be used not as a speed multiplier but a quality multiplier. Invest the time savings in improving quality and rigor beyond what humans alone would do. Write tests that cover more edge cases. Refactor code to make it easier to understand. Tackle the TODOs. Do all the tedious things. Aim for your code to have zero bugs.
 - **Spend time reviewing LLM output**. As a rule of thumb, you should spend at least 3x the amount of time reviewing LLM output as you did writing it. Think about every line and every design decision. Find ways to break code.
 - **Your code is your responsibility**. Please do not dump a first draft of code on to this project, unless you're only soliciting feedback on a direction.
