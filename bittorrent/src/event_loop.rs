@@ -47,11 +47,20 @@ const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
 //     user_data), so the second CQE lands after the first removed the event;
 //   * a trailing CQE from a cancelled multishot recv. (ECANCELED)
 //
-// The linked-timeout half normally completes with ECANCELED but
-// may return  ENOENT in the race where the timer fires *and* the target completes
-// at nearly the same instant.
+// The linked-timeout half normally completes with ECANCELED but may return ENOENT
+// in the race where the timer fires *and* the target completes at nearly the same
+// instant (observed when tearing down connections via AsyncCancel(fd).all()).
 fn is_expected_orphan_error(err: u32) -> bool {
     matches!(err as i32, ECANCELED | ENOENT)
+}
+
+// Whether the configured connection limit has been reached, i.e. no further
+// connection may be established. Both incoming (accepted) and outgoing
+// connections are gated by this so that `max_connections` is respected
+// regardless of direction. `active` counts fully established connections and
+// `pending` counts outgoing connections still awaiting a handshake.
+fn connection_limit_reached(active: usize, pending: usize, max_connections: usize) -> bool {
+    active + pending >= max_connections
 }
 
 #[derive(Debug)]
@@ -588,6 +597,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                     } else {
                         let err = io_event.result.unwrap_err();
                         // The event was already removed by an earlier CQE in this batch.
+                        // Legitimate causes (see `is_expected_orphan_error`):
+                        //  - the linked-timeout half of an IO_LINK'd Recv/Connect
+                        //    (both share user_data),
+                        //  - a trailing CQE from a multishot op (recv_multi) after we
+                        //    cancelled it and closed the socket.
                         assert!(
                             is_expected_orphan_error(err),
                             "unexpected orphan CQE errno {err} for event id {:?}",
@@ -758,9 +772,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                         {
                             continue;
                         }
-                        if self.pending_connections.len() + self.connections.len()
-                            < state_ref.config.max_connections
-                        {
+                        if !connection_limit_reached(
+                            self.connections.len(),
+                            self.pending_connections.len(),
+                            state_ref.config.max_connections,
+                        ) {
                             self.pending_connections.insert(addr.clone());
                             self.connect_to_peer(addr, sq);
                         }
@@ -932,6 +948,23 @@ impl<'scope, 'state: 'scope> EventLoop {
                     io_utils::close_socket(sq, socket, None, &mut self.events);
                     return Ok(());
                 };
+
+                // Enforce the connection limit on incoming connections. Outgoing
+                // connections are gated in `handle_commands`, but accepted ones
+                // would otherwise bypass `max_connections` entirely.
+                if connection_limit_reached(
+                    self.connections.len(),
+                    self.pending_connections.len(),
+                    state.config.max_connections,
+                ) {
+                    log::info!(
+                        "Rejecting incoming connection from {:?}, max_connections ({}) reached",
+                        addr.as_socket().expect("must be AF_INET"),
+                        state.config.max_connections
+                    );
+                    io_utils::close_socket(sq, socket, None, &mut self.events);
+                    return Ok(());
+                }
 
                 log::info!(
                     "Accepted connection: {:?}",
@@ -1485,6 +1518,54 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn orphan_cqe_accepts_ecanceled_enoent() {
+        assert!(is_expected_orphan_error(libc::ECANCELED as u32));
+
+        // Regression: linked-timeout half of a cancelled Recv/Connect chain can
+        // surface as ENOENT instead of ECANCELED on some kernel paths.
+        assert!(is_expected_orphan_error(libc::ENOENT as u32));
+    }
+
+    #[test]
+    fn orphan_cqe_rejects_other_errnos() {
+        for errno in [
+            libc::EFAULT,
+            libc::EINVAL,
+            libc::ECONNRESET,
+            libc::EPIPE,
+            libc::ETIME,
+            libc::ENOBUFS,
+            libc::EHOSTUNREACH,
+            libc::ECONNREFUSED,
+        ] {
+            assert!(
+                !is_expected_orphan_error(errno as u32),
+                "errno {errno} must not be accepted as an orphan CQE cause",
+            );
+        }
+    }
+
+    #[test]
+    fn connection_limit_gate() {
+        // Below the limit: connections may still be established.
+        assert!(!connection_limit_reached(0, 0, 128));
+        assert!(!connection_limit_reached(64, 63, 128));
+
+        // Exactly at the limit: no further connections allowed. This is the
+        // case that previously let incoming connections slip through since the
+        // accept handler performed no check at all.
+        assert!(connection_limit_reached(128, 0, 128));
+        assert!(connection_limit_reached(64, 64, 128));
+        assert!(connection_limit_reached(0, 128, 128));
+
+        // Above the limit (e.g. after a burst of accepts) stays closed.
+        assert!(connection_limit_reached(129, 0, 128));
+
+        // A limit of zero rejects everything, in either direction.
+        assert!(connection_limit_reached(0, 0, 0));
+    }
+
+    #[test]
     #[cfg(feature = "metrics")]
     fn handshake_timeout() {
         env_logger::builder()
@@ -1679,6 +1760,107 @@ mod tests {
                 assert_eq!(*num_success, 1);
             } else {
                 panic!("Expected peer_handshake_success metric to be recorded");
+            }
+        });
+    }
+
+    // An incoming connection must be rejected once `max_connections` is reached
+    // instead of bypassing the limit like it previously did.
+    #[test]
+    #[cfg(feature = "metrics")]
+    fn incoming_connection_respects_max_connections() {
+        let debbuging = DebuggingRecorder::new();
+        let snapshotter = debbuging.snapshotter();
+
+        let (command_tx, command_rc) = std::sync::mpsc::sync_channel(64);
+        let mut event_q = Queue::<TorrentEvent, 512>::new();
+        let (event_tx, mut event_rx) = event_q.split();
+
+        let (info_hash_tx, info_hash_rx) = std::sync::mpsc::channel();
+        let our_id = PeerId::generate();
+
+        std::thread::scope(|s| {
+            let event_loop_thread = s.spawn(move || {
+                let mut download_state = setup_test();
+                // No connections are allowed at all, so every incoming
+                // connection must be rejected by the accept handler.
+                download_state.config.max_connections = 0;
+                let info_hash = download_state.info_hash;
+                info_hash_tx.send(info_hash).unwrap();
+
+                metrics::with_local_recorder(&debbuging, || {
+                    let config = download_state.config;
+                    let mut event_loop =
+                        EventLoop::new(our_id, SlotMap::<EventId, EventData>::with_key(), &config);
+                    let ring = IoUring::builder()
+                        .setup_single_issuer()
+                        .setup_clamp()
+                        .setup_cqsize(config.cq_size)
+                        .setup_defer_taskrun()
+                        .setup_coop_taskrun()
+                        .build(config.sq_size)
+                        .unwrap();
+
+                    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let result =
+                        event_loop.run(ring, &mut download_state, event_tx, command_rc, listener);
+                    assert!(result.is_ok());
+                })
+            });
+
+            let info_hash = info_hash_rx.recv().unwrap();
+
+            // Wait for the listener to report its port
+            let listener_port = loop {
+                if let Some(TorrentEvent::Running { port }) = event_rx.dequeue() {
+                    break port;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+
+            let simulated_peer_thread = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                use std::net::TcpStream;
+
+                let mut stream =
+                    TcpStream::connect(format!("127.0.0.1:{}", listener_port)).unwrap();
+
+                let mut handshake = Vec::with_capacity(HANDSHAKE_SIZE);
+                let peer_id = PeerId::generate();
+                write_handshake(peer_id, info_hash, &mut handshake);
+                // The write may still succeed since the socket is accepted at
+                // the kernel level before we reject it.
+                let _ = stream.write_all(&handshake);
+
+                // We must not get a handshake back; the connection is closed
+                // by us so the read completes with EOF (0 bytes).
+                let mut response = vec![0u8; HANDSHAKE_SIZE];
+                let read_result = stream.read_exact(&mut response);
+                assert!(
+                    read_result.is_err(),
+                    "peer should not receive a handshake when max_connections is reached"
+                );
+            });
+
+            std::thread::sleep(Duration::from_secs(1));
+            command_tx.send(Command::Stop).unwrap();
+            simulated_peer_thread.join().unwrap();
+            event_loop_thread.join().unwrap();
+
+            let snapshot = snapshotter.snapshot();
+            #[allow(clippy::mutable_key_type)]
+            let metrics = snapshot.into_hashmap();
+
+            // No successful handshake must have been recorded.
+            let val = metrics.get(&CompositeKey::new(
+                MetricKind::Counter,
+                Key::from_name("peer_handshake_success"),
+            ));
+            if let Some((_, _, DebugValue::Counter(num_success))) = val {
+                assert_eq!(
+                    *num_success, 0,
+                    "no handshake should succeed when the connection limit is reached"
+                );
             }
         });
     }
