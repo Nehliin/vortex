@@ -6,6 +6,7 @@ mod io_utils;
 mod peer_comm;
 mod piece_selector;
 mod torrent;
+mod connection_manager;
 
 use peer_comm::*;
 

@@ -23,22 +23,15 @@ use slotmap::{Key, KeyData, SlotMap, new_key_type};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
-    buf_pool::{Buffer, BufferPool},
-    buf_ring::{Bgid, BufferRing},
-    file_store::DiskOp,
-    io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
-    peer_comm::{
+    buf_pool::{Buffer, BufferPool}, buf_ring::{Bgid, BufferRing}, connection_manager::ConnectionId, file_store::DiskOp, io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue}, peer_comm::{
         extended_protocol::extension_handshake_msg,
         peer_connection::{ConnectionState, DisconnectReason, PeerConnection},
         peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
-    },
-    piece_selector::{self, SUBPIECE_SIZE},
-    torrent::{
+    }, piece_selector::{self, SUBPIECE_SIZE}, torrent::{
         CQE_WAIT_TIME_NS, Command, Config, Error, PeerMetrics, State, StateRef, TorrentEvent,
-    },
+    }
 };
 
-const CONNECT_TIMEOUT: Timespec = Timespec::new().sec(10);
 const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
 
 // A CQE is "orphan" when its event id has already been removed from `events`.
@@ -109,9 +102,6 @@ new_key_type! {
     pub struct EventId;
 }
 
-new_key_type! {
-    pub struct ConnectionId;
-}
 
 #[derive(Debug)]
 pub struct EventData {
@@ -912,6 +902,15 @@ impl<'scope, 'state: 'scope> EventLoop {
         };
         let mut event = EventType::Dummy;
         std::mem::swap(&mut event, &mut self.events[io_event.event_data_idx].typ);
+        // create new module connector/connections
+        // it should take ownership of pending_connections + connections
+        // it should live inside of the State struct (which makes sense)
+        // track pending connections as well as max connections
+        // and Existing connections
+        // Use this for both incoming and outgoing
+        // might make sense with state machine for "preconnection state" Pending
+        // Accepted and Handshaking
+        // Provide this new construct to the StateRef
         match event {
             EventType::Accept => {
                 // The event is reused and not replaced

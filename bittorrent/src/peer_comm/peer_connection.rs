@@ -14,15 +14,10 @@ use slotmap::SlotMap;
 use socket2::Socket;
 
 use crate::{
-    event_loop::{ConnectionId, EventData, EventId},
-    file_store::{DiskOp, DiskOpType},
-    io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
-    peer_comm::{
+    connection_manager::ConnectionId, event_loop::{ConnectionId, EventData, EventId}, file_store::{DiskOp, DiskOpType}, io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue}, peer_comm::{
         extended_protocol::{EXTENSIONS, MetadataProgress, UPLOAD_ONLY, init_extension},
         peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
-    },
-    piece_selector::{DownloadedPiece, SUBPIECE_SIZE, Subpiece},
-    torrent::{InitializedState, PeerMetrics, StateRef},
+    }, piece_selector::{DownloadedPiece, SUBPIECE_SIZE, Subpiece}, torrent::{InitializedState, PeerMetrics, StateRef}
 };
 
 use super::{extended_protocol::ExtensionProtocol, peer_protocol::ParsedHandshake};
