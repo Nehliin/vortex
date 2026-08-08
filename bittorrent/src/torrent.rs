@@ -140,21 +140,24 @@ impl Torrent {
     /// This is expected to run in a separate thread and interaction with
     /// the event loop happens via the mpsc command queue. Torrent events will be sent to the
     /// consumer of the `event_tx` spsc channel.
+    ///
+    /// Returns [`Error::Io`] if the io_uring instance could not be created.
+    /// Ring memory counts against `RLIMIT_MEMLOCK`, a budget shared by all of
+    /// the user's processes, so a client running one ring per torrent can
+    /// exhaust it and fail here while the system still has free memory.
     pub fn start(
         &mut self,
         event_tx: Producer<TorrentEvent>,
         command_rc: Receiver<Command>,
         listener: TcpListener,
     ) -> Result<(), Error> {
-        // check ulimit
         let ring: IoUring = IoUring::builder()
             .setup_single_issuer()
             .setup_clamp()
             .setup_cqsize(self.state.config.cq_size)
             .setup_defer_taskrun()
             .setup_coop_taskrun()
-            .build(self.state.config.sq_size)
-            .unwrap();
+            .build(self.state.config.sq_size)?;
         let events = SlotMap::with_capacity_and_key(self.state.config.cq_size as usize);
         let mut event_loop = EventLoop::new(self.our_id, events, &self.state.config);
         event_loop.run(ring, &mut self.state, event_tx, command_rc, listener)
