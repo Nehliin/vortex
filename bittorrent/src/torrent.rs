@@ -10,7 +10,8 @@ use std::{
 
 use crate::{
     buf_pool::{Buffer, BufferPool},
-    event_loop::{ConnectionId, EventLoop},
+    connection_manager::{ConnectionId, ConnectionManager},
+    event_loop::EventLoop,
     file_store::DiskOpType,
     peer_comm::{extended_protocol::MetadataProgress, peer_protocol::PeerId},
 };
@@ -111,15 +112,14 @@ impl Default for Config {
 /// and our peer id. This object is responsible for starting
 /// the I/O event loop.
 pub struct Torrent {
-    our_id: PeerId,
     state: State,
 }
 
 impl Torrent {
-    /// Create a new torrent from the given state. Use the given peer id
-    /// when communicating with other peers.
-    pub fn new(our_id: PeerId, state: State) -> Self {
-        Self { our_id, state }
+    /// Create a new torrent from the given state. The peer id the state was
+    /// constructed with is used when communicating with other peers.
+    pub fn new(state: State) -> Self {
+        Self { state }
     }
 
     /// Returns if the torrent is completed or not.
@@ -158,7 +158,7 @@ impl Torrent {
             .setup_defer_taskrun()
             .setup_coop_taskrun()
             .build(self.state.config.sq_size)?;
-        let mut event_loop = EventLoop::new(self.our_id, &self.state.config);
+        let mut event_loop = EventLoop::new();
         event_loop.run(ring, &mut self.state, event_tx, command_rc, listener)
     }
 }
@@ -650,6 +650,15 @@ pub struct State {
     pub(crate) listener_port: Option<u16>,
     // TODO: Consider checking this is accessible at construction
     root: PathBuf,
+    // Tracks every known peer address (incoming and outgoing) for
+    // de-duplication and the max-connection cap.
+    connection_manager: ConnectionManager,
+    // Fully established peer connections (handshake completed). Kept separate
+    // from `connection_manager` so the two can be borrowed disjointly: peer
+    // connections are always looked up here first, with `connection_manager`
+    // (reachable through `StateRef`) borrowed alongside for the rest of the work.
+    established: SlotMap<ConnectionId, PeerConnection>,
+    our_id: PeerId,
     torrent_state: Option<InitializedState>,
     file: OnceCell<Box<TorrentMetadata>>,
     pub(crate) config: Config,
@@ -661,14 +670,22 @@ impl State {
         self.info_hash
     }
 
+    /// The peer id we identify ourselves with towards other peers
+    pub fn our_id(&self) -> PeerId {
+        self.our_id
+    }
+
     /// Use this constructor if the torrent is unstarted.
     /// `info_hash` is the info hash of the torrent that should be downloaded.
     /// `root` is the directory where the torrent will be downloaded into.
     /// Vortex will create this directory if it doesn't already exist.
     /// `config` is the vortex config that should be used
-    pub fn unstarted(info_hash: [u8; 20], root: PathBuf, config: Config) -> Self {
+    pub fn unstarted(our_id: PeerId, info_hash: [u8; 20], root: PathBuf, config: Config) -> Self {
         Self {
             info_hash,
+            our_id,
+            connection_manager: ConnectionManager::new(our_id, config.max_connections),
+            established: SlotMap::with_capacity_and_key(config.max_connections),
             root,
             listener_port: None,
             torrent_state: None,
@@ -713,6 +730,7 @@ impl State {
     /// NOTE: This will go through all files in `root` and hash their pieces (in parallel) to determine torrent progress
     /// which may be slow on large torrents.
     pub fn from_metadata_and_root(
+        our_id: PeerId,
         metadata: TorrentMetadata,
         root: PathBuf,
         config: Config,
@@ -750,6 +768,9 @@ impl State {
                 .try_into()
                 .expect("Invalid info hash"),
             root,
+            our_id,
+            connection_manager: ConnectionManager::new(our_id, config.max_connections),
+            established: SlotMap::with_capacity_and_key(config.max_connections),
             listener_port: None,
             torrent_state: Some(initialized_state),
             file: OnceCell::from(Box::new(metadata)),
@@ -759,6 +780,7 @@ impl State {
 
     #[cfg(test)]
     pub fn inprogress(
+        our_id: PeerId,
         info_hash: [u8; 20],
         root: PathBuf,
         metadata: lava_torrent::torrent::v1::Torrent,
@@ -767,23 +789,40 @@ impl State {
     ) -> Self {
         Self {
             info_hash,
+            our_id,
             root,
             listener_port: None,
             torrent_state: Some(state),
+            connection_manager: ConnectionManager::new(our_id, config.max_connections),
+            established: SlotMap::with_capacity_and_key(config.max_connections),
             file: OnceCell::from(Box::new(metadata)),
             config,
         }
     }
 
     pub fn as_ref(&mut self) -> StateRef<'_> {
-        StateRef {
-            info_hash: self.info_hash,
-            root: &self.root,
-            listener_port: &self.listener_port,
-            torrent: &mut self.torrent_state,
-            full: &self.file,
-            config: &self.config,
-        }
+        self.split_established_mut().1
+    }
+
+    /// Splits off the established connections from the rest of the state. The two
+    /// are borrowed disjointly throughout the event loop: a specific connection is
+    /// always looked up in `established` first, with the rest of the state
+    /// (including the connection manager) borrowed alongside for the remaining work.
+    pub(crate) fn split_established_mut(
+        &mut self,
+    ) -> (&mut SlotMap<ConnectionId, PeerConnection>, StateRef<'_>) {
+        (
+            &mut self.established,
+            StateRef {
+                info_hash: self.info_hash,
+                root: &self.root,
+                listener_port: &self.listener_port,
+                torrent: &mut self.torrent_state,
+                full: &self.file,
+                config: &self.config,
+                connection_manager: &mut self.connection_manager,
+            },
+        )
     }
 }
 
@@ -795,6 +834,7 @@ pub struct StateRef<'state> {
     torrent: &'state mut Option<InitializedState>,
     full: &'state OnceCell<Box<TorrentMetadata>>,
     pub config: &'state Config,
+    pub(crate) connection_manager: &'state mut ConnectionManager,
 }
 
 impl<'e_iter, 'state: 'e_iter> StateRef<'state> {

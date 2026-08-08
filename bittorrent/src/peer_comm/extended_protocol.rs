@@ -92,7 +92,7 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef, config: &Config) -> Pee
     }
 }
 
-pub trait ExtensionProtocol {
+pub trait ExtensionProtocol: Send {
     fn handle_message<'state>(
         &mut self,
         data: Bytes,

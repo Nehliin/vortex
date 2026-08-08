@@ -72,6 +72,7 @@ impl<'a> arbitrary::Arbitrary<'a> for PeerMessage {
 
 pub const HANDSHAKE_SIZE: usize = 68;
 
+// todo move
 pub fn write_handshake(our_peer_id: PeerId, info_hash: [u8; 20], buffer: &mut impl BufMut) {
     const PROTOCOL: &[u8] = b"BitTorrent protocol";
     buffer.put_u8(PROTOCOL.len() as u8);

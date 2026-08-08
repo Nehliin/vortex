@@ -13,7 +13,7 @@ use sha1::Digest;
 use socket2::Socket;
 
 use crate::{
-    event_loop::ConnectionId,
+    connection_manager::ConnectionId,
     file_store::{DiskOp, DiskOpType},
     io::{Io, SubmissionQueue},
     peer_comm::{

@@ -10,7 +10,8 @@ use serde::Deserialize;
 use slotmap::SlotMap;
 
 use crate::{
-    event_loop::{ConnectionId, tick},
+    connection_manager::ConnectionId,
+    event_loop::tick,
     file_store::{DiskOp, DiskOpType},
     io::{BackloggedSubmissionQueue, Io, SubmissionQueue},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
@@ -453,7 +454,6 @@ fn slow_start() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -515,7 +515,6 @@ fn slow_start() {
         tick(
             &Duration::from_millis(1500),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -567,7 +566,6 @@ fn slow_start() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -619,7 +617,6 @@ fn slow_start() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -687,7 +684,6 @@ fn desired_queue_size() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -698,7 +694,6 @@ fn desired_queue_size() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -800,7 +795,6 @@ fn peer_choke_recv_supports_fast() {
         tick(
             &Duration::from_millis(650),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -925,7 +919,6 @@ fn peer_choke_recv_does_not_support_fast() {
         tick(
             &Duration::from_millis(650),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -1747,7 +1740,6 @@ fn snubbed_peer() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -1792,7 +1784,6 @@ fn snubbed_peer() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -1879,7 +1870,6 @@ fn choked_peer_with_empty_inflight_is_not_snubbed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -1974,7 +1964,6 @@ fn fast_ext_peer_rejecting_while_choked_is_not_snubbed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -2036,7 +2025,6 @@ fn stalled_connection_is_snubbed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -3195,7 +3183,6 @@ fn updates_upload_throughput() {
         tick(
             &Duration::from_millis(1500),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -4534,7 +4521,6 @@ fn keepalive_not_sent_before_100s_elapsed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -4551,7 +4537,6 @@ fn keepalive_not_sent_before_100s_elapsed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -4582,7 +4567,6 @@ fn keepalive_sent_after_100s_elapsed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -4599,7 +4583,6 @@ fn keepalive_sent_after_100s_elapsed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );

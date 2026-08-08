@@ -17,7 +17,8 @@ use socket2::{SockAddr, Socket};
 use crate::{
     buf_pool::{Buffer, BufferPool},
     buf_ring::BufferRing,
-    event_loop::{ConnectionId, EventData, EventId, EventType},
+    connection_manager::ConnectionId,
+    event_loop::{EventData, EventId, EventType},
     file_store::{DiskOp, DiskOpType},
     torrent::Config,
 };
