@@ -10,9 +10,9 @@ use serde::Deserialize;
 use slotmap::SlotMap;
 
 use crate::{
-    event_loop::{ConnectionId, EventData, EventId, tick},
+    event_loop::{ConnectionId, tick},
     file_store::{DiskOp, DiskOpType},
-    io_utils::{BackloggedSubmissionQueue, SubmissionQueue},
+    io_utils::{BackloggedSubmissionQueue, Io, SubmissionQueue},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
     piece_selector::{SUBPIECE_SIZE, Subpiece},
     test_utils::{
@@ -3811,10 +3811,12 @@ fn optimistically_unchoked_disconnect_resets_timer() {
             assert!(torrent_state.ticks_to_recalc_optimistic_unchoke > 0);
         }
 
-        let mut sq = BackloggedSubmissionQueue::new(MockSubmissionQueue);
-        let mut events = SlotMap::<EventId, EventData>::with_key();
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
 
-        connections[key].disconnect(&mut sq, &mut events, &mut state_ref);
+        connections[key].disconnect(&mut io, &mut state_ref);
 
         {
             let torrent_state = state_ref.state().unwrap();
