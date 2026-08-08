@@ -158,8 +158,7 @@ impl Torrent {
             .setup_defer_taskrun()
             .setup_coop_taskrun()
             .build(self.state.config.sq_size)?;
-        let events = SlotMap::with_capacity_and_key(self.state.config.cq_size as usize);
-        let mut event_loop = EventLoop::new(self.our_id, events, &self.state.config);
+        let mut event_loop = EventLoop::new(self.our_id, &self.state.config);
         event_loop.run(ring, &mut self.state, event_tx, command_rc, listener)
     }
 }
