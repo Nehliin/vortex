@@ -2,7 +2,7 @@ mod buf_pool;
 mod buf_ring;
 mod event_loop;
 mod file_store;
-mod io_utils;
+mod io;
 mod peer_comm;
 mod piece_selector;
 mod torrent;

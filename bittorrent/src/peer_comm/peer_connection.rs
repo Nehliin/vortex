@@ -10,13 +10,12 @@ use bytes::Bytes;
 use rayon::Scope;
 use serde::Deserialize;
 use sha1::Digest;
-use slotmap::SlotMap;
 use socket2::Socket;
 
 use crate::{
-    event_loop::{ConnectionId, EventData, EventId},
+    event_loop::ConnectionId,
     file_store::{DiskOp, DiskOpType},
-    io_utils::{self, BackloggedSubmissionQueue, SubmissionQueue},
+    io::{Io, SubmissionQueue},
     peer_comm::{
         extended_protocol::{EXTENSIONS, MetadataProgress, UPLOAD_ONLY, init_extension},
         peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
@@ -308,14 +307,13 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
 
     pub fn disconnect<Q: SubmissionQueue>(
         &mut self,
-        sq: &mut BackloggedSubmissionQueue<Q>,
-        events: &mut SlotMap<EventId, EventData>,
+        io: &mut Io<Q>,
         state_ref: &mut StateRef<'f_store>,
     ) {
         let socket = std::mem::replace(&mut self.connection_state, ConnectionState::Disconnecting);
         match socket {
             ConnectionState::Connected(socket) => {
-                io_utils::close_socket(sq, socket, Some(self.conn_id), events);
+                io.close_socket(socket, Some(self.conn_id));
             }
             ConnectionState::Disconnecting => {
                 // Should not disconnect twice but I could see it happening if an earlier
