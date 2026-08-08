@@ -25,7 +25,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use crate::{
     buf_pool::Buffer,
     file_store::DiskOp,
-    io_utils::{BackloggedSubmissionQueue, Io, SubmissionQueue},
+    io::{BackloggedSubmissionQueue, Io, SubmissionQueue},
     peer_comm::{
         extended_protocol::extension_handshake_msg,
         peer_connection::{ConnectionState, DisconnectReason, PeerConnection},

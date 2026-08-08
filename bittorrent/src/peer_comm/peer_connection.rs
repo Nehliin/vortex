@@ -15,7 +15,7 @@ use socket2::Socket;
 use crate::{
     event_loop::ConnectionId,
     file_store::{DiskOp, DiskOpType},
-    io_utils::{Io, SubmissionQueue},
+    io::{Io, SubmissionQueue},
     peer_comm::{
         extended_protocol::{EXTENSIONS, MetadataProgress, UPLOAD_ONLY, init_extension},
         peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
