@@ -12,7 +12,7 @@ use slotmap::SlotMap;
 use crate::{
     event_loop::{ConnectionId, tick},
     file_store::{DiskOp, DiskOpType},
-    io_utils::{BackloggedSubmissionQueue, Io, SubmissionQueue},
+    io::{BackloggedSubmissionQueue, Io, SubmissionQueue},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
     piece_selector::{SUBPIECE_SIZE, Subpiece},
     test_utils::{
