@@ -487,12 +487,18 @@ impl ConnectionManager {
             .any(|state| matches!(state, ConnectionState::Established(_)))
     }
 
+    #[cfg(feature = "metrics")]
     /// Number of established connections
     pub(crate) fn num_established(&self) -> usize {
         self.connections
             .values()
             .filter(|state| matches!(state, ConnectionState::Established(_)))
             .count()
+    }
+
+    /// Counts all connections, regardless of state
+    pub(crate) fn total_connections(&self) -> usize {
+        self.connections.len()
     }
 
     /// Number of connections still in the connect/handshake phase

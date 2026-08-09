@@ -494,7 +494,7 @@ impl InitializedState {
             last_unchoked: Option<Instant>,
         }
         log::info!("Recalculating unchokes");
-        let mut peers = Vec::with_capacity(connections.num_established());
+        let mut peers = Vec::with_capacity(connections.total_connections());
         for (id, peer) in connections.iter_established_mut() {
             if !peer.peer_interested || peer.pending_disconnect.is_some() {
                 peer.network_stats.reset_round();

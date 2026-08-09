@@ -1094,7 +1094,7 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
         connection.network_stats.download_throughput = 0;
         connection.network_stats.upload_throughput = 0;
     }
-    let mut peer_metrics = Vec::with_capacity(connections.num_established());
+    let mut peer_metrics = Vec::with_capacity(connections.total_connections());
     // Request new pieces and fill up request queues
     let mut peer_bandwidth: Vec<_> = connections
         .iter_established_mut()
