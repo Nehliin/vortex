@@ -164,7 +164,7 @@ impl<Q: SubmissionQueue> Io<Q> {
         let event_idx = self.events.insert(EventData {
             typ: EventType::Connect {
                 connection_idx: conn_id,
-                addr,
+                addr: Box::new(addr),
             },
             buffers: None,
         });
