@@ -14,6 +14,7 @@ use socket2::Socket;
 use socket2::Type;
 
 use crate::PeerId;
+use crate::buf_ring::Bid;
 use crate::event_loop::EventData;
 use crate::event_loop::EventType;
 use crate::event_loop::HANDSHAKE_TIMEOUT;
@@ -267,7 +268,8 @@ impl ConnectionManager {
     pub fn on_read<'scope, 'state: 'scope, Q: SubmissionQueue>(
         &mut self,
         conn_id: ConnectionId,
-        data: &[u8],
+        read_bid: Option<Bid>,
+        len: usize,
         io: &mut Io<Q>,
         state: &mut StateRef<'state>,
         scope: &Scope<'scope>,
@@ -280,6 +282,10 @@ impl ConnectionManager {
             unreachable!("existence checked above");
         };
         let socket_addr = entry.addr();
+        let data: &[u8] = match read_bid {
+            Some(bid) => &io.read_ring.get(bid)[..len],
+            None => &[],
+        };
         if data.is_empty() {
             log::debug!("[{socket_addr}] No more data when expecting handshake from connection");
             self.disconnect(conn_id, io, state);

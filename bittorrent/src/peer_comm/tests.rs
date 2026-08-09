@@ -3982,8 +3982,10 @@ fn completions_for_a_disconnected_pending_connection_are_ignored() {
         // So their completions may arrive afterwards and must be ignored
         connections.on_connect(key, info_hash, &mut io);
         connections.on_write(key, HANDSHAKE_SIZE, HANDSHAKE_SIZE, &mut io, &mut state_ref);
+        // The ring's backing store is zero filled, so bid 0 stands in for a
+        // full sized handshake read arriving after the disconnect
         connections
-            .on_read(key, &[0; HANDSHAKE_SIZE], &mut io, &mut state_ref, scope)
+            .on_read(key, Some(0), HANDSHAKE_SIZE, &mut io, &mut state_ref, scope)
             .unwrap();
 
         // None of which scheduled any further io for the connection

@@ -22,6 +22,7 @@ use socket2::{SockAddr, Socket};
 
 use crate::{
     buf_pool::Buffer,
+    buf_ring::Bid,
     connection_manager::{ConnectionId, ConnectionManager},
     file_store::DiskOp,
     io::{BackloggedSubmissionQueue, Io, SubmissionQueue},
@@ -313,7 +314,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
 struct RawIoEvent {
     event_data_idx: EventId,
     result: Result<i32, u32>,
-    read_bid: Option<u16>,
+    read_bid: Option<Bid>,
     is_more: bool,
 }
 
@@ -698,7 +699,7 @@ impl<'scope, 'state: 'scope> EventLoop {
     }
 
     // Each parameter is a disjointly-borrowed piece of the event loop's
-    // working set (io, connections, torrent state) 
+    // working set (io, connections, torrent state)
     #[allow(clippy::too_many_arguments)]
     fn event_handler<Q: SubmissionQueue>(
         &mut self,
@@ -860,15 +861,14 @@ impl<'scope, 'state: 'scope> EventLoop {
             EventType::Recv { connection_idx } => {
                 let len = ret as usize;
                 io.events.remove(io_event.event_data_idx);
-                // The data is copied out of the buf ring since `on_read` needs
-                // `&mut Io` (which owns the ring) so a borrow can't be passed
-                // along. Handshakes happen once per connection so the copy is
-                // cheap.
-                let data: Vec<u8> = io_event
-                    .read_bid
-                    .map(|bid| io.read_ring.get(bid)[..len].to_vec())
-                    .unwrap_or_default();
-                connection_manager.on_read(connection_idx, &data, io, state, scope)?;
+                connection_manager.on_read(
+                    connection_idx,
+                    io_event.read_bid,
+                    len,
+                    io,
+                    state,
+                    scope,
+                )?;
             }
             EventType::ConnectedRecv { connection_idx } => {
                 // The event is reused and not replaced
