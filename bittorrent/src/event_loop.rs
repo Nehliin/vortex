@@ -153,7 +153,12 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             match rearm {
                 Some((fd, false)) => io.recv(event_data_idx, fd, &HANDSHAKE_TIMEOUT),
                 Some((fd, true)) => io.recv_multishot(event_data_idx, fd),
-                None => {}
+                None => {
+                    // Prevent "leaking" the event since it won't be re-armed and won't be completed
+                    // unclear if we ever end up with a ENOBUFS on a closing connection but I guess
+                    // it might be possible
+                    io.events.remove(event_data_idx).unwrap();
+                }
             }
             Ok(())
         }
