@@ -27,8 +27,8 @@ fn basic_seeded_download() {
             .unwrap();
     let our_id = PeerId::generate();
     let mut torrent = Torrent::new(
-        our_id,
-        State::from_metadata_and_root(metadata, tmp_dir.path().clone(), Config::default()).unwrap(),
+        State::from_metadata_and_root(our_id, metadata, tmp_dir.path().clone(), Config::default())
+            .unwrap(),
     );
 
     assert!(!torrent.is_complete());

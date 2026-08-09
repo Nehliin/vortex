@@ -71,32 +71,35 @@ fn chained_seeding() {
     // Set up seeder state with completed files
     let seeder_id = PeerId::generate();
     let seeder_state = State::from_metadata_and_root(
+        seeder_id,
         metadata.clone(),
         seeder_dir.path().clone(),
         Config::default(),
     )
     .expect("Failed to create seeder state");
-    let mut seeder_torrent = Torrent::new(seeder_id, seeder_state);
+    let mut seeder_torrent = Torrent::new(seeder_state);
 
     // Set up middle peer state (empty)
     let middle_id = PeerId::generate();
     let middle_state = State::from_metadata_and_root(
+        middle_id,
         metadata.clone(),
         middle_dir.path().clone(),
         Config::default(),
     )
     .expect("Failed to create middle state");
-    let mut middle_torrent = Torrent::new(middle_id, middle_state);
+    let mut middle_torrent = Torrent::new(middle_state);
 
     // Set up leecher state (empty)
     let leecher_id = PeerId::generate();
     let leecher_state = State::from_metadata_and_root(
+        leecher_id,
         metadata.clone(),
         leecher_dir.path().clone(),
         Config::default(),
     )
     .expect("Failed to create leecher state");
-    let mut leecher_torrent = Torrent::new(leecher_id, leecher_state);
+    let mut leecher_torrent = Torrent::new(leecher_state);
 
     // Create command channels
     let (seeder_command_tx, seeder_command_rc) = std::sync::mpsc::sync_channel(64);
