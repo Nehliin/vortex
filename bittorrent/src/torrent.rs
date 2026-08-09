@@ -8,9 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::file_store::FileStore;
 use crate::{
     buf_pool::{Buffer, BufferPool},
-    event_loop::{ConnectionId, EventLoop},
+    connection_manager::{ConnectionId, ConnectionManager},
+    event_loop::EventLoop,
     file_store::DiskOpType,
     peer_comm::{extended_protocol::MetadataProgress, peer_protocol::PeerId},
 };
@@ -18,13 +20,11 @@ use crate::{
     file_store::DiskOp,
     piece_selector::{DownloadedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece},
 };
-use crate::{file_store::FileStore, peer_connection::PeerConnection};
 use ahash::HashSetExt;
 use bitvec::{boxed::BitBox, order::Msb0, vec::BitVec};
 use heapless::spsc::Producer;
 use io_uring::IoUring;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
-use slotmap::SlotMap;
 use thiserror::Error;
 
 use crate::peer_connection::DisconnectReason;
@@ -111,15 +111,13 @@ impl Default for Config {
 /// and our peer id. This object is responsible for starting
 /// the I/O event loop.
 pub struct Torrent {
-    our_id: PeerId,
     state: State,
 }
 
 impl Torrent {
-    /// Create a new torrent from the given state. Use the given peer id
-    /// when communicating with other peers.
-    pub fn new(our_id: PeerId, state: State) -> Self {
-        Self { our_id, state }
+    /// Create a new torrent from the given state
+    pub fn new(state: State) -> Self {
+        Self { state }
     }
 
     /// Returns if the torrent is completed or not.
@@ -158,7 +156,7 @@ impl Torrent {
             .setup_defer_taskrun()
             .setup_coop_taskrun()
             .build(self.state.config.sq_size)?;
-        let mut event_loop = EventLoop::new(self.our_id, &self.state.config);
+        let mut event_loop = EventLoop::new();
         event_loop.run(ring, &mut self.state, event_tx, command_rc, listener)
     }
 }
@@ -364,7 +362,7 @@ impl InitializedState {
     pub(crate) fn complete_piece(
         &mut self,
         piece_idx: i32,
-        connections: &mut SlotMap<ConnectionId, PeerConnection>,
+        connections: &mut ConnectionManager,
         event_tx: &mut Producer<'_, TorrentEvent>,
         piece_buffer: Buffer,
     ) {
@@ -378,7 +376,7 @@ impl InitializedState {
             }
             // We are no longer interestead in any of the
             // peers
-            for (_, peer) in connections.iter_mut() {
+            for (_, peer) in connections.iter_established_mut() {
                 peer.not_interested();
                 // If the peer is upload only and
                 // we are upload only there is no reason
@@ -392,7 +390,7 @@ impl InitializedState {
                 }
             }
         }
-        for (conn_id, peer) in connections.iter_mut() {
+        for (conn_id, peer) in connections.iter_established_mut() {
             if let Some(bitfield) = self.piece_selector.interesting_peer_pieces(conn_id)
                 && !bitfield.any()
                 && peer.is_interesting
@@ -487,10 +485,7 @@ impl InitializedState {
     /// Determine the most suited peers to be unchoked based on the selected unchoking strategy.
     /// Some unchoke slots are left for optimistic unchokes. The strategy currently is only
     /// affected if the torrent is completed or not.
-    pub fn recalculate_unchokes(
-        &mut self,
-        connections: &mut SlotMap<ConnectionId, PeerConnection>,
-    ) {
+    pub fn recalculate_unchokes(&mut self, connections: &mut ConnectionManager) {
         struct ComparisonData {
             is_choking: bool,
             uploaded_since_unchoked: u64,
@@ -499,8 +494,8 @@ impl InitializedState {
             last_unchoked: Option<Instant>,
         }
         log::info!("Recalculating unchokes");
-        let mut peers = Vec::with_capacity(connections.len());
-        for (id, peer) in connections.iter_mut() {
+        let mut peers = Vec::with_capacity(connections.num_established());
+        for (id, peer) in connections.iter_established_mut() {
             if !peer.peer_interested || peer.pending_disconnect.is_some() {
                 peer.network_stats.reset_round();
                 if !peer.is_choking {
@@ -596,15 +591,12 @@ impl InitializedState {
 
     // Give some lucky winners unchokes to test if they will have better throughput than the
     // currently unchoked peers
-    pub fn recalculate_optimistic_unchokes(
-        &mut self,
-        connections: &mut SlotMap<ConnectionId, PeerConnection>,
-    ) {
+    pub fn recalculate_optimistic_unchokes(&mut self, connections: &mut ConnectionManager) {
         log::info!("Recalculating optimistic unchokes");
         let num_opt_unchoked = std::cmp::max(1, self.config.max_unchoked / 5) as usize;
         let mut previously_opt_unchoked = ahash::HashSet::with_capacity(num_opt_unchoked);
         let mut candidates = Vec::with_capacity(self.config.max_unchoked as usize);
-        for (id, peer) in connections.iter_mut() {
+        for (id, peer) in connections.iter_established_mut() {
             if peer.optimistically_unchoked {
                 previously_opt_unchoked.insert(id);
             }
@@ -650,6 +642,7 @@ pub struct State {
     pub(crate) listener_port: Option<u16>,
     // TODO: Consider checking this is accessible at construction
     root: PathBuf,
+    our_id: PeerId,
     torrent_state: Option<InitializedState>,
     file: OnceCell<Box<TorrentMetadata>>,
     pub(crate) config: Config,
@@ -661,14 +654,21 @@ impl State {
         self.info_hash
     }
 
+    /// The peer id we identify ourselves with towards other peers
+    pub fn our_id(&self) -> PeerId {
+        self.our_id
+    }
+
     /// Use this constructor if the torrent is unstarted.
     /// `info_hash` is the info hash of the torrent that should be downloaded.
     /// `root` is the directory where the torrent will be downloaded into.
     /// Vortex will create this directory if it doesn't already exist.
     /// `config` is the vortex config that should be used
-    pub fn unstarted(info_hash: [u8; 20], root: PathBuf, config: Config) -> Self {
+    /// `our_id` Is the peer id used when communicating with other peers.
+    pub fn unstarted(our_id: PeerId, info_hash: [u8; 20], root: PathBuf, config: Config) -> Self {
         Self {
             info_hash,
+            our_id,
             root,
             listener_port: None,
             torrent_state: None,
@@ -709,10 +709,12 @@ impl State {
     /// are expected to be found. If the folder doesn't exist vortex will create it.
     ///
     /// `config` is the vortex config that should be used.
+    /// `our_id` Is the peer id used when communicating with other peers.
     ///
     /// NOTE: This will go through all files in `root` and hash their pieces (in parallel) to determine torrent progress
     /// which may be slow on large torrents.
     pub fn from_metadata_and_root(
+        our_id: PeerId,
         metadata: TorrentMetadata,
         root: PathBuf,
         config: Config,
@@ -750,6 +752,7 @@ impl State {
                 .try_into()
                 .expect("Invalid info hash"),
             root,
+            our_id,
             listener_port: None,
             torrent_state: Some(initialized_state),
             file: OnceCell::from(Box::new(metadata)),
@@ -759,6 +762,7 @@ impl State {
 
     #[cfg(test)]
     pub fn inprogress(
+        our_id: PeerId,
         info_hash: [u8; 20],
         root: PathBuf,
         metadata: lava_torrent::torrent::v1::Torrent,
@@ -767,6 +771,7 @@ impl State {
     ) -> Self {
         Self {
             info_hash,
+            our_id,
             root,
             listener_port: None,
             torrent_state: Some(state),
@@ -787,7 +792,6 @@ impl State {
     }
 }
 
-// is this even needed?
 pub struct StateRef<'state> {
     info_hash: [u8; 20],
     root: &'state Path,
