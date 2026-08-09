@@ -3820,6 +3820,204 @@ fn optimistically_unchoked_disconnect_resets_timer() {
         }
     });
 }
+
+// The connection ids of all scheduled but not yet completed socket closes
+fn scheduled_closes(io: &Io<MockSubmissionQueue>) -> Vec<Option<ConnectionId>> {
+    io.events
+        .values()
+        .filter_map(|event| match event.typ {
+            EventType::Close {
+                maybe_connection_idx,
+            } => Some(maybe_connection_idx),
+            _ => None,
+        })
+        .collect()
+}
+
+// The connection ids of all scheduled but not yet completed connects
+fn scheduled_connects(io: &Io<MockSubmissionQueue>) -> Vec<ConnectionId> {
+    io.events
+        .values()
+        .filter_map(|event| match event.typ {
+            EventType::Connect { connection_idx, .. } => Some(connection_idx),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn established_connection_slot_is_kept_until_close_completes() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        assert!(
+            connections
+                .disconnect(key, &mut io, &mut state_ref)
+                .is_some()
+        );
+        assert_eq!(scheduled_closes(&io), vec![Some(key)]);
+        // The slot is kept until the close completes so the socket can't be
+        // closed twice and the peer can't be reconnected to in the meantime
+        assert!(!connections.is_empty());
+
+        // The connection itself is gone though, so completions arriving after the
+        // disconnect can't end up operating on a peer whose socket is closing
+        assert!(connections.established_mut(key).is_none());
+        assert!(!connections.any_established());
+        assert_eq!(connections.num_established(), 0);
+        assert!(connections.fd(key).is_none());
+
+        // Disconnecting again is a no-op, only a single close is ever scheduled
+        assert!(
+            connections
+                .disconnect(key, &mut io, &mut state_ref)
+                .is_none()
+        );
+        assert_eq!(scheduled_closes(&io), vec![Some(key)]);
+
+        connections.remove_closed(key);
+        assert!(connections.is_empty());
+    });
+}
+
+#[test]
+fn only_peers_marked_for_disconnect_are_disconnected() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let marked = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let kept = connections.insert_established_with_key(|k| generate_peer(true, k));
+        connections[marked].pending_disconnect = Some(DisconnectReason::Idle);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        connections.execute_pending_disconnects(&mut io, &mut state_ref);
+
+        assert_eq!(scheduled_closes(&io), vec![Some(marked)]);
+        assert!(connections.established_mut(marked).is_none());
+        assert!(connections.established_mut(kept).is_some());
+        assert_eq!(connections.num_established(), 1);
+    });
+}
+
+#[test]
+fn pending_connection_slot_is_kept_until_close_completes() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let peer_addr: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
+        let [key] = scheduled_connects(&io)[..] else {
+            panic!("the peer should have a connect scheduled");
+        };
+
+        let addr = connections
+            .disconnect(key, &mut io, &mut state_ref)
+            .expect("connecting peer should be disconnected");
+        assert_eq!(addr, SocketAddr::V4(peer_addr));
+        assert_eq!(scheduled_closes(&io), vec![Some(key)]);
+        assert!(!connections.is_empty());
+        // The socket is gone so there is nothing left to rearm a handshake recv on
+        assert!(connections.fd(key).is_none());
+
+        // Reconnects are rejected until the socket has actually been closed
+        connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
+        assert_eq!(scheduled_connects(&io), vec![key]);
+
+        assert!(
+            connections
+                .disconnect(key, &mut io, &mut state_ref)
+                .is_none()
+        );
+        connections.remove_closed(key);
+        assert!(connections.is_empty());
+
+        // ...and allowed again once the slot is freed
+        connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
+        assert_eq!(scheduled_connects(&io).len(), 2);
+    });
+}
+
+#[test]
+fn completions_for_a_disconnected_pending_connection_are_ignored() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let info_hash = *state_ref.info_hash();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let peer_addr: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
+        let [key] = scheduled_connects(&io)[..] else {
+            panic!("the peer should have a connect scheduled");
+        };
+        // Pausing and shutting down tears pending connections down without
+        // waiting for their inflight operations to complete first
+        connections.disconnect_all(&mut io, &mut state_ref);
+
+        // So their completions may arrive afterwards and must be ignored
+        connections.on_connect(key, info_hash, &mut io);
+        connections.on_write(key, HANDSHAKE_SIZE, HANDSHAKE_SIZE, &mut io, &mut state_ref);
+        connections
+            .on_read(key, &[0; HANDSHAKE_SIZE], &mut io, &mut state_ref, scope)
+            .unwrap();
+
+        // None of which scheduled any further io for the connection
+        assert_eq!(scheduled_closes(&io), vec![Some(key)]);
+        assert_eq!(scheduled_connects(&io), vec![key]);
+
+        connections.remove_closed(key);
+        assert!(connections.is_empty());
+    });
+}
+
+#[test]
+fn rejected_incoming_connection_is_closed_without_being_tracked() {
+    let download_state = setup_test();
+    let mut io = Io::new(
+        BackloggedSubmissionQueue::new(MockSubmissionQueue),
+        &torrent::Config::default(),
+    );
+    // A cap of zero rejects every incoming connection
+    let mut connections = ConnectionManager::new(PeerId::generate(), 0);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+
+    connections
+        .on_accepted(accepted.into(), download_state.info_hash, &mut io)
+        .unwrap();
+
+    // The connection never entered the manager so its close carries no id
+    assert!(connections.is_empty());
+    assert_eq!(scheduled_closes(&io), vec![None]);
+}
+
 #[test]
 fn upload_only_field_in_extended_handshake() {
     let mut download_state = setup_test();
