@@ -971,7 +971,7 @@ fn report_tick_metrics(
     #[cfg(feature = "metrics")]
     {
         let gauge = metrics::gauge!("num_connections");
-        gauge.set(_connection_manager.num_connected() as u32);
+        gauge.set(_connection_manager.num_established() as u32);
         let gauge = metrics::gauge!("num_pending_connections");
         gauge.set(_connection_manager.num_pending() as u32);
     }
