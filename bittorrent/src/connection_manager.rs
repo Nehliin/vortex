@@ -175,15 +175,20 @@ impl ConnectionManager {
         Ok(())
     }
 
-    /// True if the connection has been torn down already. Completions for
-    /// unestablished connections may arrive after the they have been removed
-    /// since pausing and shutting down disconnects them without
-    /// waiting for their inflight operations to complete first.
-    fn is_closing_or_gone(&self, conn_id: ConnectionId) -> bool {
-        matches!(
-            self.connections.get(conn_id),
-            None | Some(ConnectionState::Closing { .. })
-        )
+    /// The state of a connection that is still live, or `None` if it has been
+    /// or is in the process of being disconnected
+    fn active(&self, conn_id: ConnectionId) -> Option<&ConnectionState> {
+        match self.connections.get(conn_id)? {
+            ConnectionState::Closing { .. } => None,
+            state => Some(state),
+        }
+    }
+
+    fn active_mut(&mut self, conn_id: ConnectionId) -> Option<&mut ConnectionState> {
+        match self.connections.get_mut(conn_id)? {
+            ConnectionState::Closing { .. } => None,
+            state => Some(state),
+        }
     }
 
     pub fn on_connect<Q: SubmissionQueue>(
@@ -192,12 +197,9 @@ impl ConnectionManager {
         info_hash: [u8; 20],
         io: &mut Io<Q>,
     ) {
-        if self.is_closing_or_gone(conn_id) {
+        let Some(entry) = self.active_mut(conn_id) else {
             log::debug!("Connect completed for a disconnected connection: {conn_id:?}");
             return;
-        }
-        let Some(entry) = self.connections.get_mut(conn_id) else {
-            unreachable!("existence checked above");
         };
         let ConnectionState::Connecting { socket, addr } =
             std::mem::replace(entry, ConnectionState::Dummy)
@@ -224,12 +226,9 @@ impl ConnectionManager {
         io: &mut Io<Q>,
         state: &mut StateRef<'state>,
     ) {
-        if self.is_closing_or_gone(conn_id) {
+        let Some(entry) = self.active(conn_id) else {
             log::debug!("Handshake write completed for a disconnected connection: {conn_id:?}");
             return;
-        }
-        let Some(entry) = self.connections.get(conn_id) else {
-            unreachable!("existence checked above");
         };
         let peer_addr = entry.addr();
         if written == expected_write {
@@ -274,12 +273,9 @@ impl ConnectionManager {
         state: &mut StateRef<'state>,
         scope: &Scope<'scope>,
     ) -> io::Result<()> {
-        if self.is_closing_or_gone(conn_id) {
+        let Some(entry) = self.active(conn_id) else {
             log::debug!("Handshake data received for a disconnected connection: {conn_id:?}");
             return Ok(());
-        }
-        let Some(entry) = self.connections.get(conn_id) else {
-            unreachable!("existence checked above");
         };
         let socket_addr = entry.addr();
         let data: &[u8] = match read_bid {
@@ -368,7 +364,6 @@ impl ConnectionManager {
         } else {
             peer_protocol::PeerMessage::HaveNone
         };
-        let connection = &mut self[conn_id];
         connection.outgoing_msgs_buffer.push(bitfield_msg);
         Ok(())
     }
