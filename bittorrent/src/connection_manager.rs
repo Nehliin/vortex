@@ -38,9 +38,9 @@ new_key_type! {
 #[allow(clippy::large_enum_variant)]
 pub enum ConnectionState {
     /// Outgoing connection in progress.
-    Connecting { socket: Socket, addr: SockAddr },
+    Connecting { socket: Socket, addr: SocketAddr },
     /// Handshake write/recv in-flight.
-    Handshaking { socket: Socket, addr: SockAddr },
+    Handshaking { socket: Socket, addr: SocketAddr },
     /// Handshake completed and a full PeerConnection has been established
     Established(PeerConnection),
     /// The socket has been handed to io_uring for closing.
@@ -56,11 +56,9 @@ impl ConnectionState {
     fn addr(&self) -> SocketAddr {
         match self {
             ConnectionState::Connecting { addr, .. }
-            | ConnectionState::Handshaking { addr, .. } => {
-                addr.as_socket().expect("Must be AF_INET or AF_INET6")
-            }
+            | ConnectionState::Handshaking { addr, .. }
+            | ConnectionState::Closing { addr } => *addr,
             ConnectionState::Established(peer) => peer.peer_addr,
-            ConnectionState::Closing { addr } => *addr,
             ConnectionState::Dummy => unreachable!(),
         }
     }
@@ -120,7 +118,7 @@ impl ConnectionManager {
         let fd = socket.as_raw_fd();
         let conn_id = self.connections.insert(ConnectionState::Connecting {
             socket,
-            addr: peer.clone(),
+            addr: peer_addr,
         });
         io.connect(conn_id, fd, peer);
     }
@@ -157,16 +155,16 @@ impl ConnectionManager {
             io.close_socket(socket, None);
             return Ok(());
         }
-        let peer_addr = addr.as_socket().expect("must be AF_INET");
-        if !self.can_accept_new(peer_addr) {
+        let addr = addr.as_socket().expect("must be AF_INET");
+        if !self.can_accept_new(addr) {
             log::debug!(
-                "Rejecting incoming connection from already tracked or excess peer: {peer_addr:?}"
+                "Rejecting incoming connection from already tracked or excess peer: {addr:?}"
             );
             io.close_socket(socket, None);
             return Ok(());
         }
 
-        log::info!("Accepted connection: {peer_addr:?}");
+        log::info!("Accepted connection: {addr:?}");
         let conn_id = self
             .connections
             .insert(ConnectionState::Handshaking { socket, addr });
@@ -205,10 +203,7 @@ impl ConnectionManager {
         else {
             unreachable!("connect completed for non-connecting connection");
         };
-        log::info!(
-            "Connected to: {}",
-            addr.as_socket().expect("must be AF_INET")
-        );
+        log::info!("Connected to: {}", addr);
         #[cfg(feature = "metrics")]
         {
             let connect_success_counter = metrics::counter!("peer_connect_success");
@@ -395,25 +390,15 @@ impl ConnectionManager {
         io: &mut Io<Q>,
         state_ref: &mut StateRef<'state>,
     ) -> Option<SocketAddr> {
-        match entry {
-            ConnectionState::Connecting { .. } | ConnectionState::Handshaking { .. } => {
-                let (ConnectionState::Connecting { socket, .. }
-                | ConnectionState::Handshaking { socket, .. }) =
-                    std::mem::replace(entry, ConnectionState::Dummy)
-                else {
-                    unreachable!("variant checked above");
-                };
-                let addr = entry.addr();
+        let owned_entry = std::mem::replace(entry, ConnectionState::Dummy);
+        match owned_entry {
+            ConnectionState::Connecting { socket, addr }
+            | ConnectionState::Handshaking { socket, addr } => {
                 *entry = ConnectionState::Closing { addr };
                 io.close_socket(socket, Some(conn_id));
                 Some(addr)
             }
-            ConnectionState::Established(_) => {
-                let ConnectionState::Established(mut peer) =
-                    std::mem::replace(entry, ConnectionState::Dummy)
-                else {
-                    unreachable!("variant checked above");
-                };
+            ConnectionState::Established(mut peer) => {
                 peer.on_disconnect(state_ref);
                 let addr = peer.peer_addr;
                 *entry = ConnectionState::Closing { addr };
@@ -421,7 +406,10 @@ impl ConnectionManager {
                 io.close_socket(peer.socket, Some(conn_id));
                 Some(addr)
             }
-            ConnectionState::Closing { .. } => None,
+            ConnectionState::Closing { .. } => {
+                *entry = owned_entry;
+                None
+            }
             ConnectionState::Dummy => unreachable!("connection in a transient state"),
         }
     }
