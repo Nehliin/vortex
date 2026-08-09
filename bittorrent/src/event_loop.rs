@@ -52,7 +52,8 @@ pub enum EventType {
     Connect {
         connection_idx: ConnectionId,
         // The SQE needs a stable pointer to the addrs until submission
-        addr: SockAddr,
+        // hence the Box
+        addr: Box<SockAddr>,
     },
     Write {
         connection_idx: ConnectionId,
