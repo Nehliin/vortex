@@ -533,7 +533,7 @@ impl ConnectionManager {
             .insert_with_key(|conn_id| ConnectionState::Established(f(conn_id)))
     }
 
-    /// Iterate over all established connections, mirroring the `SlotMap` API
+    /// Iterate over all established connections
     #[cfg(test)]
     pub(crate) fn values(&self) -> impl Iterator<Item = &PeerConnection> {
         self.connections.values().filter_map(|state| match state {
