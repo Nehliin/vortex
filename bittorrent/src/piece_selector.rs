@@ -10,7 +10,7 @@ use rand::SeedableRng;
 use rand::{RngExt, rngs::SmallRng};
 use slotmap::SecondaryMap;
 
-use crate::{buf_pool::Buffer, event_loop::ConnectionId, torrent::TorrentProgress};
+use crate::{buf_pool::Buffer, connection_manager::ConnectionId, torrent::TorrentProgress};
 
 pub const SUBPIECE_SIZE: i32 = 16_384;
 

@@ -10,7 +10,7 @@ use std::{
 
 use lava_torrent::torrent::v1::Torrent;
 
-use crate::{buf_pool::Buffer, event_loop::ConnectionId};
+use crate::{buf_pool::Buffer, connection_manager::ConnectionId};
 
 #[derive(Debug)]
 pub struct File {
