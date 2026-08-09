@@ -13,9 +13,8 @@ use sha1::Digest;
 use socket2::Socket;
 
 use crate::{
-    event_loop::ConnectionId,
+    connection_manager::ConnectionId,
     file_store::{DiskOp, DiskOpType},
-    io::{Io, SubmissionQueue},
     peer_comm::{
         extended_protocol::{EXTENSIONS, MetadataProgress, UPLOAD_ONLY, init_extension},
         peer_protocol::{PeerId, PeerMessage, PeerMessageDecoder},
@@ -132,11 +131,6 @@ pub enum DisconnectReason {
     RedundantConnection,
 }
 
-pub enum ConnectionState {
-    Connected(Socket),
-    Disconnecting,
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct NetworkStats {
     /// Download throughput in the current tick
@@ -166,7 +160,7 @@ impl NetworkStats {
 }
 
 pub struct PeerConnection {
-    pub connection_state: ConnectionState,
+    pub socket: Socket,
     pub peer_addr: SocketAddr,
     pub conn_id: ConnectionId,
     pub peer_id: PeerId,
@@ -262,7 +256,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         parsed_handshake: ParsedHandshake,
     ) -> Self {
         PeerConnection {
-            connection_state: ConnectionState::Connected(socket),
+            socket,
             peer_addr,
             conn_id,
             peer_id: parsed_handshake.peer_id,
@@ -305,34 +299,22 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         }
     }
 
-    pub fn disconnect<Q: SubmissionQueue>(
-        &mut self,
-        io: &mut Io<Q>,
-        state_ref: &mut StateRef<'f_store>,
-    ) {
-        let socket = std::mem::replace(&mut self.connection_state, ConnectionState::Disconnecting);
-        match socket {
-            ConnectionState::Connected(socket) => {
-                io.close_socket(socket, Some(self.conn_id));
-            }
-            ConnectionState::Disconnecting => {
-                // Should not disconnect twice but I could see it happening if an earlier
-                // cqe disconnects the peer for some reason and then there being multiple cqe's
-                // left for the same peer that also contain corrupted data for example
-                return;
-            }
+    /// Release everything the connection holds on to in the shared torrent state.
+    /// Called by [`crate::connection_manager::ConnectionManager::disconnect`] right
+    /// before the connection is dropped and its socket closed.
+    pub fn on_disconnect(&mut self, state_ref: &mut StateRef<'f_store>) {
+        let Some(torrent_state) = state_ref.state() else {
+            return;
+        };
+        self.release_all_pieces(torrent_state);
+        // Don't count disconnected peers
+        if !self.is_choking {
+            torrent_state.num_unchoked -= 1;
         }
-        if let Some(torrent_state) = state_ref.state() {
-            self.release_all_pieces(torrent_state);
-            // Don't count disconnected peers
-            if !self.is_choking {
-                torrent_state.num_unchoked -= 1;
-            }
-            if self.optimistically_unchoked {
-                // Reset time scaler so another peer can be optimistically unchoked
-                self.optimistically_unchoked = false;
-                torrent_state.ticks_to_recalc_optimistic_unchoke = 0;
-            }
+        if self.optimistically_unchoked {
+            // Reset time scaler so another peer can be optimistically unchoked
+            self.optimistically_unchoked = false;
+            torrent_state.ticks_to_recalc_optimistic_unchoke = 0;
         }
     }
 
