@@ -7,8 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ahash::HashSet;
-use ahash::HashSetExt;
 use bytes::{BufMut, Bytes};
 use heapless::spsc::Producer;
 use io_uring::{
@@ -19,22 +17,18 @@ use io_uring::{
 };
 use libc::{ECANCELED, ENOENT};
 use rayon::Scope;
-use slotmap::{Key, KeyData, SlotMap, new_key_type};
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use slotmap::{Key, KeyData, new_key_type};
+use socket2::{SockAddr, Socket};
 
 use crate::{
     buf_pool::Buffer,
+    buf_ring::Bid,
+    connection_manager::{ConnectionId, ConnectionManager},
     file_store::DiskOp,
     io::{BackloggedSubmissionQueue, Io, SubmissionQueue},
-    peer_comm::{
-        extended_protocol::extension_handshake_msg,
-        peer_connection::{ConnectionState, DisconnectReason, PeerConnection},
-        peer_protocol::{self, HANDSHAKE_SIZE, PeerId, parse_handshake, write_handshake},
-    },
+    peer_comm::peer_connection::{DisconnectReason, PeerConnection},
     piece_selector::{self, SUBPIECE_SIZE},
-    torrent::{
-        CQE_WAIT_TIME_NS, Command, Config, Error, PeerMetrics, State, StateRef, TorrentEvent,
-    },
+    torrent::{CQE_WAIT_TIME_NS, Command, Error, PeerMetrics, State, StateRef, TorrentEvent},
 };
 
 pub(crate) const HANDSHAKE_TIMEOUT: Timespec = Timespec::new().sec(7);
@@ -56,17 +50,16 @@ fn is_expected_orphan_error(err: u32) -> bool {
 pub enum EventType {
     Accept,
     Connect {
-        socket: Socket,
+        connection_idx: ConnectionId,
+        // The SQE needs a stable pointer to the addrs until submission
         addr: SockAddr,
     },
     Write {
-        socket: Socket,
-        addr: SockAddr,
+        connection_idx: ConnectionId,
         expected_write: usize,
     },
     Recv {
-        socket: Socket,
-        addr: SockAddr,
+        connection_idx: ConnectionId,
     },
     ConnectedWriteV {
         connection_idx: ConnectionId,
@@ -107,10 +100,6 @@ new_key_type! {
     pub struct EventId;
 }
 
-new_key_type! {
-    pub struct ConnectionId;
-}
-
 #[derive(Debug)]
 pub struct EventData {
     pub typ: EventType,
@@ -143,9 +132,8 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
     io: &mut Io<Q>,
     error_code: u32,
     event_data_idx: EventId,
+    connection_manager: &mut ConnectionManager,
     state_ref: &mut StateRef<'state>,
-    connections: &mut SlotMap<ConnectionId, PeerConnection>,
-    pending_connections: &mut HashSet<SockAddr>,
 ) -> io::Result<()> {
     match error_code as i32 {
         libc::ENOBUFS => {
@@ -154,75 +142,71 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             // Ran out of buffers! Resolve (fd, is_multishot) first since
             // rearming the recv requires exclusive access to the io struct
             let rearm = match &io.events[event_data_idx].typ {
-                EventType::Recv { socket, addr: _ } => Some((socket.as_raw_fd(), false)),
+                EventType::Recv { connection_idx } => {
+                    connection_manager.fd(*connection_idx).map(|fd| (fd, false))
+                }
                 EventType::ConnectedRecv { connection_idx } => {
-                    if let ConnectionState::Connected(socket) =
-                        &connections[*connection_idx].connection_state
-                    {
-                        Some((socket.as_raw_fd(), true))
-                    } else {
-                        None
-                    }
+                    connection_manager.fd(*connection_idx).map(|fd| (fd, true))
                 }
                 _ => unreachable!(),
             };
             match rearm {
                 Some((fd, false)) => io.recv(event_data_idx, fd, &HANDSHAKE_TIMEOUT),
                 Some((fd, true)) => io.recv_multishot(event_data_idx, fd),
-                None => {}
+                None => {
+                    // Prevent "leaking" the event since it won't be re-armed and won't be completed
+                    // unclear if we ever end up with a ENOBUFS on a closing connection but I guess
+                    // it might be possible
+                    io.events.remove(event_data_idx).unwrap();
+                }
             }
             Ok(())
         }
         libc::ETIME => {
             let event = io.events.remove(event_data_idx).unwrap();
-            let socket = match event.typ {
-                EventType::Connect { socket, addr } => {
-                    log::debug!("[{}] Connect timed out!", addr.as_socket().unwrap());
-                    // Since we are connecting the connection MUST exist in the pending_connections
-                    // vector
-                    assert!(pending_connections.remove(&addr));
-                    #[cfg(feature = "metrics")]
+            match event.typ {
+                EventType::Connect { connection_idx, .. } => {
+                    // The connection may already be closing if it was disconnected
+                    // (by a pause or shutdown) after the timer fired but before this
+                    // completion was handled
+                    if let Some(addr) = connection_manager.disconnect(connection_idx, io, state_ref)
                     {
-                        let connect_fail_counter = metrics::counter!("peer_connect_timeout");
-                        connect_fail_counter.increment(1);
+                        log::debug!("[{addr}] Connect timed out!");
+                        #[cfg(feature = "metrics")]
+                        {
+                            let connect_fail_counter = metrics::counter!("peer_connect_timeout");
+                            connect_fail_counter.increment(1);
+                        }
                     }
-                    socket
                 }
-                EventType::Recv { socket, addr } => {
-                    log::debug!("[{}] Handshake timed out!", addr.as_socket().unwrap());
-                    // Remove from pending connections if this was an outgoing connection
-                    pending_connections.remove(&addr);
-                    #[cfg(feature = "metrics")]
+                EventType::Recv { connection_idx } => {
+                    if let Some(addr) = connection_manager.disconnect(connection_idx, io, state_ref)
                     {
-                        let handshake_timeout_counter = metrics::counter!("peer_handshake_timeout");
-                        handshake_timeout_counter.increment(1);
+                        log::debug!("[{addr}] Handshake timed out!");
+                        #[cfg(feature = "metrics")]
+                        {
+                            let handshake_timeout_counter =
+                                metrics::counter!("peer_handshake_timeout");
+                            handshake_timeout_counter.increment(1);
+                        }
                     }
-                    socket
                 }
                 _ => unreachable!(),
-            };
-            io.close_socket(socket, None);
+            }
             Ok(())
         }
         libc::ECONNRESET => {
             let event = io.events.remove(event_data_idx).unwrap();
             match event.typ {
-                EventType::Connect { socket, addr }
-                | EventType::Write { socket, addr, .. }
-                | EventType::Recv { socket, addr } => {
-                    log::error!(
-                        "[{}] Connection reset before handshake completed",
-                        addr.as_socket().unwrap()
-                    );
-                    pending_connections.remove(&addr);
-                    io.close_socket(socket, None);
-                }
-                EventType::ConnectedRecv { connection_idx }
+                EventType::Connect { connection_idx, .. }
+                | EventType::Write { connection_idx, .. }
+                | EventType::Recv { connection_idx }
+                | EventType::ConnectedRecv { connection_idx }
                 | EventType::ConnectedWriteV { connection_idx, .. } => {
-                    // Don't worry about this if we've already removed the connection
-                    if let Some(connection) = connections.get_mut(connection_idx) {
-                        log::error!("Peer [{}] Connection reset", connection.peer_id);
-                        connection.disconnect(io, state_ref);
+                    // Don't worry about this if the connection is already closing
+                    if let Some(addr) = connection_manager.disconnect(connection_idx, io, state_ref)
+                    {
+                        log::error!("[{addr}] Connection reset");
                     }
                 }
                 _ => unreachable!(),
@@ -232,25 +216,15 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
         libc::EPIPE => {
             let event = io.events.remove(event_data_idx).unwrap();
             match event.typ {
-                EventType::Write { socket, addr, .. } => {
-                    log::warn!(
-                        "[{}] Attempted to write to closed connection",
-                        addr.as_socket().unwrap()
-                    );
-                    pending_connections.remove(&addr);
-                    io.close_socket(socket, None);
-                }
-                EventType::ConnectedWriteV { connection_idx, .. } => {
-                    if let Some(connection) = connections.get_mut(connection_idx) {
-                        log::error!(
-                            "Peer [{}] EPIPE received when writing to connection",
-                            connection.peer_id
-                        );
-                        connection.disconnect(io, state_ref);
+                EventType::Write { connection_idx, .. }
+                | EventType::ConnectedWriteV { connection_idx, .. } => {
+                    if let Some(addr) = connection_manager.disconnect(connection_idx, io, state_ref)
+                    {
+                        log::error!("[{addr}] EPIPE received when writing to connection");
                     } else {
                         // I guess this might happpen when multiple writes are queued up after
                         // each other
-                        log::error!("PIPE received after connection has already been removed",);
+                        log::error!("EPIPE received after connection has already been closed");
                     }
                 }
                 _ => unreachable!(),
@@ -262,14 +236,11 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             // the likelyhood of being stale info in the DHT
             let event = io.events.remove(event_data_idx).unwrap();
             match event.typ {
-                EventType::Connect { socket, addr } => {
-                    log::debug!(
-                        "[{}] Connection failed {event_data_idx:?}",
-                        addr.as_socket().unwrap()
-                    );
-                    // Since we are connecting the connection MUST exist in the pending_connections
-                    assert!(pending_connections.remove(&addr));
-                    io.close_socket(socket, None);
+                EventType::Connect { connection_idx, .. } => {
+                    if let Some(addr) = connection_manager.disconnect(connection_idx, io, state_ref)
+                    {
+                        log::debug!("[{addr}] Connection failed {event_data_idx:?}");
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -282,34 +253,47 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             log::trace!("Event cancelled");
             Ok(())
         }
-        _ => {
-            let err = std::io::Error::from_raw_os_error(error_code as i32);
+        err_code => {
+            let err = std::io::Error::from_raw_os_error(err_code);
             if let Some(event) = io.events.remove(event_data_idx) {
                 let err_str = format!("Unhandled error code: {err}, event type: {event:?}");
                 match event.typ {
-                    EventType::Connect { socket, addr }
-                    | EventType::Write { socket, addr, .. }
-                    | EventType::Recv { socket, addr } => {
-                        log::error!("[{}] {err_str}", addr.as_socket().unwrap());
-                        // If this error came from an outgoing branch it should be in
-                        // pending_connections
-                        pending_connections.remove(&addr);
-                        io.close_socket(socket, None);
-                    }
-                    EventType::ConnectedWriteV { connection_idx, .. }
+                    EventType::Connect { connection_idx, .. }
+                    | EventType::Write { connection_idx, .. }
+                    | EventType::Recv { connection_idx }
+                    | EventType::ConnectedWriteV { connection_idx, .. }
                     | EventType::ConnectedRecv { connection_idx } => {
-                        if let Some(connection) = connections.get_mut(connection_idx) {
-                            log::error!("Peer [{}] unhandled error: {err}", connection.peer_id);
-                            connection.disconnect(io, state_ref);
+                        if let Some(addr) =
+                            connection_manager.disconnect(connection_idx, io, state_ref)
+                        {
+                            log::error!("[{addr}] {err_str}");
+                        } else {
+                            log::error!("{err_str}");
                         }
                     }
                     EventType::Close {
                         maybe_connection_idx,
                     } => {
                         log::error!("{err_str}, attempting to close: {maybe_connection_idx:?}");
+                        // The fd is gone regardless of the close failing, so the slot
+                        // is freed here as well. Otherwise the connection would linger
+                        // forever, blocking both reconnects and shutdown.
+                        if let Some(connection_idx) = maybe_connection_idx {
+                            connection_manager.remove_closed(connection_idx);
+                        }
                         return Err(err);
                     }
-                    EventType::Cancel | EventType::Accept | EventType::Dummy => {
+                    EventType::Cancel => {
+                        // This might happen for rejected incoming connections
+                        // for example. io.close_socket will Cancel + Close and if
+                        // nothing has started the Cancel will return ENOENT
+                        if err_code != libc::ENOENT {
+                            log::error!("{err_str}");
+                            return Err(err);
+                        }
+                        return Ok(());
+                    }
+                    EventType::Accept | EventType::Dummy => {
                         log::error!("{err_str}");
                         return Err(err);
                     }
@@ -345,7 +329,7 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
 struct RawIoEvent {
     event_data_idx: EventId,
     result: Result<i32, u32>,
-    read_bid: Option<u16>,
+    read_bid: Option<Bid>,
     is_more: bool,
 }
 
@@ -372,19 +356,11 @@ const CQE_WAIT_TIME: &Timespec = &Timespec::new().nsec(CQE_WAIT_TIME_NS);
 
 pub struct EventLoop {
     state: EventLoopState,
-    // TODO: Merge these or consider disconnecting
-    // pending peers as soon as max connections is reached
-    connections: SlotMap<ConnectionId, PeerConnection>,
-    pending_connections: HashSet<SockAddr>,
-    our_id: PeerId,
 }
 
 impl<'scope, 'state: 'scope> EventLoop {
-    pub fn new(our_id: PeerId, config: &Config) -> Self {
+    pub fn new() -> Self {
         Self {
-            connections: SlotMap::with_capacity_and_key(config.max_connections),
-            pending_connections: HashSet::with_capacity(config.max_connections),
-            our_id,
             state: EventLoopState::Paused { listener_fd: None },
         }
     }
@@ -400,6 +376,8 @@ impl<'scope, 'state: 'scope> EventLoop {
         let port = listener.local_addr().unwrap().port();
         state.listener_port = Some(port);
 
+        let mut connection_manager =
+            ConnectionManager::new(state.our_id(), state.config.max_connections);
         let mut state_ref = state.as_ref();
         let mut prev_state_initialized = state_ref.is_initialzied();
         // lambda to be able to catch errors an always unregistering the read ring
@@ -420,8 +398,17 @@ impl<'scope, 'state: 'scope> EventLoop {
                 // Handle commands first of all so we can block the event loop when in a paused
                 // state. The "pause_ready" check should ensure all meaningful CQE:s have been
                 // handled before we block the loop.
-                self.handle_commands(&mut io, &mut command_rc, &mut state_ref, &mut event_tx);
-                let pause_ready = self.connections.is_empty() && io.inflight_disk_ops == 0;
+                self.handle_commands(
+                    &mut io,
+                    &mut command_rc,
+                    &mut connection_manager,
+                    &mut state_ref,
+                    &mut event_tx,
+                );
+                // All connections, including the ones that never established, are
+                // torn down before pausing or shutting down. Waiting for the map to
+                // empty means waiting for every socket to actually have been closed.
+                let pause_ready = connection_manager.is_empty() && io.inflight_disk_ops == 0;
                 match self.state {
                     EventLoopState::ShuttingDown { listener_fd } if pause_ready => {
                         if let Some(listener_fd) = listener_fd {
@@ -487,8 +474,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 if tick_delta > Duration::from_secs(1) {
                     tick(
                         &tick_delta,
-                        &mut self.connections,
-                        &self.pending_connections,
+                        &mut connection_manager,
                         &mut state_ref,
                         &mut event_tx,
                     );
@@ -500,7 +486,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                         event_tx
                             .enqueue(TorrentEvent::MetadataComplete(metadata.clone()))
                             .expect("event queue should never be full here");
-                        for (_, connection) in self.connections.iter_mut() {
+                        for (_, connection) in connection_manager.iter_established_mut() {
                             let msgs = std::mem::take(&mut connection.pre_meta_have_msgs);
                             // Get all piece msgs
                             for msg in msgs {
@@ -516,17 +502,7 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                     last_tick = Instant::now();
                     // Dealt with here to make tick easier to test
-                    for connection in self.connections.values_mut() {
-                        if let Some(reason) = &connection.pending_disconnect {
-                            log::warn!("Disconnect: {} reason {reason}", connection.peer_id,);
-                            #[cfg(feature = "metrics")]
-                            {
-                                let counter = metrics::counter!("disconnects");
-                                counter.increment(1);
-                            }
-                            connection.disconnect(&mut io, &mut state_ref);
-                        }
-                    }
+                    connection_manager.execute_pending_disconnects(&mut io, &mut state_ref);
                     io.sq.sync();
                 }
 
@@ -546,6 +522,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                             &mut io,
                             io_event,
                             &mut maybe_buffers,
+                            &mut connection_manager,
                             &mut state_ref,
                             &mut event_tx,
                             scope,
@@ -579,9 +556,8 @@ impl<'scope, 'state: 'scope> EventLoop {
                 }
                 io.submit_queued_disk_operations();
 
-                for (conn_id, connection) in self
-                    .connections
-                    .iter_mut()
+                for (conn_id, connection) in connection_manager
+                    .iter_established_mut()
                     .filter(|(_, conn)| {
                         // The connection must have something to send
                         !conn.outgoing_msgs_buffer.is_empty()
@@ -599,25 +575,23 @@ impl<'scope, 'state: 'scope> EventLoop {
                         !conn.network_write_inflight
                     })
                 {
-                    if let ConnectionState::Connected(socket) = &connection.connection_state {
-                        let mut buffers = Vec::new();
-                        let mut current_buffer = io.write_pool.get_buffer();
-                        let conn_fd = socket.as_raw_fd();
-                        for message in connection.outgoing_msgs_buffer.iter() {
-                            let size = message.encoded_size();
-                            if current_buffer.remaining_mut() >= size {
-                                message.encode(&mut current_buffer);
-                            } else {
-                                // Buffer is full, get a new one
-                                buffers.push(current_buffer);
-                                current_buffer = io.write_pool.get_buffer();
-                                message.encode(&mut current_buffer);
-                            }
+                    let mut buffers = Vec::new();
+                    let mut current_buffer = io.write_pool.get_buffer();
+                    let conn_fd = connection.socket.as_raw_fd();
+                    for message in connection.outgoing_msgs_buffer.iter() {
+                        let size = message.encoded_size();
+                        if current_buffer.remaining_mut() >= size {
+                            message.encode(&mut current_buffer);
+                        } else {
+                            // Buffer is full, get a new one
+                            buffers.push(current_buffer);
+                            current_buffer = io.write_pool.get_buffer();
+                            message.encode(&mut current_buffer);
                         }
-                        buffers.push(current_buffer);
-                        connection.network_write_inflight = true;
-                        io.writev_to_connection(conn_id, conn_fd, buffers, 0);
                     }
+                    buffers.push(current_buffer);
+                    connection.network_write_inflight = true;
+                    io.writev_to_connection(conn_id, conn_fd, buffers, 0);
                     connection.outgoing_msgs_buffer.clear();
                 }
                 io.sq.sync();
@@ -654,49 +628,14 @@ impl<'scope, 'state: 'scope> EventLoop {
         }
     }
 
-    fn write_handshake<Q: SubmissionQueue>(
-        &mut self,
-        io: &mut Io<Q>,
-        info_hash: [u8; 20],
-        socket: Socket,
-        addr: SockAddr,
-    ) {
-        let mut buffer = io.write_pool.get_buffer();
-        if buffer.remaining_mut() < HANDSHAKE_SIZE {
-            panic!("Buffer size is too small for sending a handshake");
-        }
-        write_handshake(self.our_id, info_hash, &mut buffer);
-        io.write(socket, addr, buffer)
-    }
-
-    fn disconnect_all<Q: SubmissionQueue>(
-        &mut self,
-        state_ref: &mut StateRef<'state>,
-        io: &mut Io<Q>,
-    ) {
-        // Initiate graceful shutdown for all connections
-        for connection in self.connections.values_mut() {
-            log::info!(
-                "[{}] Closing connection to peer: {}",
-                connection.peer_id,
-                connection.peer_addr,
-            );
-            connection.disconnect(io, state_ref);
-        }
-    }
-
     fn handle_commands<Q: SubmissionQueue>(
         &mut self,
         io: &mut Io<Q>,
         command_rc: &mut Receiver<Command>,
+        connection_manager: &mut ConnectionManager,
         state_ref: &mut StateRef<'state>,
         event_tx: &mut Producer<TorrentEvent>,
     ) {
-        let existing_connections: HashSet<SockAddr> = self
-            .connections
-            .iter()
-            .map(|(_, peer)| SockAddr::from(peer.peer_addr))
-            .collect();
         // Block on new commands if we are paused, otherwise do a nonblocking iter
         let command_iter: &mut dyn Iterator<Item = Command> = match self.state {
             EventLoopState::Paused { .. } => &mut command_rc.iter(),
@@ -711,17 +650,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                         continue;
                     }
                     for addr in addrs.into_iter().map(|addr| addr.into()) {
-                        if self.pending_connections.contains(&addr)
-                            || existing_connections.contains(&addr)
-                        {
-                            continue;
-                        }
-                        if self.pending_connections.len() + self.connections.len()
-                            < state_ref.config.max_connections
-                        {
-                            self.pending_connections.insert(addr.clone());
-                            self.connect_to_peer(addr, io);
-                        }
+                        // De-duplication and the max-connection cap are enforced
+                        // by the connection manager across incoming and outgoing.
+                        connection_manager.maybe_connect_to_peer(addr, io);
                     }
                 }
                 Command::Pause => {
@@ -740,7 +671,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                                 .is_some(),
                             "Listener AcceptMulti removed more than once"
                         );
-                        self.disconnect_all(state_ref, io);
+                        connection_manager.disconnect_all(io, state_ref);
                     } else {
                         log::warn!("Received Pause command when in a non running state. Ignoring");
                     }
@@ -774,7 +705,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                             | EventLoopState::Running { listener_fd, .. } => Some(listener_fd),
                         };
                         self.state = EventLoopState::ShuttingDown { listener_fd };
-                        self.disconnect_all(state_ref, io);
+                        connection_manager.disconnect_all(io, state_ref);
                     }
                 }
             }
@@ -782,33 +713,15 @@ impl<'scope, 'state: 'scope> EventLoop {
         io.sq.sync();
     }
 
-    fn connect_to_peer<Q: SubmissionQueue>(&mut self, addr: SockAddr, io: &mut Io<Q>) {
-        let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
-            Ok(socket) => socket,
-            Err(e) => {
-                log::error!("Failed to create socket: {e}");
-                return;
-            }
-        };
-
-        log::debug!(
-            "[{}] Connecting to peer",
-            addr.as_socket().expect("must be AF_INET")
-        );
-        #[cfg(feature = "metrics")]
-        {
-            let connect_counter = metrics::counter!("peer_connect_attempts");
-            connect_counter.increment(1);
-        }
-
-        io.connect(socket, addr);
-    }
-
+    // Each parameter is a disjointly-borrowed piece of the event loop's
+    // working set (io, connections, torrent state)
+    #[allow(clippy::too_many_arguments)]
     fn event_handler<Q: SubmissionQueue>(
         &mut self,
         io: &mut Io<Q>,
         io_event: RawIoEvent,
         write_buffers: &mut Option<Vec<Buffer>>,
+        connection_manager: &mut ConnectionManager,
         state: &mut StateRef<'state>,
         event_tx: &mut Producer<TorrentEvent>,
         scope: &Scope<'scope>,
@@ -820,9 +733,8 @@ impl<'scope, 'state: 'scope> EventLoop {
                     io,
                     error_code,
                     io_event.event_data_idx,
+                    connection_manager,
                     state,
-                    &mut self.connections,
-                    &mut self.pending_connections,
                 );
             }
         };
@@ -842,71 +754,29 @@ impl<'scope, 'state: 'scope> EventLoop {
                     io.close_socket(socket, None);
                     return Ok(());
                 }
-                let addr = socket.peer_addr()?;
-                if addr.is_ipv6() {
-                    log::error!("Received connection from non ipv4 addr");
-                    io.close_socket(socket, None);
-                    return Ok(());
-                };
-
-                log::info!(
-                    "Accepted connection: {:?}",
-                    addr.as_socket().expect("must be AF_INET")
-                );
-                // Trigger a write handshake here so we end up in the same code path
-                // as outgoing connections. It will simplify things greatly
-                self.write_handshake(io, *state.info_hash(), socket, addr);
+                let info_hash = *state.info_hash();
+                connection_manager.on_accepted(socket, info_hash, io)?;
             }
-            EventType::Connect { socket, addr } => {
-                log::info!(
-                    "Connected to: {}",
-                    addr.as_socket().expect("must be AF_INET")
-                );
-                #[cfg(feature = "metrics")]
-                {
-                    let connect_success_counter = metrics::counter!("peer_connect_success");
-                    connect_success_counter.increment(1);
-                }
+            EventType::Connect { connection_idx, .. } => {
+                // Event removal stays in the event loop.
                 let old = io.events.remove(io_event.event_data_idx).unwrap();
                 debug_assert!(matches!(old.typ, EventType::Dummy));
-
-                self.write_handshake(io, *state.info_hash(), socket, addr);
+                let info_hash = *state.info_hash();
+                connection_manager.on_connect(connection_idx, info_hash, io);
             }
             EventType::Write {
-                socket,
-                addr,
+                connection_idx,
                 expected_write,
             } => {
-                if ret as usize == expected_write {
-                    let fd = socket.as_raw_fd();
-                    log::debug!(
-                        "Wrote to unestablsihed connection: {}",
-                        addr.as_socket().expect("must be AF_INET")
-                    );
-                    let old = io.events.remove(io_event.event_data_idx).unwrap();
-                    debug_assert!(matches!(old.typ, EventType::Dummy));
-                    let read_event_id = io.events.insert(EventData {
-                        typ: EventType::Recv { socket, addr },
-                        buffers: None,
-                    });
-                    // Write is only used for unestablished connections aka when doing handshake
-                    #[cfg(feature = "metrics")]
-                    {
-                        let handshake_counter = metrics::counter!("peer_handshake_attempt");
-                        handshake_counter.increment(1);
-                    }
-                    // Multishot isn't used here to simplify error handling
-                    // when the read is invalid or otherwise doesn't lead to
-                    // a full connection which does have graceful shutdown mechanisms
-                    io.recv(read_event_id, fd, &HANDSHAKE_TIMEOUT);
-                } else {
-                    // We don't deal with partial writes for handshakes, it should never happen
-                    log::error!(
-                        "Failed to write to unestablished connection: {}",
-                        addr.as_socket().expect("must be AF_INET")
-                    );
-                    io.close_socket(socket, None);
-                }
+                let old = io.events.remove(io_event.event_data_idx).unwrap();
+                debug_assert!(matches!(old.typ, EventType::Dummy));
+                connection_manager.on_write(
+                    connection_idx,
+                    ret as usize,
+                    expected_write,
+                    io,
+                    state,
+                );
             }
             EventType::DiskWrite {
                 data,
@@ -915,7 +785,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 scheduled,
             } => {
                 io.events.remove(io_event.event_data_idx);
-                let state = state
+                let torrent_state = state
                     .state()
                     .expect("must have initialized state before starting disk io");
                 #[cfg(feature = "metrics")]
@@ -926,7 +796,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 }
                 if let Ok(buffer) = Rc::try_unwrap(data) {
                     // If we are here we have completed the piece
-                    state.complete_piece(piece_idx, &mut self.connections, event_tx, buffer);
+                    torrent_state.complete_piece(piece_idx, connection_manager, event_tx, buffer);
                 }
                 io.inflight_disk_ops -= 1;
             }
@@ -939,7 +809,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 scheduled,
             } => {
                 io.events.remove(io_event.event_data_idx);
-                let state = state
+                let torrent_state = state
                     .state()
                     .expect("must have initialized state before starting disk io");
                 #[cfg(feature = "metrics")]
@@ -951,9 +821,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                 if let Ok(buffer) = Rc::try_unwrap(data) {
                     // The connection may have been closed inbetween the read being scheduled
                     // and it completing. That's fine
-                    if let Some(connection) = self.connections.get_mut(connection_idx) {
+                    if let Some(connection) = connection_manager.established_mut(connection_idx) {
                         let start_idx = piece_offset as usize;
-                        let piece_len = state.piece_selector.piece_len(piece_idx) as usize;
+                        let piece_len = torrent_state.piece_selector.piece_len(piece_idx) as usize;
                         let end_idx = (start_idx + SUBPIECE_SIZE as usize).min(piece_len);
                         connection.send_piece(
                             piece_idx,
@@ -963,7 +833,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                             Bytes::copy_from_slice(&buffer.raw_slice()[start_idx..end_idx]),
                         );
                     }
-                    state.piece_buffer_pool.return_buffer(buffer);
+                    torrent_state.piece_buffer_pool.return_buffer(buffer);
                 }
                 io.inflight_disk_ops -= 1;
             }
@@ -980,7 +850,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 io.events.remove(io_event.event_data_idx);
                 let expected_written = iovecs.iter().map(|io| io.iov_len).sum();
                 let bytes_written = ret as usize;
-                let Some(connection) = self.connections.get_mut(connection_idx) else {
+                let Some(connection) = connection_manager.established_mut(connection_idx) else {
                     log::warn!("Connection was lost after write was handled");
                     return Ok(());
                 };
@@ -990,149 +860,58 @@ impl<'scope, 'state: 'scope> EventLoop {
                         "[PeerId: {}] Partial write {bytes_written}, expected {expected_written}, TCP send buffer is most likely full",
                         connection.peer_id,
                     );
-                    if let ConnectionState::Connected(socket) = &connection.connection_state {
-                        let buffer = write_buffers.take().unwrap();
-                        // Reschedule a write for the remaining data using cumulative offset
-                        let new_offset = io_vec_offset + bytes_written;
-                        io.writev_to_connection(
-                            connection.conn_id,
-                            socket.as_raw_fd(),
-                            buffer,
-                            new_offset,
-                        );
-                    } else {
-                        log::warn!(
-                            "[PeerId: {}] peer not connected when scheduling new write after a partial write",
-                            connection.peer_id,
-                        );
-                    }
+                    let buffer = write_buffers.take().unwrap();
+                    // Reschedule a write for the remaining data using cumulative offset
+                    let new_offset = io_vec_offset + bytes_written;
+                    io.writev_to_connection(
+                        connection.conn_id,
+                        connection.socket.as_raw_fd(),
+                        buffer,
+                        new_offset,
+                    );
                 } else {
                     connection.network_write_inflight = false;
                 }
             }
-            EventType::Recv { socket, addr } => {
-                let fd = socket.as_raw_fd();
+            EventType::Recv { connection_idx } => {
                 let len = ret as usize;
-                let addr = addr.as_socket().expect("must be AF_INET");
-                if len == 0 {
-                    log::debug!("[{addr}] No more data when expecting handshake from connection",);
-                    io.events.remove(io_event.event_data_idx);
-                    io.close_socket(socket, None);
-                    return Ok(());
-                }
-                // TODO: This could happen due to networks splitting the handshake up
-                // so it should be dealt with better, but since the handshake is so
-                // small (well below MTU) I suspect that to be rare
-                if len < HANDSHAKE_SIZE {
-                    log::error!("[{addr}] Didn't receive enough data to parse handshake",);
-                    io.events.remove(io_event.event_data_idx);
-                    io.close_socket(socket, None);
-                    return Err(io::ErrorKind::InvalidData.into());
-                }
-                // We always have a buffer associated
-                let buffer = io_event.read_bid.map(|bid| io.read_ring.get(bid)).unwrap();
-                let (handshake_data, remainder) = buffer[..len].split_at(HANDSHAKE_SIZE);
-                // Expect this to be the handshake response
-                let parsed_handshake = match parse_handshake(*state.info_hash(), handshake_data) {
-                    Ok(handshake) => handshake,
-                    Err(err) => {
-                        log::error!("[{addr}] Failed to parse handshake: {err}",);
-                        io.events.remove(io_event.event_data_idx);
-                        io.close_socket(socket, None);
-                        return Err(io::ErrorKind::InvalidData.into());
-                    }
-                };
-                // Remove from pending connections if this was an outgoing connection
-                // For incoming connections (from Accept), this will be false and that's ok
-                self.pending_connections
-                    .remove(&<std::net::SocketAddr as Into<socket2::SockAddr>>::into(
-                        addr,
-                    ));
-
-                let conn_id = self.connections.insert_with_key(|conn_id| {
-                    PeerConnection::new(socket, addr, conn_id, parsed_handshake)
-                });
-                log::info!("[{addr}] Finished handshake! [{conn_id:?}]");
-
-                #[cfg(feature = "metrics")]
-                {
-                    let handshake_success_counter = metrics::counter!("peer_handshake_success");
-                    handshake_success_counter.increment(1);
-                }
-
-                // We are now connected!
-                // The event is replaced (this removes the dummy)
-                let old = io.events.remove(io_event.event_data_idx).unwrap();
-                debug_assert!(matches!(old.typ, EventType::Dummy));
-                let recv_multi_id = io.events.insert(EventData {
-                    typ: EventType::ConnectedRecv {
-                        connection_idx: conn_id,
-                    },
-                    buffers: None,
-                });
-
-                // The initial Recv might have contained more data
-                // than just the handshake so need to handle that here
-                // since the read_buffer will be overwritten by the next
-                // incoming recv cqe
-                let connection = &mut self.connections[conn_id];
-                connection.stateful_decoder.append_data(remainder);
-                conn_parse_and_handle_msgs(
-                    connection,
+                io.events.remove(io_event.event_data_idx);
+                connection_manager.on_read(
+                    connection_idx,
+                    io_event.read_bid,
+                    len,
+                    io,
                     state,
-                    &mut io.queued_disk_operations,
                     scope,
-                );
-                if connection.extended_extension {
-                    connection
-                        .outgoing_msgs_buffer
-                        .push(extension_handshake_msg(state, state.config));
-                }
-                // Recv has been complete, move over to multishot, same user data
-                io.recv_multishot(recv_multi_id, fd);
-
-                // TODO: only if fast ext is enabled
-                let bitfield_msg = if let Some(torrent_state) = state.state() {
-                    let completed = torrent_state.piece_selector.downloaded_clone();
-                    // sent as first message after handshake
-                    if completed.all() {
-                        peer_protocol::PeerMessage::HaveAll
-                    } else if completed.not_any() {
-                        peer_protocol::PeerMessage::HaveNone
-                    } else {
-                        peer_protocol::PeerMessage::Bitfield(completed.into())
-                    }
-                } else {
-                    peer_protocol::PeerMessage::HaveNone
-                };
-                connection.outgoing_msgs_buffer.push(bitfield_msg);
+                )?;
             }
             EventType::ConnectedRecv { connection_idx } => {
                 // The event is reused and not replaced
                 std::mem::swap(&mut event, &mut io.events[io_event.event_data_idx].typ);
                 let len = ret as usize;
                 if len == 0 {
-                    let connection = &mut self.connections[connection_idx];
-                    log::debug!(
-                        "[PeerId: {}] No more data: {}",
-                        connection.peer_id,
-                        connection.peer_addr,
-                    );
-                    #[cfg(feature = "metrics")]
-                    {
-                        let counter = metrics::counter!("graceful_disconnect");
-                        counter.increment(1);
-                    }
                     io.events.remove(io_event.event_data_idx);
-                    connection.disconnect(io, state);
+                    if let Some(addr) = connection_manager.disconnect(connection_idx, io, state) {
+                        log::debug!("[{addr}] No more data");
+                        #[cfg(feature = "metrics")]
+                        {
+                            let counter = metrics::counter!("graceful_disconnect");
+                            counter.increment(1);
+                        }
+                    }
                     return Ok(());
                 }
-                let connection = &mut self.connections[connection_idx];
-                if !io_event.is_more
-                    && let ConnectionState::Connected(socket) = &connection.connection_state
-                {
-                    let fd = socket.as_raw_fd();
+                // The connection may have been disconnected by an earlier completion
+                // in this same batch. The event is deliberately left in place, the
+                // multishot recv is still armed until the cancel lands and removing
+                // it would turn its remaining completions into unexpected orphans.
+                let Some(connection) = connection_manager.established_mut(connection_idx) else {
+                    log::debug!("Data received for a disconnected connection");
+                    return Ok(());
+                };
+                if !io_event.is_more {
                     // restart the operation
+                    let fd = connection.socket.as_raw_fd();
                     io.recv_multishot(io_event.event_data_idx, fd);
                 }
 
@@ -1151,7 +930,7 @@ impl<'scope, 'state: 'scope> EventLoop {
                 maybe_connection_idx,
             } => {
                 if let Some(connection_idx) = maybe_connection_idx {
-                    self.connections.remove(connection_idx).unwrap();
+                    connection_manager.remove_closed(connection_idx);
                 }
                 io.events.remove(io_event.event_data_idx);
             }
@@ -1161,7 +940,7 @@ impl<'scope, 'state: 'scope> EventLoop {
     }
 }
 
-fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
+pub(crate) fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
     connection: &mut PeerConnection,
     state: &mut StateRef<'f_store>,
     pending_disk_operations: &mut Vec<DiskOp>,
@@ -1185,8 +964,7 @@ fn conn_parse_and_handle_msgs<'scope, 'f_store: 'scope>(
 fn report_tick_metrics(
     state: &mut StateRef<'_>,
     peer_metrics: Vec<PeerMetrics>,
-    _pending_connections: &HashSet<SockAddr>,
-    _num_connections: usize,
+    _connection_manager: &ConnectionManager,
     event_tx: &mut Producer<TorrentEvent>,
 ) {
     let mut pieces_allocated = 0;
@@ -1208,9 +986,9 @@ fn report_tick_metrics(
     #[cfg(feature = "metrics")]
     {
         let gauge = metrics::gauge!("num_connections");
-        gauge.set(_num_connections as u32);
+        gauge.set(_connection_manager.num_established() as u32);
         let gauge = metrics::gauge!("num_pending_connections");
-        gauge.set(_pending_connections.len() as u32);
+        gauge.set(_connection_manager.num_pending() as u32);
     }
     if event_tx
         .enqueue(TorrentEvent::TorrentMetrics {
@@ -1226,8 +1004,7 @@ fn report_tick_metrics(
 
 pub(crate) fn tick<'scope, 'state: 'scope>(
     tick_delta: &Duration,
-    connections: &mut SlotMap<ConnectionId, PeerConnection>,
-    pending_connections: &HashSet<SockAddr>,
+    connections: &mut ConnectionManager,
     torrent_state: &mut StateRef<'state>,
     event_tx: &mut Producer<TorrentEvent>,
 ) {
@@ -1239,13 +1016,13 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             .ticks_to_recalc_optimistic_unchoke
             .saturating_sub(1);
 
-        if torrent_state.ticks_to_recalc_unchoke == 0 && !connections.is_empty() {
+        if torrent_state.ticks_to_recalc_unchoke == 0 && connections.any_established() {
             torrent_state.ticks_to_recalc_unchoke =
                 torrent_state.config.num_ticks_before_unchoke_recalc;
             torrent_state.recalculate_unchokes(connections);
         }
 
-        if torrent_state.ticks_to_recalc_optimistic_unchoke == 0 && !connections.is_empty() {
+        if torrent_state.ticks_to_recalc_optimistic_unchoke == 0 && connections.any_established() {
             torrent_state.ticks_to_recalc_optimistic_unchoke = torrent_state
                 .config
                 .num_ticks_before_optimistic_unchoke_recalc;
@@ -1253,10 +1030,10 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
         }
     }
 
-    for connection in connections
-        .values_mut()
+    for (_, connection) in connections
+        .iter_established_mut()
         // Filter out connections that are pending diconnect
-        .filter(|conn| conn.pending_disconnect.is_none())
+        .filter(|(_, conn)| conn.pending_disconnect.is_none())
     {
         if connection.last_seen.elapsed() > Duration::from_secs(120) {
             log::warn!("Inactivity timeout: {}", connection.peer_id);
@@ -1317,10 +1094,10 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
         connection.network_stats.download_throughput = 0;
         connection.network_stats.upload_throughput = 0;
     }
-    let mut peer_metrics = Vec::with_capacity(connections.len());
+    let mut peer_metrics = Vec::with_capacity(connections.total_connections());
     // Request new pieces and fill up request queues
     let mut peer_bandwidth: Vec<_> = connections
-        .iter_mut()
+        .iter_established_mut()
         .filter_map(|(key, peer)| {
             // Skip connections that are pending disconnect
             if peer.pending_disconnect.is_none() {
@@ -1358,21 +1135,17 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
         let metrics = peer.report_metrics();
         peer_metrics.push(metrics);
     }
-    report_tick_metrics(
-        torrent_state,
-        peer_metrics,
-        pending_connections,
-        connections.len(),
-        event_tx,
-    );
+    report_tick_metrics(torrent_state, peer_metrics, connections, event_tx);
 }
 
-#[cfg(test)]
+// All tests in this module currently rely on metric snapshots for assertions
+#[cfg(all(test, feature = "metrics"))]
 mod tests {
     use super::*;
+    use crate::peer_comm::peer_protocol::{HANDSHAKE_SIZE, parse_handshake, write_handshake};
     use crate::peer_protocol::PeerId;
     use crate::test_utils::setup_test;
-    use crate::torrent::Command;
+    use crate::torrent::{Command, Config};
     use heapless::spsc::Queue;
     use io_uring::IoUring;
     use metrics::Key;
@@ -1382,7 +1155,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    #[cfg(feature = "metrics")]
     fn handshake_timeout() {
         env_logger::builder()
             .is_test(true)
@@ -1415,8 +1187,7 @@ mod tests {
                 let mut download_state = setup_test();
                 metrics::with_local_recorder(&debbuging, || {
                     let config = Config::default();
-                    let our_id = PeerId::generate();
-                    let mut event_loop = EventLoop::new(our_id, &config);
+                    let mut event_loop = EventLoop::new();
                     let ring = IoUring::builder()
                         .setup_single_issuer()
                         .setup_clamp()
@@ -1466,7 +1237,6 @@ mod tests {
 
     // Tests that a peer can successfully connect to our listener
     #[test]
-    #[cfg(feature = "metrics")]
     fn peer_can_connect_to_listener() {
         env_logger::builder()
             .is_test(true)
@@ -1481,17 +1251,17 @@ mod tests {
         let (event_tx, mut event_rx) = event_q.split();
 
         let (info_hash_tx, info_hash_rx) = std::sync::mpsc::channel();
-        let our_id = PeerId::generate();
 
         std::thread::scope(|s| {
             let event_loop_thread = s.spawn(move || {
                 let mut download_state = setup_test();
                 let info_hash = download_state.info_hash;
-                info_hash_tx.send(info_hash).unwrap();
+                let our_id = download_state.our_id();
+                info_hash_tx.send((info_hash, our_id)).unwrap();
 
                 metrics::with_local_recorder(&debbuging, || {
                     let config = Config::default();
-                    let mut event_loop = EventLoop::new(our_id, &config);
+                    let mut event_loop = EventLoop::new();
                     let ring = IoUring::builder()
                         .setup_single_issuer()
                         .setup_clamp()
@@ -1508,8 +1278,8 @@ mod tests {
                 })
             });
 
-            // Get the info hash first
-            let info_hash = info_hash_rx.recv().unwrap();
+            // Get the info hash and peer id first
+            let (info_hash, our_id) = info_hash_rx.recv().unwrap();
 
             // Wait for the ListenerStarted event to get the port
             let listener_port = loop {

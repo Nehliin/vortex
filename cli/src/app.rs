@@ -18,7 +18,7 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     widgets::ListState,
 };
-use vortex_bittorrent::{Command, MetadataProgress, State, TorrentEvent};
+use vortex_bittorrent::{Command, MetadataProgress, PeerId, State, TorrentEvent};
 
 use crate::ui::Time;
 
@@ -125,6 +125,8 @@ pub struct AppSetup<'queue> {
     pub pause_dht: Arc<AtomicBool>,
     /// Config used
     pub config: vortex_bittorrent::Config,
+    /// The peer id we identify ourselves with towards other peers
+    pub our_id: PeerId,
 }
 
 impl<'queue, F: FnOnce(State) -> color_eyre::Result<()>> VortexApp<'queue, F> {
@@ -369,6 +371,7 @@ impl<'queue, F: FnOnce(State) -> color_eyre::Result<()>> VortexApp<'queue, F> {
                             )
                             .context("Failed to open metadata file")?;
                             let state = State::from_metadata_and_root(
+                                self.setup.our_id,
                                 metadata.clone(),
                                 self.setup.root.clone(),
                                 self.setup.config,

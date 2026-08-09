@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     io,
-    os::fd::{AsRawFd, IntoRawFd, RawFd},
+    os::fd::{IntoRawFd, RawFd},
     ptr::null_mut,
 };
 
@@ -17,7 +17,8 @@ use socket2::{SockAddr, Socket};
 use crate::{
     buf_pool::{Buffer, BufferPool},
     buf_ring::BufferRing,
-    event_loop::{ConnectionId, EventData, EventId, EventType},
+    connection_manager::ConnectionId,
+    event_loop::{EventData, EventId, EventType},
     file_store::{DiskOp, DiskOpType},
     torrent::Config,
 };
@@ -157,25 +158,25 @@ impl<Q: SubmissionQueue> Io<Q> {
         }
     }
 
-    /// Schedule a connect operation with an attached timeout
-    pub fn connect(&mut self, socket: Socket, addr: SockAddr) {
+    /// Schedule a connect operation with an attached timeout. The socket stays
+    /// owned by the connection manager entry.
+    pub fn connect(&mut self, conn_id: ConnectionId, fd: RawFd, addr: SockAddr) {
         let event_idx = self.events.insert(EventData {
-            typ: EventType::Connect { socket, addr },
+            typ: EventType::Connect {
+                connection_idx: conn_id,
+                addr,
+            },
             buffers: None,
         });
 
-        let EventType::Connect { socket, addr } = &self.events[event_idx].typ else {
+        let EventType::Connect { addr, .. } = &self.events[event_idx].typ else {
             unreachable!();
         };
 
-        let connect_op = opcode::Connect::new(
-            types::Fd(socket.as_raw_fd()),
-            addr.as_ptr().cast(),
-            addr.len(),
-        )
-        .build()
-        .flags(Flags::IO_LINK)
-        .user_data(event_idx.data().as_ffi());
+        let connect_op = opcode::Connect::new(types::Fd(fd), addr.as_ptr().cast(), addr.len())
+            .build()
+            .flags(Flags::IO_LINK)
+            .user_data(event_idx.data().as_ffi());
         let timeout_op = opcode::LinkTimeout::new(&CONNECT_TIMEOUT)
             .build()
             .user_data(event_idx.data().as_ffi());
@@ -193,15 +194,13 @@ impl<Q: SubmissionQueue> Io<Q> {
     }
 
     /// Write to an unestablished (from a bittorrent perspective) connection
-    pub fn write(&mut self, socket: Socket, addr: SockAddr, buffer: Buffer) {
-        let fd = socket.as_raw_fd();
+    pub fn write(&mut self, conn_id: ConnectionId, fd: RawFd, buffer: Buffer) {
         let buffer_slice = buffer.filled_slice();
         let buffer_ptr = buffer_slice.as_ptr();
         let buffer_len = buffer_slice.len();
         let write_event_id = self.events.insert(EventData {
             typ: EventType::Write {
-                socket,
-                addr,
+                connection_idx: conn_id,
                 expected_write: buffer_len,
             },
             buffers: Some(vec![buffer]),

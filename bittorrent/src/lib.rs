@@ -1,5 +1,6 @@
 mod buf_pool;
 mod buf_ring;
+mod connection_manager;
 mod event_loop;
 mod file_store;
 mod io;
@@ -36,7 +37,7 @@ mod test_utils {
 
     pub fn generate_peer(
         fast_ext: bool,
-        conn_id: crate::event_loop::ConnectionId,
+        conn_id: crate::connection_manager::ConnectionId,
     ) -> PeerConnection {
         let socket_a = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
         let peer_addr = "127.0.0.1:0".parse().unwrap();
@@ -182,6 +183,7 @@ mod test_utils {
         );
         let state = InitializedState::new(&root, &torrent_info, Config::default()).unwrap();
         State::inprogress(
+            PeerId::generate(),
             torrent_info.info_hash_bytes().try_into().unwrap(),
             root,
             torrent_info,
@@ -208,6 +210,7 @@ mod test_utils {
         );
         let state = InitializedState::new(&root, &torrent_info, Config::default()).unwrap();
         State::inprogress(
+            PeerId::generate(),
             torrent_info.info_hash_bytes().try_into().unwrap(),
             root,
             torrent_info,
@@ -244,7 +247,8 @@ mod test_utils {
             large_metadata,
         );
         let info_hash = torrent_info.info_hash_bytes().try_into().unwrap();
-        let uninitialized_state = State::unstarted(info_hash, root, Config::default());
+        let uninitialized_state =
+            State::unstarted(PeerId::generate(), info_hash, root, Config::default());
 
         (uninitialized_state, torrent_info)
     }
@@ -276,6 +280,7 @@ mod test_utils {
         });
 
         // Use from_metadata_and_root to create a state with already completed pieces
-        State::from_metadata_and_root(torrent_info, root, Config::default()).unwrap()
+        State::from_metadata_and_root(PeerId::generate(), torrent_info, root, Config::default())
+            .unwrap()
     }
 }

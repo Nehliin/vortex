@@ -49,8 +49,13 @@ fn ring_setup_failure_is_returned_to_the_caller() {
     let (_command_tx, command_rc) = std::sync::mpsc::sync_channel::<Command>(1);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
 
-    let state = State::unstarted([0; 20], std::env::temp_dir(), Config::default());
-    let mut torrent = Torrent::new(PeerId::generate(), state);
+    let state = State::unstarted(
+        PeerId::generate(),
+        [0; 20],
+        std::env::temp_dir(),
+        Config::default(),
+    );
+    let mut torrent = Torrent::new(state);
 
     // Reaching this assertion at all is most of the point: `start` used to
     // unwrap the ring build, so an exhausted RLIMIT_MEMLOCK panicked here

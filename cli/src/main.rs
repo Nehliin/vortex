@@ -318,6 +318,7 @@ fn main() -> color_eyre::Result<()> {
 
     let bt_config = vortex_config.bittorrent;
     let root = paths.download_folder.clone();
+    let id = PeerId::generate();
 
     let (app_state, initial_metadata) = match cli.torrent_info {
         TorrentInfo {
@@ -328,7 +329,7 @@ fn main() -> color_eyre::Result<()> {
             let parsed_metadata = lava_torrent::torrent::v1::Torrent::read_from_file(metadata)
                 .wrap_err("Invalid torrent file")?;
             let state =
-                State::from_metadata_and_root(parsed_metadata.clone(), root.clone(), bt_config)
+                State::from_metadata_and_root(id, parsed_metadata.clone(), root.clone(), bt_config)
                     .wrap_err("Failed initialzing state")?;
 
             (
@@ -355,6 +356,7 @@ fn main() -> color_eyre::Result<()> {
                 ) {
                     Ok(metadata) => {
                         let state = State::from_metadata_and_root(
+                            id,
                             metadata.clone(),
                             root.clone(),
                             bt_config,
@@ -367,6 +369,7 @@ fn main() -> color_eyre::Result<()> {
                     Err(lava_torrent::LavaTorrentError::Io(io_err)) => {
                         if io_err.kind() == ErrorKind::NotFound {
                             let state = State::unstarted(
+                                id,
                                 decode_info_hash_hex(&info_hash).wrap_err("Invalid info hash")?,
                                 root.clone(),
                                 bt_config,
@@ -430,7 +433,6 @@ fn main() -> color_eyre::Result<()> {
         TcpListener::bind(&addr).wrap_err(format!("Failed binding tcp listener to {addr}"))?;
 
     let port = listener.local_addr().unwrap().port();
-    let id = PeerId::generate();
     let (shutdown_signal_tx, shutdown_signal_rc) = bounded(1);
     let pause_dht = Arc::new(AtomicBool::new(false));
 
@@ -441,7 +443,7 @@ fn main() -> color_eyre::Result<()> {
         // Use a closure to allow for spawning the torrent threads later in the cli lifecycle
         let spawn_torrent_threads = move |state: State| -> color_eyre::Result<()> {
             let info_hash_id = Id::from_bytes(state.info_hash()).wrap_err("Invalid info_hash")?;
-            let mut torrent = Torrent::new(id, state);
+            let mut torrent = Torrent::new(state);
             s.spawn(move || {
                 torrent.start(event_tx, cmd_rc, listener).unwrap();
             });
@@ -468,6 +470,7 @@ fn main() -> color_eyre::Result<()> {
             root,
             pause_dht,
             config: bt_config,
+            our_id: id,
         };
 
         let mut app = VortexApp::new(setup, app_state, spawn_torrent_threads)?;

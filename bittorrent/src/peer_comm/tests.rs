@@ -1,4 +1,5 @@
 use std::{
+    net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -7,13 +8,14 @@ use bt_bencode::Deserializer;
 use bytes::Buf;
 use heapless::spsc::{Producer, Queue};
 use serde::Deserialize;
-use slotmap::SlotMap;
 
 use crate::{
-    event_loop::{ConnectionId, tick},
+    connection_manager::{ConnectionId, ConnectionManager},
+    event_loop::{EventType, tick},
     file_store::{DiskOp, DiskOpType},
     io::{BackloggedSubmissionQueue, Io, SubmissionQueue},
     peer_comm::{extended_protocol::MetadataMessage, peer_connection::DisconnectReason},
+    peer_protocol::PeerId,
     piece_selector::{SUBPIECE_SIZE, Subpiece},
     test_utils::{
         generate_peer, setup_seeding_test, setup_test, setup_test_with_large_metadata,
@@ -22,7 +24,10 @@ use crate::{
     torrent::{self, InitializedState, TorrentEvent},
 };
 
-use super::{peer_connection::PeerConnection, peer_protocol::PeerMessage};
+use super::{
+    peer_connection::PeerConnection,
+    peer_protocol::{HANDSHAKE_SIZE, PeerMessage},
+};
 
 // Mock SubmissionQueue for tests that need to call disconnect
 struct MockSubmissionQueue;
@@ -69,7 +74,7 @@ fn sent_and_marked_not_interested(peer: &PeerConnection) {
 fn simulate_disk_write_completion(
     torrent_state: &mut InitializedState,
     pending_disk_operations: &mut Vec<DiskOp>,
-    connections: &mut SlotMap<ConnectionId, PeerConnection>,
+    connections: &mut ConnectionManager,
     event_tx: &mut Producer<'_, TorrentEvent>,
     expected_pieces: &[i32],
 ) {
@@ -116,8 +121,8 @@ fn fast_ext_have_all() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         assert!(!connections[key_a].is_interesting);
         connections[key_a].handle_message(
             PeerMessage::HaveAll,
@@ -149,7 +154,7 @@ fn fast_ext_have_all() {
         }
 
         // Peers that do not state they support fast_ext are disconnected
-        let key_b = connections.insert_with_key(|k| generate_peer(false, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(false, k));
         connections[key_b].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -159,7 +164,7 @@ fn fast_ext_have_all() {
         assert!(connections[key_b].pending_disconnect.is_some());
 
         // Do not mark as interestead if we've already completed the torrent
-        let key_c = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_c = connections.insert_established_with_key(|k| generate_peer(true, k));
         let torrent_state = state_ref.state().unwrap();
         torrent_state.is_complete = true;
         assert!(!connections[key_c].is_interesting);
@@ -187,8 +192,8 @@ fn fast_ext_have_none() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].is_interesting = true;
         connections[key_a].handle_message(
             PeerMessage::HaveNone,
@@ -213,7 +218,7 @@ fn fast_ext_have_none() {
                 .any()
         );
         // Peers that do not state they support fast_ext are disconnected
-        let key_b = connections.insert_with_key(|k| generate_peer(false, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(false, k));
         connections[key_b].handle_message(
             PeerMessage::HaveNone,
             &mut state_ref,
@@ -234,8 +239,8 @@ fn have() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::Have { index: 7 },
             &mut state_ref,
@@ -290,7 +295,7 @@ fn have() {
         let mut subpieces = torrent_state.allocate_piece(index, key_a);
         connections[key_a].append_and_fill(&mut subpieces);
 
-        let key_b = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         assert!(!connections[key_b].is_interesting);
         let torrent_state = state_ref.state().unwrap();
         assert!(torrent_state.piece_selector.is_allocated(index as usize));
@@ -310,7 +315,7 @@ fn have() {
                 .unwrap()[index as usize]
         );
 
-        let key_c = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_c = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Complete the piece
         connections[key_a].handle_message(
@@ -375,8 +380,8 @@ fn have_invalid_indicies() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::Have { index: -1 },
             &mut state_ref,
@@ -384,7 +389,7 @@ fn have_invalid_indicies() {
             scope,
         );
         assert!(connections[key_a].pending_disconnect.is_some());
-        let key_b = connections.insert_with_key(|k| generate_peer(false, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(false, k));
         let torrent_state = state_ref.state().unwrap();
         connections[key_b].handle_message(
             PeerMessage::Have {
@@ -410,8 +415,8 @@ fn have_without_interest() {
         // Needed to avoid hitting asserts
         torrent_state.piece_selector.mark_downloaded(7);
         torrent_state.piece_selector.mark_complete(7);
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::Have { index: 7 },
             &mut state_ref,
@@ -448,12 +453,11 @@ fn slow_start() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -515,7 +519,6 @@ fn slow_start() {
         tick(
             &Duration::from_millis(1500),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -567,7 +570,6 @@ fn slow_start() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -619,7 +621,6 @@ fn slow_start() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -644,8 +645,8 @@ fn desired_queue_size() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -687,7 +688,6 @@ fn desired_queue_size() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -698,7 +698,6 @@ fn desired_queue_size() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -720,8 +719,8 @@ fn peer_choke_recv_supports_fast() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // First, the peer needs to have pieces to be interesting
         for index in 1..7 {
@@ -800,7 +799,6 @@ fn peer_choke_recv_supports_fast() {
         tick(
             &Duration::from_millis(650),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -845,8 +843,8 @@ fn peer_choke_recv_does_not_support_fast() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(false, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(false, k));
 
         // First, the peer needs to have pieces to be interesting
         for index in 1..7 {
@@ -925,7 +923,6 @@ fn peer_choke_recv_does_not_support_fast() {
         tick(
             &Duration::from_millis(650),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -969,8 +966,8 @@ fn unchoke_recv() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(false, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(false, k));
 
         assert!(connections[key].peer_choking);
         connections[key].is_interesting = false;
@@ -987,7 +984,7 @@ fn unchoke_recv() {
         let torrent_state = state_ref.state().unwrap();
         assert_eq!(torrent_state.num_allocated(), 0);
 
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -1019,10 +1016,10 @@ fn bitfield_recv() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         {
-            let key_b = connections.insert_with_key(|k| generate_peer(true, k));
+            let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
             assert!(connections[key_b].pending_disconnect.is_none());
             let torrent_state = state_ref.state().unwrap();
             let invalid_field =
@@ -1036,7 +1033,7 @@ fn bitfield_recv() {
             assert!(connections[key_b].pending_disconnect.is_some());
         }
 
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         assert!(!connections[key_a].is_interesting);
         let torrent_state = state_ref.state().unwrap();
         assert!(
@@ -1083,7 +1080,7 @@ fn bitfield_recv() {
             }
         }
 
-        let key_b = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         assert!(!connections[key_b].is_interesting);
         let torrent_state = state_ref.state().unwrap();
         assert!(
@@ -1110,7 +1107,7 @@ fn bitfield_recv() {
                 .bitfield_received(connections[key_b].conn_id)
         );
 
-        let key_c = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_c = connections.insert_established_with_key(|k| generate_peer(true, k));
         assert!(!connections[key_c].is_interesting);
         assert!(
             !torrent_state
@@ -1147,8 +1144,8 @@ fn interest_is_updated_when_recv_piece() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         assert!(!connections[key].is_interesting);
         let torrent_state = state_ref.state().unwrap();
@@ -1265,10 +1262,10 @@ fn send_have_to_peers_when_piece_completes() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
-        let key_b = connections.insert_with_key(|k| generate_peer(true, k));
-        let _key_c = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let _key_c = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         let torrent_state = state_ref.state().unwrap();
         let num_pieces = torrent_state.num_pieces();
@@ -1332,7 +1329,7 @@ fn send_have_to_peers_when_piece_completes() {
             &mut event_tx,
             &[index_a],
         );
-        for (_, peer) in &mut connections {
+        for (_, peer) in connections.iter_established_mut() {
             assert!(
                 peer.outgoing_msgs_buffer
                     .contains(&PeerMessage::Have { index: index_a })
@@ -1370,7 +1367,7 @@ fn send_have_to_peers_when_piece_completes() {
             &mut event_tx,
             &[index_b],
         );
-        for (_, peer) in &connections {
+        for peer in connections.values() {
             assert!(
                 peer.outgoing_msgs_buffer
                     .contains(&PeerMessage::Have { index: index_b })
@@ -1386,8 +1383,8 @@ fn assume_intrest_when_request_recv() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -1419,8 +1416,8 @@ fn piece_recv() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -1514,8 +1511,8 @@ fn handles_duplicate_piece_recv() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -1613,8 +1610,8 @@ fn invalid_piece() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -1636,7 +1633,7 @@ fn invalid_piece() {
             scope,
         );
         assert!(connections[key_a].pending_disconnect.is_some());
-        let key_a2 = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_a2 = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a2].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -1659,7 +1656,7 @@ fn invalid_piece() {
         );
         assert!(connections[key_a2].pending_disconnect.is_some());
 
-        let key_a3 = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_a3 = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a3].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -1699,8 +1696,8 @@ fn snubbed_peer() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -1747,7 +1744,6 @@ fn snubbed_peer() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -1792,7 +1788,6 @@ fn snubbed_peer() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -1815,8 +1810,8 @@ fn choked_peer_with_empty_inflight_is_not_snubbed() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(false, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(false, k));
 
         let num_pieces = state_ref.state().unwrap().num_pieces();
         let field = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
@@ -1879,7 +1874,6 @@ fn choked_peer_with_empty_inflight_is_not_snubbed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -1899,8 +1893,8 @@ fn fast_ext_peer_rejecting_while_choked_is_not_snubbed() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -1974,7 +1968,6 @@ fn fast_ext_peer_rejecting_while_choked_is_not_snubbed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -1992,8 +1985,8 @@ fn stalled_connection_is_snubbed() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -2036,7 +2029,6 @@ fn stalled_connection_is_snubbed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -2053,8 +2045,8 @@ fn reject_request_requests_new() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -2116,8 +2108,8 @@ fn invalid_reject_request() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_b = connections.insert_with_key(|k| generate_peer(false, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_b = connections.insert_established_with_key(|k| generate_peer(false, k));
         connections[key_b].handle_message(
             PeerMessage::RejectRequest {
                 index: 2,
@@ -2132,7 +2124,7 @@ fn invalid_reject_request() {
             connections[key_b].pending_disconnect,
             Some(DisconnectReason::ProtocolError(_))
         ));
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
@@ -2201,8 +2193,8 @@ fn endgame_mode() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key_a].handle_message(
             PeerMessage::HaveAll,
@@ -2211,7 +2203,7 @@ fn endgame_mode() {
             scope,
         );
 
-        let key_b = connections.insert_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key_b].handle_message(
             PeerMessage::HaveAll,
@@ -2324,8 +2316,8 @@ fn extension_protocol_handshake() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
         // Create peer with extension protocol support
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
         assert!(connections[key_a].extensions.is_empty());
         let expected_size = state_ref
@@ -2364,8 +2356,8 @@ fn extension_handshake_with_reqq() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         let expected_size = state_ref
@@ -2400,8 +2392,8 @@ fn extension_handshake_malformed() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         let invalid_data = b"invalid bencoded data";
@@ -2426,8 +2418,8 @@ fn extension_handshake_missing_m_field() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         // Missing 'm' field
@@ -2457,8 +2449,8 @@ fn metadata_extension_request_message() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         let expected_size = state_ref
@@ -2525,8 +2517,8 @@ fn metadata_extension_request_response_capped_to_piece_size() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         let metadata = state_ref.metadata().unwrap().construct_info().encode();
@@ -2595,8 +2587,8 @@ fn metadata_extension_request_last_piece_smaller_than_subpiece() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         let metadata = state_ref.metadata().unwrap().construct_info().encode();
@@ -2670,8 +2662,8 @@ fn metadata_extension_data_message() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         let expected_size = state_ref
@@ -2718,8 +2710,8 @@ fn metadata_extension_reject_message() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         let expected_size = state_ref
@@ -2762,8 +2754,8 @@ fn metadata_extension_invalid_message_type() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         let expected_size = state_ref
@@ -2808,8 +2800,8 @@ fn extension_message_unknown_id() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         // Send message with unknown extension ID (no handshake first)
@@ -2836,8 +2828,8 @@ fn metadata_extension_piece_bounds_validation() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         let expected_size = state_ref
@@ -2946,8 +2938,8 @@ fn metadata_download_single_piece() {
         assert!(!state_ref.is_initialzied());
         assert!(state_ref.state().is_none());
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         // Get the actual metadata that should be downloaded
@@ -3036,8 +3028,8 @@ fn metadata_download_multiple_pieces() {
         // Verify state is not initialized
         assert!(!state_ref.is_initialzied());
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
         // Get the actual metadata - this should now be large enough to require multiple pieces
@@ -3163,8 +3155,8 @@ fn updates_upload_throughput() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Unchoke the peer so upload stats are tracked properly
         let torrent_state = state_ref.state().unwrap();
@@ -3195,7 +3187,6 @@ fn updates_upload_throughput() {
         tick(
             &Duration::from_millis(1500),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -3217,8 +3208,8 @@ fn request_message_queues_disk_reads() {
         let mut state_ref = download_state.as_ref();
         state_ref.state().unwrap().piece_buffer_pool.stop_tracking();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Setup: peer have no pieces and is interested in our data
         connections[key].handle_message(
@@ -3326,13 +3317,13 @@ fn unchoke_selection_based_on_download_throughput() {
         // Set max_unchoked to 10 so we have room for regular and optimistic unchokes
         torrent_state.config.max_unchoked = 10;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 12 interested peers with varying download throughputs
         // All peers start choked
         let peer_ids: Vec<_> = (0..12)
             .map(|i| {
-                let key = connections.insert_with_key(|k| generate_peer(true, k));
+                let key = connections.insert_established_with_key(|k| generate_peer(true, k));
                 connections[key].peer_interested = true;
                 connections[key].is_choking = true;
                 // Simulate different download amounts in last round
@@ -3393,10 +3384,10 @@ fn unchoke_chokes_non_interested_peers() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 3 peers - 2 start unchoked, 1 starts choked
-        let interested_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let interested_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[interested_peer].peer_interested = true;
         connections[interested_peer].is_choking = false; // Currently unchoked
         connections[interested_peer]
@@ -3404,7 +3395,8 @@ fn unchoke_chokes_non_interested_peers() {
             .downloaded_in_last_round = 5000;
         torrent_state.num_unchoked += 1; // Track unchoked peer
 
-        let not_interested_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let not_interested_peer =
+            connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[not_interested_peer].peer_interested = false;
         connections[not_interested_peer].is_choking = false; // Currently unchoked
         connections[not_interested_peer]
@@ -3412,7 +3404,8 @@ fn unchoke_chokes_non_interested_peers() {
             .downloaded_in_last_round = 10000;
         torrent_state.num_unchoked += 1; // Track unchoked peer
 
-        let new_interested_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let new_interested_peer =
+            connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[new_interested_peer].peer_interested = true;
         connections[new_interested_peer].is_choking = true;
         connections[new_interested_peer]
@@ -3449,9 +3442,10 @@ fn unchoke_chokes_pending_disconnect_peers() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
-        let pending_disconnect_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let pending_disconnect_peer =
+            connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[pending_disconnect_peer].peer_interested = true;
         connections[pending_disconnect_peer].is_choking = false; // Currently unchoked
         connections[pending_disconnect_peer].pending_disconnect = Some(DisconnectReason::Idle);
@@ -3460,7 +3454,7 @@ fn unchoke_chokes_pending_disconnect_peers() {
             .downloaded_in_last_round = 10000;
         torrent_state.num_unchoked += 1; // Track unchoked peer
 
-        let healthy_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let healthy_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[healthy_peer].peer_interested = true;
         connections[healthy_peer].is_choking = true;
         connections[healthy_peer]
@@ -3496,10 +3490,10 @@ fn unchoke_promotes_optimistic_unchoke_to_regular() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create a peer that was optimistically unchoked and has good throughput
-        let opt_unchoked_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let opt_unchoked_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[opt_unchoked_peer].peer_interested = true;
         connections[opt_unchoked_peer].is_choking = false;
         connections[opt_unchoked_peer].optimistically_unchoked = true;
@@ -3510,7 +3504,7 @@ fn unchoke_promotes_optimistic_unchoke_to_regular() {
 
         // Create some lower throughput peers
         for i in 0..3 {
-            let key = connections.insert_with_key(|k| generate_peer(true, k));
+            let key = connections.insert_established_with_key(|k| generate_peer(true, k));
             connections[key].peer_interested = true;
             connections[key].is_choking = true;
             connections[key].network_stats.downloaded_in_last_round = i * 1000;
@@ -3548,22 +3542,23 @@ fn optimistic_unchoke_selection() {
 
         torrent_state.config.max_unchoked = 10;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create choked interested peers with different last_optimistically_unchoked times
-        let old_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let old_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[old_peer].peer_interested = true;
         connections[old_peer].is_choking = true;
         connections[old_peer].last_optimistically_unchoked =
             Some(Instant::now() - std::time::Duration::from_secs(100));
 
-        let recent_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let recent_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[recent_peer].peer_interested = true;
         connections[recent_peer].is_choking = true;
         connections[recent_peer].last_optimistically_unchoked =
             Some(Instant::now() - std::time::Duration::from_secs(10));
 
-        let never_unchoked_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let never_unchoked_peer =
+            connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[never_unchoked_peer].peer_interested = true;
         connections[never_unchoked_peer].is_choking = true;
         connections[never_unchoked_peer].last_optimistically_unchoked = None;
@@ -3615,10 +3610,10 @@ fn optimistic_unchoke_rotates_out_previous() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create a peer that's currently optimistically unchoked
-        let current_opt = connections.insert_with_key(|k| generate_peer(true, k));
+        let current_opt = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[current_opt].peer_interested = true;
         connections[current_opt].is_choking = false;
         connections[current_opt].optimistically_unchoked = true;
@@ -3627,7 +3622,7 @@ fn optimistic_unchoke_rotates_out_previous() {
         torrent_state.num_unchoked += 1; // Track unchoked peer
 
         // Create a peer that has been waiting longer
-        let waiting_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let waiting_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[waiting_peer].peer_interested = true;
         connections[waiting_peer].is_choking = true;
         connections[waiting_peer].last_optimistically_unchoked =
@@ -3674,15 +3669,15 @@ fn optimistic_unchoke_ignores_non_interested_peers() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create a not-interested peer
-        let not_interested = connections.insert_with_key(|k| generate_peer(true, k));
+        let not_interested = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[not_interested].peer_interested = false;
         connections[not_interested].is_choking = true;
 
         // Create an interested peer
-        let interested = connections.insert_with_key(|k| generate_peer(true, k));
+        let interested = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[interested].peer_interested = true;
         connections[interested].is_choking = true;
 
@@ -3715,16 +3710,16 @@ fn optimistic_unchoke_ignores_pending_disconnect_peers() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create a peer pending disconnect
-        let pending = connections.insert_with_key(|k| generate_peer(true, k));
+        let pending = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[pending].peer_interested = true;
         connections[pending].is_choking = true;
         connections[pending].pending_disconnect = Some(DisconnectReason::Idle);
 
         // Create a healthy peer
-        let healthy = connections.insert_with_key(|k| generate_peer(true, k));
+        let healthy = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[healthy].peer_interested = true;
         connections[healthy].is_choking = true;
 
@@ -3755,11 +3750,11 @@ fn unchoke_reserves_slots_for_optimistic() {
 
         torrent_state.config.max_unchoked = 10;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 15 interested peers with varying throughput - all start choked
         for i in 0..15 {
-            let key = connections.insert_with_key(|k| generate_peer(true, k));
+            let key = connections.insert_established_with_key(|k| generate_peer(true, k));
             connections[key].peer_interested = true;
             connections[key].is_choking = true;
             connections[key].network_stats.downloaded_in_last_round = i * 1000;
@@ -3796,8 +3791,8 @@ fn optimistically_unchoked_disconnect_resets_timer() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         {
             let torrent_state = state_ref.state().unwrap();
 
@@ -3816,7 +3811,7 @@ fn optimistically_unchoked_disconnect_resets_timer() {
             &torrent::Config::default(),
         );
 
-        connections[key].disconnect(&mut io, &mut state_ref);
+        connections.disconnect(key, &mut io, &mut state_ref);
 
         {
             let torrent_state = state_ref.state().unwrap();
@@ -3825,6 +3820,205 @@ fn optimistically_unchoked_disconnect_resets_timer() {
         }
     });
 }
+
+// The connection ids of all scheduled but not yet completed socket closes
+fn scheduled_closes(io: &Io<MockSubmissionQueue>) -> Vec<Option<ConnectionId>> {
+    io.events
+        .values()
+        .filter_map(|event| match event.typ {
+            EventType::Close {
+                maybe_connection_idx,
+            } => Some(maybe_connection_idx),
+            _ => None,
+        })
+        .collect()
+}
+
+// The connection ids of all scheduled but not yet completed connects
+fn scheduled_connects(io: &Io<MockSubmissionQueue>) -> Vec<ConnectionId> {
+    io.events
+        .values()
+        .filter_map(|event| match event.typ {
+            EventType::Connect { connection_idx, .. } => Some(connection_idx),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn established_connection_slot_is_kept_until_close_completes() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        assert!(
+            connections
+                .disconnect(key, &mut io, &mut state_ref)
+                .is_some()
+        );
+        assert_eq!(scheduled_closes(&io), vec![Some(key)]);
+        // The slot is kept until the close completes so the socket can't be
+        // closed twice and the peer can't be reconnected to in the meantime
+        assert!(!connections.is_empty());
+
+        // The connection itself is gone though, so completions arriving after the
+        // disconnect can't end up operating on a peer whose socket is closing
+        assert!(connections.established_mut(key).is_none());
+        assert!(!connections.any_established());
+        assert_eq!(connections.num_established(), 0);
+        assert!(connections.fd(key).is_none());
+
+        // Disconnecting again is a no-op, only a single close is ever scheduled
+        assert!(
+            connections
+                .disconnect(key, &mut io, &mut state_ref)
+                .is_none()
+        );
+        assert_eq!(scheduled_closes(&io), vec![Some(key)]);
+
+        connections.remove_closed(key);
+        assert!(connections.is_empty());
+    });
+}
+
+#[test]
+fn only_peers_marked_for_disconnect_are_disconnected() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let marked = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let kept = connections.insert_established_with_key(|k| generate_peer(true, k));
+        connections[marked].pending_disconnect = Some(DisconnectReason::Idle);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        connections.execute_pending_disconnects(&mut io, &mut state_ref);
+
+        assert_eq!(scheduled_closes(&io), vec![Some(marked)]);
+        assert!(connections.established_mut(marked).is_none());
+        assert!(connections.established_mut(kept).is_some());
+        assert_eq!(connections.num_established(), 1);
+    });
+}
+
+#[test]
+fn pending_connection_slot_is_kept_until_close_completes() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let peer_addr: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
+        let [key] = scheduled_connects(&io)[..] else {
+            panic!("the peer should have a connect scheduled");
+        };
+
+        let addr = connections
+            .disconnect(key, &mut io, &mut state_ref)
+            .expect("connecting peer should be disconnected");
+        assert_eq!(addr, SocketAddr::V4(peer_addr));
+        assert_eq!(scheduled_closes(&io), vec![Some(key)]);
+        assert!(!connections.is_empty());
+        // The socket is gone so there is nothing left to rearm a handshake recv on
+        assert!(connections.fd(key).is_none());
+
+        // Reconnects are rejected until the socket has actually been closed
+        connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
+        assert_eq!(scheduled_connects(&io), vec![key]);
+
+        assert!(
+            connections
+                .disconnect(key, &mut io, &mut state_ref)
+                .is_none()
+        );
+        connections.remove_closed(key);
+        assert!(connections.is_empty());
+
+        // ...and allowed again once the slot is freed
+        connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
+        assert_eq!(scheduled_connects(&io).len(), 2);
+    });
+}
+
+#[test]
+fn completions_for_a_disconnected_pending_connection_are_ignored() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let info_hash = *state_ref.info_hash();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let peer_addr: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
+        let [key] = scheduled_connects(&io)[..] else {
+            panic!("the peer should have a connect scheduled");
+        };
+        // Pausing and shutting down tears pending connections down without
+        // waiting for their inflight operations to complete first
+        connections.disconnect_all(&mut io, &mut state_ref);
+
+        // So their completions may arrive afterwards and must be ignored
+        connections.on_connect(key, info_hash, &mut io);
+        connections.on_write(key, HANDSHAKE_SIZE, HANDSHAKE_SIZE, &mut io, &mut state_ref);
+        // Dummy bid that isn't read by anything
+        connections
+            .on_read(key, Some(0), HANDSHAKE_SIZE, &mut io, &mut state_ref, scope)
+            .unwrap();
+
+        // None of which scheduled any further io for the connection
+        assert_eq!(scheduled_closes(&io), vec![Some(key)]);
+        assert_eq!(scheduled_connects(&io), vec![key]);
+
+        connections.remove_closed(key);
+        assert!(connections.is_empty());
+    });
+}
+
+#[test]
+fn rejected_incoming_connection_is_closed_without_being_tracked() {
+    let download_state = setup_test();
+    let mut io = Io::new(
+        BackloggedSubmissionQueue::new(MockSubmissionQueue),
+        &torrent::Config::default(),
+    );
+    // A cap of zero rejects every incoming connection
+    let mut connections = ConnectionManager::new(PeerId::generate(), 0);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+
+    connections
+        .on_accepted(accepted.into(), download_state.info_hash, &mut io)
+        .unwrap();
+
+    // The connection never entered the manager so its close carries no id
+    assert!(connections.is_empty());
+    assert_eq!(scheduled_closes(&io), vec![None]);
+}
+
 #[test]
 fn upload_only_field_in_extended_handshake() {
     let mut download_state = setup_test();
@@ -3832,8 +4026,8 @@ fn upload_only_field_in_extended_handshake() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         let metadata_size = state_ref
             .metadata()
             .unwrap()
@@ -3870,7 +4064,7 @@ fn upload_only_field_in_extended_handshake() {
         assert!(connections[key].is_upload_only);
 
         // Test with upload_only = 0
-        let key2 = connections.insert_with_key(|k| generate_peer(true, k));
+        let key2 = connections.insert_established_with_key(|k| generate_peer(true, k));
         let mut handshake2 = std::collections::BTreeMap::new();
         let m2: std::collections::BTreeMap<&str, u8> = [("ut_metadata", 1u8)].into_iter().collect();
         handshake2.insert("m", bt_bencode::to_value(&m2).unwrap());
@@ -3903,8 +4097,8 @@ fn upload_only_extension_message_received() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Peer hasn't declared upload_only yet
         assert!(!connections[key].is_upload_only);
@@ -3965,11 +4159,11 @@ fn upload_only_extension_message_sent_on_torrent_complete() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
-        let other_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let other_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
         // Doesn't support the extension
-        let third_peer = connections.insert_with_key(|k| generate_peer(true, k));
+        let third_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Set up extension support
         let mut handshake = std::collections::BTreeMap::new();
@@ -4112,8 +4306,8 @@ fn redundant_connection_disconnect_both_upload_only() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // HaveAll automatically marks peer as upload_only
         connections[key].handle_message(
@@ -4194,8 +4388,8 @@ fn no_disconnect_when_peer_not_upload_only() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -4269,9 +4463,9 @@ fn disconnect_upload_only_peer_when_no_longer_interesting() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key_a = connections.insert_with_key(|k| generate_peer(true, k));
-        let key_b = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // key_a is upload only (via HaveAll) and has all pieces
         connections[key_a].handle_message(
@@ -4434,16 +4628,16 @@ fn seeding_round_robin_rotation_after_quota() {
 
         torrent_state.config.max_unchoked = 3;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 3 interested peers
-        let peer_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_a].peer_interested = true;
 
-        let peer_b = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_b].peer_interested = true;
 
-        let peer_c = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_c = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_c].peer_interested = true;
 
         // Unchoke peer A manually and set it up as having completed its quota
@@ -4498,8 +4692,8 @@ fn incoming_keepalive_updates_last_seen() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Fake that this peer hasn't been seen in a while
         connections[key].last_seen = Instant::now() - Duration::from_secs(60);
@@ -4527,14 +4721,13 @@ fn keepalive_not_sent_before_100s_elapsed() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Freshly created connection - last_keepalive_sent is now
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -4551,7 +4744,6 @@ fn keepalive_not_sent_before_100s_elapsed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -4573,8 +4765,8 @@ fn keepalive_sent_after_100s_elapsed() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Simulate 101 seconds since last keepalive
         connections[key].last_keepalive_sent = Instant::now() - Duration::from_secs(101);
@@ -4582,7 +4774,6 @@ fn keepalive_sent_after_100s_elapsed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -4599,7 +4790,6 @@ fn keepalive_sent_after_100s_elapsed() {
         tick(
             &Duration::from_secs(1),
             &mut connections,
-            &Default::default(),
             &mut state_ref,
             &mut event_tx,
         );
@@ -4626,16 +4816,16 @@ fn seeding_quota_not_met_keeps_unchoked() {
 
         torrent_state.config.max_unchoked = 3;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 3 interested peers
-        let peer_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_a].peer_interested = true;
 
-        let peer_b = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_b].peer_interested = true;
 
-        let peer_c = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_c = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_c].peer_interested = true;
 
         // Unchoke peer A manually
@@ -4679,16 +4869,16 @@ fn seeding_time_threshold_not_met_keeps_unchoked() {
 
         torrent_state.config.max_unchoked = 3;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 3 interested peers
-        let peer_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_a].peer_interested = true;
 
-        let peer_b = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_b].peer_interested = true;
 
-        let peer_c = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_c = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_c].peer_interested = true;
 
         // Unchoke peer A manually but only 30 seconds ago (< 1 minute)
@@ -4726,8 +4916,8 @@ fn extension_handshake_with_upload_only_and_ut_metadata() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].extended_extension = true;
 
         let expected_size = state_ref
@@ -4800,21 +4990,21 @@ fn seeding_quota_complete_peers_deprioritized() {
         // Set max_unchoked to 2 so we have limited slots
         torrent_state.config.max_unchoked = 3;
 
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Calculate quota
         let piece_length = torrent_state.piece_selector.avg_piece_length();
         let quota_bytes = (piece_length * 20) as u64; // SEEDING_PIECE_QUOTA = 20
 
         // Create peer A and B - both unchoked and have completed their quota
-        let peer_a = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_a].peer_interested = true;
         connections[peer_a].is_choking = false;
         connections[peer_a].last_unchoked = Some(Instant::now() - Duration::from_secs(90));
         connections[peer_a].network_stats.upload_since_unchoked = quota_bytes + 100_000;
         connections[peer_a].network_stats.uploaded_in_last_round = 50_000;
 
-        let peer_b = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_b].peer_interested = true;
         connections[peer_b].is_choking = false;
         connections[peer_b].last_unchoked = Some(Instant::now() - Duration::from_secs(120));
@@ -4824,10 +5014,10 @@ fn seeding_quota_complete_peers_deprioritized() {
         torrent_state.num_unchoked = 2;
 
         // Create peer C and D - never been unchoked
-        let peer_c = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_c = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_c].peer_interested = true;
 
-        let peer_d = connections.insert_with_key(|k| generate_peer(true, k));
+        let peer_d = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[peer_d].peer_interested = true;
 
         // Verify initial state: 2 unchoked (A and B, both quota complete)
@@ -4872,8 +5062,8 @@ fn request_rejected_when_begin_plus_length_exceeds_piece_len() {
         let mut state_ref = download_state.as_ref();
         state_ref.state().unwrap().piece_buffer_pool.stop_tracking();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections = SlotMap::<ConnectionId, PeerConnection>::with_key();
-        let key = connections.insert_with_key(|k| generate_peer(true, k));
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Setup: peer has no pieces and is interested
         connections[key].handle_message(
