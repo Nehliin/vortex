@@ -253,8 +253,8 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
             log::trace!("Event cancelled");
             Ok(())
         }
-        _ => {
-            let err = std::io::Error::from_raw_os_error(error_code as i32);
+        err_code => {
+            let err = std::io::Error::from_raw_os_error(err_code);
             if let Some(event) = io.events.remove(event_data_idx) {
                 let err_str = format!("Unhandled error code: {err}, event type: {event:?}");
                 match event.typ {
@@ -283,7 +283,17 @@ fn event_error_handler<'state, Q: SubmissionQueue>(
                         }
                         return Err(err);
                     }
-                    EventType::Cancel | EventType::Accept | EventType::Dummy => {
+                    EventType::Cancel => {
+                        // This might happen for rejected incoming connections
+                        // for example. io.close_socket will Cancel + Close and if
+                        // nothing has started the Cancel will return ENOENT
+                        if err_code != libc::ENOENT {
+                            log::error!("{err_str}");
+                            return Err(err);
+                        }
+                        return Ok(());
+                    }
+                    EventType::Accept | EventType::Dummy => {
                         log::error!("{err_str}");
                         return Err(err);
                     }
