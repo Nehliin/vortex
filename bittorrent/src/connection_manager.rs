@@ -487,8 +487,8 @@ impl ConnectionManager {
             .any(|state| matches!(state, ConnectionState::Established(_)))
     }
 
-    #[cfg(feature = "metrics")]
     /// Number of established connections
+    #[cfg(any(test, feature = "metrics"))]
     pub(crate) fn num_established(&self) -> usize {
         self.connections
             .values()
