@@ -114,6 +114,13 @@ impl BufferRing {
         }
     }
 
+    /// Fill the buffer of `bid` with `data`, mimicking a recv completing into it
+    #[cfg(test)]
+    pub fn fill(&mut self, bid: Bid, data: &[u8]) {
+        let start = bid as usize * self.buf_len;
+        self.buffer_memory[start..start + data.len()].copy_from_slice(data);
+    }
+
     pub fn register(&mut self, submitter: &Submitter<'_>) -> io::Result<()> {
         // Safety: The ring, represented by the ring_start and the ring_entries remains valid until
         // it is unregistered. The backing store is an AnonymousMmap which remains valid until it
