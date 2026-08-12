@@ -350,21 +350,27 @@ impl ConnectionManager {
         // Recv has been complete, move over to multishot, same user data
         io.recv_multishot(recv_multi_id, fd);
 
-        // TODO: only if fast ext is enabled
-        let bitfield_msg = if let Some(torrent_state) = state.state() {
-            let completed = torrent_state.piece_selector.downloaded_clone();
-            // sent as first message after handshake
-            if completed.all() {
-                peer_protocol::PeerMessage::HaveAll
-            } else if completed.not_any() {
-                peer_protocol::PeerMessage::HaveNone
-            } else {
-                peer_protocol::PeerMessage::Bitfield(completed.into())
-            }
+        let maybe_completed = state
+            .state()
+            .map(|torrent_state| torrent_state.piece_selector.downloaded_clone());
+        let bitfield_msg = if connection.fast_ext {
+            Some(
+                maybe_completed.map_or(peer_protocol::PeerMessage::HaveNone, |completed| {
+                    if completed.all() {
+                        peer_protocol::PeerMessage::HaveAll
+                    } else if completed.not_any() {
+                        peer_protocol::PeerMessage::HaveNone
+                    } else {
+                        peer_protocol::PeerMessage::Bitfield(completed.into())
+                    }
+                }),
+            )
         } else {
-            peer_protocol::PeerMessage::HaveNone
+            maybe_completed.map(|completed| peer_protocol::PeerMessage::Bitfield(completed.into()))
         };
-        connection.outgoing_msgs_buffer.push(bitfield_msg);
+        if let Some(msg) = bitfield_msg {
+            connection.outgoing_msgs_buffer.push(msg);
+        }
         Ok(())
     }
 
