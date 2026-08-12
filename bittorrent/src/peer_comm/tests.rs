@@ -4019,6 +4019,162 @@ fn rejected_incoming_connection_is_closed_without_being_tracked() {
     assert_eq!(scheduled_closes(&io), vec![None]);
 }
 
+// A handshake as it would arrive from a peer, advertising the fast extension
+// (BEP 6) or not. The extension protocol is deliberately left unadvertised so
+// that the only message queued up in response is the initial bitfield one.
+fn peer_handshake(info_hash: [u8; 20], fast_ext: bool) -> [u8; HANDSHAKE_SIZE] {
+    const PROTOCOL: &[u8] = b"BitTorrent protocol";
+    let mut handshake = [0_u8; HANDSHAKE_SIZE];
+    handshake[0] = PROTOCOL.len() as u8;
+    handshake[1..20].copy_from_slice(PROTOCOL);
+    if fast_ext {
+        // Reserved byte 7, bit 0x04
+        handshake[27] |= 0x04;
+    }
+    handshake[28..48].copy_from_slice(&info_hash);
+    handshake[48..].copy_from_slice(b"-VT0000-abcdefghijkl");
+    handshake
+}
+
+// Drives an incoming connection through a complete handshake and returns the
+// messages that were queued up for the peer as a result
+fn msgs_queued_after_handshake(
+    download_state: &mut torrent::State,
+    fast_ext: bool,
+) -> Vec<PeerMessage> {
+    let mut io = Io::new(
+        BackloggedSubmissionQueue::new(MockSubmissionQueue),
+        &torrent::Config::default(),
+    );
+    let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+    let info_hash = download_state.info_hash();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+    connections
+        .on_accepted(accepted.into(), info_hash, &mut io)
+        .unwrap();
+
+    let [(write_event_id, conn_id)] = io
+        .events
+        .iter()
+        .filter_map(|(event_id, event)| match event.typ {
+            EventType::Write { connection_idx, .. } => Some((event_id, connection_idx)),
+            _ => None,
+        })
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("the accepted peer should have a handshake write scheduled");
+    };
+    // The event loop removes the event and returns the write buffers to the pool
+    // when the completion is handled, so do the same here
+    let handshake_write = io.events.remove(write_event_id).unwrap();
+    for buffer in handshake_write.buffers.into_iter().flatten() {
+        io.write_pool.return_buffer(buffer);
+    }
+
+    let mut state_ref = download_state.as_ref();
+    rayon::in_place_scope(|scope| {
+        connections.on_write(
+            conn_id,
+            HANDSHAKE_SIZE,
+            HANDSHAKE_SIZE,
+            &mut io,
+            &mut state_ref,
+        );
+        io.read_ring.fill(0, &peer_handshake(info_hash, fast_ext));
+        connections
+            .on_read(
+                conn_id,
+                Some(0),
+                HANDSHAKE_SIZE,
+                &mut io,
+                &mut state_ref,
+                scope,
+            )
+            .unwrap();
+    });
+
+    assert_eq!(connections.num_established(), 1);
+    assert_eq!(connections[conn_id].fast_ext, fast_ext);
+    connections[conn_id].outgoing_msgs_buffer.clone()
+}
+
+#[test]
+fn handshake_queues_bitfield_when_nothing_is_downloaded() {
+    let mut download_state = setup_test();
+    let num_pieces = download_state.as_ref().state().unwrap().num_pieces();
+
+    assert_eq!(
+        msgs_queued_after_handshake(&mut download_state, true),
+        vec![PeerMessage::HaveNone]
+    );
+    // HaveNone is a fast extension message, peers without it must be sent an
+    // ordinary (empty) bitfield instead
+    assert_eq!(
+        msgs_queued_after_handshake(&mut download_state, false),
+        vec![PeerMessage::Bitfield(
+            bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces)
+        )]
+    );
+}
+
+#[test]
+fn handshake_queues_bitfield_when_partially_downloaded() {
+    let mut download_state = setup_test();
+    let num_pieces = download_state.as_ref().state().unwrap().num_pieces();
+    download_state
+        .as_ref()
+        .state()
+        .unwrap()
+        .piece_selector
+        .mark_downloaded(2);
+
+    let mut expected = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
+    expected.set(2, true);
+    // A partial bitfield is sent as is regardless of the fast extension
+    for fast_ext in [true, false] {
+        assert_eq!(
+            msgs_queued_after_handshake(&mut download_state, fast_ext),
+            vec![PeerMessage::Bitfield(expected.clone())]
+        );
+    }
+}
+
+#[test]
+fn handshake_queues_bitfield_when_seeding() {
+    let mut download_state = setup_seeding_test();
+    let num_pieces = download_state.as_ref().state().unwrap().num_pieces();
+
+    assert_eq!(
+        msgs_queued_after_handshake(&mut download_state, true),
+        vec![PeerMessage::HaveAll]
+    );
+    // HaveAll is a fast extension message, peers without it must be sent a
+    // full bitfield instead
+    assert_eq!(
+        msgs_queued_after_handshake(&mut download_state, false),
+        vec![PeerMessage::Bitfield(
+            bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces)
+        )]
+    );
+}
+
+#[test]
+fn handshake_queues_no_bitfield_without_metadata() {
+    let (mut download_state, _metadata) = setup_uninitialized_test();
+
+    // Without metadata the piece count is unknown so no bitfield can be built,
+    // fast extension peers are told we have nothing and the rest are sent
+    // nothing at all
+    assert_eq!(
+        msgs_queued_after_handshake(&mut download_state, true),
+        vec![PeerMessage::HaveNone]
+    );
+    assert!(msgs_queued_after_handshake(&mut download_state, false).is_empty());
+}
+
 #[test]
 fn upload_only_field_in_extended_handshake() {
     let mut download_state = setup_test();
