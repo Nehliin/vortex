@@ -487,7 +487,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         self.target_inflight - self.inflight.len().min(self.target_inflight)
     }
 
-    pub fn update_stats(&mut self, m_index: i32, m_begin: i32, length: u32) {
+    pub fn update_stats(&mut self, m_index: i32, m_begin: i32, length: u32) -> bool {
         // horribly inefficient
         let Some(pos) = self
             .inflight
@@ -495,7 +495,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             .position(|sub| sub.index == m_index && m_begin == sub.offset)
         else {
             log::error!("Received unexpected piece message, index: {m_index}");
-            return;
+            return false;
         };
         let time = Instant::now();
         self.last_req_resp = time;
@@ -515,6 +515,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             self.last_received_subpiece = Some(time);
         }
         self.moving_rtt.add_sample(&rtt);
+        true
     }
 
     pub fn report_metrics(&self) -> PeerMetrics {
@@ -1113,13 +1114,20 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     ));
                     return;
                 }
-                // TODO: disconnect on recv piece never requested if fast_ext is enabled
                 log::trace!(
                     "[Peer: {}] Recived a piece index: {index}, begin: {begin}, length: {}",
                     self.peer_id,
                     data.len(),
                 );
-                self.update_stats(index, begin, data.len() as u32);
+                let expected_piece = self.update_stats(index, begin, data.len() as u32);
+                if !expected_piece {
+                    if self.fast_ext {
+                        self.pending_disconnect = Some(DisconnectReason::ProtocolError(
+                            "Unexpected piece message received",
+                        ));
+                    }
+                    return;
+                }
 
                 if let Some(buffer) = torrent_state.pieces[index as usize]
                     .take_if(|piece| {
