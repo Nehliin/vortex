@@ -608,24 +608,19 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
         index: i32,
         begin: i32,
         length: i32,
-        num_pieces: i32,
+        num_pieces: usize,
         piece_len: u32,
     ) -> bool {
-        let begin = begin as u32;
+        let begin = if begin >= 0 {
+            begin as u32
+        } else {
+            return false;
+        };
         index >= 0
-            && index <= num_pieces
+            && index < num_pieces as i32
             && begin.is_multiple_of(SUBPIECE_SIZE as u32)
-            && length <= SUBPIECE_SIZE
+            && (0..=SUBPIECE_SIZE).contains(&length)
             && begin + length as u32 <= piece_len
-    }
-
-    #[inline]
-    fn is_valid_piece(&self, index: i32, begin: i32, data_len: usize, num_pieces: usize) -> bool {
-        let begin = begin as u32;
-        index >= 0
-            && index <= num_pieces as i32
-            && begin.is_multiple_of(SUBPIECE_SIZE as u32)
-            && data_len <= SUBPIECE_SIZE as usize
     }
 
     pub fn handle_message(
@@ -921,7 +916,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                         index,
                         begin,
                         length,
-                        torrent_state.num_pieces() as i32,
+                        torrent_state.num_pieces(),
                         piece_len,
                     ) {
                         log::warn!(
@@ -1002,7 +997,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     index,
                     begin,
                     length,
-                    torrent_state.num_pieces() as i32,
+                    torrent_state.num_pieces(),
                     piece_len,
                 ) {
                     log::error!(
@@ -1105,7 +1100,14 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     );
                     return;
                 };
-                if !self.is_valid_piece(index, begin, data.len(), torrent_state.num_pieces()) {
+                let piece_len = torrent_state.piece_selector.piece_len(index);
+                if !self.is_valid_piece_req(
+                    index,
+                    begin,
+                    data.len() as i32,
+                    torrent_state.num_pieces(),
+                    piece_len,
+                ) {
                     self.pending_disconnect = Some(DisconnectReason::ProtocolError(
                         "Invalid piece message received",
                     ));
