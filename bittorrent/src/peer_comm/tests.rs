@@ -4042,6 +4042,17 @@ fn msgs_queued_after_handshake(
     download_state: &mut torrent::State,
     fast_ext: bool,
 ) -> Vec<PeerMessage> {
+    msgs_queued_after_handshake_with_pipelined(download_state, fast_ext, &[])
+}
+
+// Same as above but with `pipelined` msgs arriving in the same recv as the
+// handshake, which is what peers writing their handshake and bitfield in one
+// go look like on the wire
+fn msgs_queued_after_handshake_with_pipelined(
+    download_state: &mut torrent::State,
+    fast_ext: bool,
+    pipelined: &[PeerMessage],
+) -> Vec<PeerMessage> {
     let mut io = Io::new(
         BackloggedSubmissionQueue::new(MockSubmissionQueue),
         &torrent::Config::default(),
@@ -4074,6 +4085,11 @@ fn msgs_queued_after_handshake(
         io.write_pool.return_buffer(buffer);
     }
 
+    let mut recv_data = peer_handshake(info_hash, fast_ext).to_vec();
+    for msg in pipelined {
+        msg.encode(&mut recv_data);
+    }
+
     let mut state_ref = download_state.as_ref();
     rayon::in_place_scope(|scope| {
         connections.on_write(
@@ -4083,12 +4099,12 @@ fn msgs_queued_after_handshake(
             &mut io,
             &mut state_ref,
         );
-        io.read_ring.fill(0, &peer_handshake(info_hash, fast_ext));
+        io.read_ring.fill(0, &recv_data);
         connections
             .on_read(
                 conn_id,
                 Some(0),
-                HANDSHAKE_SIZE,
+                recv_data.len(),
                 &mut io,
                 &mut state_ref,
                 scope,
@@ -4098,6 +4114,7 @@ fn msgs_queued_after_handshake(
 
     assert_eq!(connections.num_established(), 1);
     assert_eq!(connections[conn_id].fast_ext, fast_ext);
+    assert!(connections[conn_id].pending_disconnect.is_none());
     connections[conn_id].outgoing_msgs_buffer.clone()
 }
 
@@ -4121,15 +4138,18 @@ fn handshake_queues_bitfield_when_nothing_is_downloaded() {
 }
 
 #[test]
-fn handshake_queues_bitfield_when_partially_downloaded() {
+fn handshake_queues_bitfield_when_partially_completed() {
     let mut download_state = setup_test();
     let num_pieces = download_state.as_ref().state().unwrap().num_pieces();
-    download_state
-        .as_ref()
-        .state()
-        .unwrap()
-        .piece_selector
-        .mark_downloaded(2);
+    {
+        // Piece 2 downloaded and hash verified, piece 5 still awaiting its hash
+        // check so it must not be announced
+        let mut state_ref = download_state.as_ref();
+        let piece_selector = &mut state_ref.state().unwrap().piece_selector;
+        piece_selector.mark_downloaded(2);
+        piece_selector.mark_complete(2);
+        piece_selector.mark_downloaded(5);
+    }
 
     let mut expected = bitvec::bitvec!(u8, bitvec::order::Msb0; 0; num_pieces);
     expected.set(2, true);
@@ -4173,6 +4193,28 @@ fn handshake_queues_no_bitfield_without_metadata() {
         vec![PeerMessage::HaveNone]
     );
     assert!(msgs_queued_after_handshake(&mut download_state, false).is_empty());
+}
+
+#[test]
+fn handshake_bitfield_is_queued_before_pipelined_msgs_are_handled() {
+    let mut download_state = setup_test();
+
+    // Peers commonly write their bitfield in the same segment as the handshake,
+    // and replying to it queues up messages of our own
+    let msgs = msgs_queued_after_handshake_with_pipelined(
+        &mut download_state,
+        true,
+        &[PeerMessage::HaveAll],
+    );
+
+    // Which must not jump ahead of the bitfield, it is only ever sent as the
+    // first message (BEP 3/6)
+    assert_eq!(msgs.first(), Some(&PeerMessage::HaveNone));
+    // The pipelined message is still handled
+    assert!(
+        msgs.contains(&PeerMessage::Interested),
+        "expected an interested reply to the pipelined HaveAll, got {msgs:?}"
+    );
 }
 
 #[test]
