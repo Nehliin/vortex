@@ -247,8 +247,13 @@ impl PieceSelector {
     }
 
     #[inline]
-    pub fn downloaded_clone(&self) -> BitBox<u8, Msb0> {
-        self.downloaded_pieces.clone()
+    pub fn completed_none(&self) -> bool {
+        self.completed_pieces.not_any()
+    }
+
+    #[inline]
+    pub fn completed_clone(&self) -> BitBox<u8, Msb0> {
+        self.completed_pieces.clone()
     }
 
     /// Per-piece completion progress (downloaded *and* hash-verified),

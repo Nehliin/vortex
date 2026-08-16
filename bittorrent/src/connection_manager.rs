@@ -335,42 +335,51 @@ impl ConnectionManager {
             buffers: None,
         });
 
-        // The initial Recv might have contained more data
-        // than just the handshake so need to handle that here
-        // since the read_buffer will be overwritten by the next
-        // incoming recv cqe
         let connection = &mut self[conn_id];
-        connection.stateful_decoder.append_data(remainder);
-        conn_parse_and_handle_msgs(connection, state, &mut io.queued_disk_operations, scope);
         if connection.extended_extension {
             connection
                 .outgoing_msgs_buffer
                 .push(extension_handshake_msg(state, state.config));
         }
-        // Recv has been complete, move over to multishot, same user data
-        io.recv_multishot(recv_multi_id, fd);
 
-        let maybe_completed = state
-            .state()
-            .map(|torrent_state| torrent_state.piece_selector.downloaded_clone());
+        // The bitfield is only ever sent as the first message (BEP 3) and for
+        // fast_ext peers exactly one of HaveAll/HaveNone/Bitfield must appear
+        // immediately after the handshake (BEP 6)
         let bitfield_msg = if connection.fast_ext {
-            Some(
-                maybe_completed.map_or(peer_protocol::PeerMessage::HaveNone, |completed| {
-                    if completed.all() {
+            Some(match state.state() {
+                Some(torrent_state) => {
+                    let piece_selector = &torrent_state.piece_selector;
+                    if piece_selector.completed_all() {
                         peer_protocol::PeerMessage::HaveAll
-                    } else if completed.not_any() {
+                    } else if piece_selector.completed_none() {
                         peer_protocol::PeerMessage::HaveNone
                     } else {
-                        peer_protocol::PeerMessage::Bitfield(completed.into())
+                        peer_protocol::PeerMessage::Bitfield(
+                            piece_selector.completed_clone().into(),
+                        )
                     }
-                }),
-            )
+                }
+                None => peer_protocol::PeerMessage::HaveNone,
+            })
         } else {
-            maybe_completed.map(|completed| peer_protocol::PeerMessage::Bitfield(completed.into()))
+            state.state().map(|torrent_state| {
+                peer_protocol::PeerMessage::Bitfield(
+                    torrent_state.piece_selector.completed_clone().into(),
+                )
+            })
         };
         if let Some(msg) = bitfield_msg {
             connection.outgoing_msgs_buffer.push(msg);
         }
+
+        // The initial Recv might have contained more data
+        // than just the handshake so need to handle that here
+        // since the read_buffer will be overwritten by the next
+        // incoming recv cqe
+        connection.stateful_decoder.append_data(remainder);
+        conn_parse_and_handle_msgs(connection, state, &mut io.queued_disk_operations, scope);
+        // Recv has been complete, move over to multishot, same user data
+        io.recv_multishot(recv_multi_id, fd);
         Ok(())
     }
 
