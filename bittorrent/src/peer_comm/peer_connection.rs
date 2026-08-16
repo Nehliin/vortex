@@ -1131,8 +1131,13 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
 
                 if let Some(buffer) = torrent_state.pieces[index as usize]
                     .take_if(|piece| {
-                        piece.on_subpiece(index, begin, &data[..]);
-                        piece.is_complete()
+                        if !piece.on_subpiece(index, begin, &data[..]) {
+                            self.pending_disconnect =
+                                Some(DisconnectReason::ProtocolError("Invalid subpiece received"));
+                            false
+                        } else {
+                            piece.is_complete()
+                        }
                     })
                     .map(|completed_piece| completed_piece.into_buffer())
                 {

@@ -373,23 +373,29 @@ impl Piece {
         self.piece_data
     }
 
-    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) {
+    /// Returns if the subpiece is valid or not
+    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) -> bool {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
         if self.completed_subpieces[subpiece_index as usize] {
-            return;
+            return true;
         }
         log::trace!("Subpiece index received: {subpiece_index}",);
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {
-            debug_assert_eq!(data.len() as i32, self.last_subpiece_length);
+            if data.len() as i32 != self.last_subpiece_length {
+                return false;
+            }
         } else {
-            debug_assert_eq!(data.len() as i32, SUBPIECE_SIZE);
+            if data.len() as i32 != SUBPIECE_SIZE {
+                return false;
+            }
         }
         let begin = begin as usize;
         self.piece_data.raw_mut_slice()[begin..(begin + data.len())].copy_from_slice(data);
         self.completed_subpieces.set(subpiece_index as usize, true);
+        true
     }
 
     #[inline]
