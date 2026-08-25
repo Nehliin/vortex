@@ -378,23 +378,29 @@ impl Piece {
         self.piece_data
     }
 
-    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) {
+    /// Returns if the subpiece is valid or not
+    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) -> bool {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
         if self.completed_subpieces[subpiece_index as usize] {
-            return;
+            return true;
         }
         log::trace!("Subpiece index received: {subpiece_index}",);
         let last_subpiece = subpiece_index == self.last_subpiece_index();
         if last_subpiece {
-            debug_assert_eq!(data.len() as i32, self.last_subpiece_length);
+            if data.len() as i32 != self.last_subpiece_length {
+                return false;
+            }
         } else {
-            debug_assert_eq!(data.len() as i32, SUBPIECE_SIZE);
+            if data.len() as i32 != SUBPIECE_SIZE {
+                return false;
+            }
         }
         let begin = begin as usize;
         self.piece_data.raw_mut_slice()[begin..(begin + data.len())].copy_from_slice(data);
         self.completed_subpieces.set(subpiece_index as usize, true);
+        true
     }
 
     #[inline]
@@ -405,5 +411,73 @@ impl Piece {
     #[inline]
     pub fn is_complete(&self) -> bool {
         self.completed_subpieces.all()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buf_pool::BufferPool;
+
+    fn setup_piece(index: i32, piece_len: u32) -> (BufferPool, Piece) {
+        let mut pool = BufferPool::new("test_pieces", 1, piece_len as usize);
+        let buffer = pool.get_buffer();
+        (pool, Piece::new(index, piece_len, buffer))
+    }
+
+    #[test]
+    fn on_subpiece_rejects_truncated_data() {
+        let (mut pool, mut piece) = setup_piece(0, (SUBPIECE_SIZE * 2) as u32);
+        // Subpieces that aren't the last one must be exactly SUBPIECE_SIZE long
+        assert!(!piece.on_subpiece(0, 0, &vec![1; SUBPIECE_SIZE as usize - 1]));
+        assert!(!piece.completed_subpieces[0]);
+        // Empty responses are truncated as well
+        assert!(!piece.on_subpiece(0, 0, &[]));
+        assert!(!piece.completed_subpieces[0]);
+        assert!(piece.on_subpiece(0, 0, &vec![1; SUBPIECE_SIZE as usize]));
+        assert!(piece.completed_subpieces[0]);
+        assert!(!piece.is_complete());
+        pool.return_buffer(piece.into_buffer());
+    }
+
+    #[test]
+    fn on_subpiece_rejects_oversized_data() {
+        let (mut pool, mut piece) = setup_piece(0, (SUBPIECE_SIZE * 2) as u32);
+        assert!(!piece.on_subpiece(0, 0, &vec![1; SUBPIECE_SIZE as usize + 1]));
+        assert!(!piece.completed_subpieces[0]);
+        pool.return_buffer(piece.into_buffer());
+    }
+
+    #[test]
+    fn on_subpiece_last_subpiece_length_must_match() {
+        // The last subpiece of this piece is only 100 bytes long
+        let (mut pool, mut piece) = setup_piece(3, SUBPIECE_SIZE as u32 + 100);
+        assert_eq!(piece.last_subpiece_index(), 1);
+        assert_eq!(piece.last_subpiece_length, 100);
+        // A full sized subpiece would overflow the piece
+        assert!(!piece.on_subpiece(3, SUBPIECE_SIZE, &vec![1; SUBPIECE_SIZE as usize]));
+        assert!(!piece.completed_subpieces[1]);
+        // and a truncated one is rejected just like for any other subpiece
+        assert!(!piece.on_subpiece(3, SUBPIECE_SIZE, &[1; 99]));
+        assert!(!piece.completed_subpieces[1]);
+        assert!(piece.on_subpiece(3, 0, &vec![1; SUBPIECE_SIZE as usize]));
+        assert!(!piece.is_complete());
+        assert!(piece.on_subpiece(3, SUBPIECE_SIZE, &[1; 100]));
+        assert!(piece.is_complete());
+        pool.return_buffer(piece.into_buffer());
+    }
+
+    #[test]
+    fn on_subpiece_accepts_duplicates() {
+        let (mut pool, mut piece) = setup_piece(0, (SUBPIECE_SIZE * 2) as u32);
+        assert!(piece.on_subpiece(0, 0, &vec![1; SUBPIECE_SIZE as usize]));
+        assert!(piece.on_subpiece(0, 0, &vec![2; SUBPIECE_SIZE as usize]));
+        assert!(piece.completed_subpieces[0]);
+        // The first received copy is kept
+        assert_eq!(
+            &piece.piece_data.raw_slice()[..SUBPIECE_SIZE as usize],
+            &vec![1; SUBPIECE_SIZE as usize][..]
+        );
+        pool.return_buffer(piece.into_buffer());
     }
 }
