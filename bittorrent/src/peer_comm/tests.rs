@@ -70,6 +70,112 @@ fn sent_and_marked_not_interested(peer: &PeerConnection) {
     );
 }
 
+/// Sends a piece message that is expected to be rejected as invalid and resets
+/// the pending disconnect so the same connection can be reused for the next case
+#[track_caller]
+fn assert_piece_msg_rejected<'scope, 'f_store: 'scope>(
+    peer: &mut PeerConnection,
+    state_ref: &mut torrent::StateRef<'f_store>,
+    pending_disk_operations: &mut Vec<DiskOp>,
+    scope: &rayon::Scope<'scope>,
+    index: i32,
+    begin: i32,
+    data_len: usize,
+) {
+    assert!(peer.pending_disconnect.is_none());
+    peer.handle_message(
+        PeerMessage::Piece {
+            index,
+            begin,
+            data: vec![3; data_len].into(),
+        },
+        state_ref,
+        pending_disk_operations,
+        scope,
+    );
+    assert!(
+        matches!(
+            peer.pending_disconnect,
+            Some(DisconnectReason::ProtocolError(_))
+        ),
+        "Piece index: {index}, begin: {begin}, len: {data_len} should have been rejected"
+    );
+    peer.pending_disconnect = None;
+}
+
+/// Sends a request message that is expected to be considered invalid and asserts
+/// that it's neither served nor accepted
+#[track_caller]
+fn assert_request_rejected<'scope, 'f_store: 'scope>(
+    peer: &mut PeerConnection,
+    state_ref: &mut torrent::StateRef<'f_store>,
+    pending_disk_operations: &mut Vec<DiskOp>,
+    scope: &rayon::Scope<'scope>,
+    index: i32,
+    begin: i32,
+    length: i32,
+) {
+    peer.outgoing_msgs_buffer.clear();
+    peer.handle_message(
+        PeerMessage::Request {
+            index,
+            begin,
+            length,
+        },
+        state_ref,
+        pending_disk_operations,
+        scope,
+    );
+    assert!(
+        pending_disk_operations.is_empty(),
+        "Request index: {index}, begin: {begin}, length: {length} should not be served"
+    );
+    // The peer supports the fast extension so it's rejected explicitly
+    assert!(
+        peer.outgoing_msgs_buffer
+            .contains(&PeerMessage::RejectRequest {
+                index,
+                begin,
+                length
+            }),
+        "Request index: {index}, begin: {begin}, length: {length} should have been rejected"
+    );
+    peer.outgoing_msgs_buffer.clear();
+}
+
+/// Sends a reject request message that is expected to be considered invalid and
+/// resets the pending disconnect so the same connection can be reused
+#[track_caller]
+fn assert_reject_request_rejected<'scope, 'f_store: 'scope>(
+    peer: &mut PeerConnection,
+    state_ref: &mut torrent::StateRef<'f_store>,
+    pending_disk_operations: &mut Vec<DiskOp>,
+    scope: &rayon::Scope<'scope>,
+    index: i32,
+    begin: i32,
+    length: i32,
+) {
+    assert!(peer.pending_disconnect.is_none());
+    peer.handle_message(
+        PeerMessage::RejectRequest {
+            index,
+            begin,
+            length,
+        },
+        state_ref,
+        pending_disk_operations,
+        scope,
+    );
+    assert!(
+        matches!(
+            peer.pending_disconnect,
+            Some(DisconnectReason::ProtocolError(_))
+        ),
+        "Reject request index: {index}, begin: {begin}, length: {length} should have been rejected"
+    );
+    peer.pending_disconnect = None;
+}
+
 #[track_caller]
 fn simulate_disk_write_completion(
     torrent_state: &mut InitializedState,
@@ -1503,7 +1609,7 @@ fn piece_recv() {
 }
 
 #[test]
-fn handles_duplicate_piece_recv() {
+fn handles_duplicate_piece_recv_non_fast_ext() {
     let mut download_state = setup_test();
     let mut event_q = Queue::<TorrentEvent, 512>::new();
     let (mut event_tx, _event_rx) = event_q.split();
@@ -1512,10 +1618,11 @@ fn handles_duplicate_piece_recv() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
         let mut connections = ConnectionManager::new(PeerId::generate(), 128);
-        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
-
+        let key = connections.insert_established_with_key(|k| generate_peer(false, k));
+        let num_pieces = state_ref.state().unwrap().num_pieces();
+        let field = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
         connections[key].handle_message(
-            PeerMessage::HaveAll,
+            PeerMessage::Bitfield(field),
             &mut state_ref,
             &mut pending_disk_operations,
             scope,
@@ -1559,6 +1666,8 @@ fn handles_duplicate_piece_recv() {
         );
         assert_eq!(connections[key].target_inflight, prev_target_infligt + 1);
         assert_eq!(connections[key].inflight.len(), 1);
+        // Okay for non fast_ext peers
+        connections[key].pending_disconnect = None;
         connections[key].handle_message(
             PeerMessage::Piece {
                 index,
@@ -1611,73 +1720,360 @@ fn invalid_piece() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
         let mut connections = ConnectionManager::new(PeerId::generate(), 128);
-        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
-        connections[key_a].handle_message(
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
+        connections[key].handle_message(
             PeerMessage::HaveAll,
             &mut state_ref,
             &mut pending_disk_operations,
             scope,
         );
+        let torrent_state = state_ref.state().unwrap();
+        let num_pieces = torrent_state.num_pieces() as i32;
+        let piece_len = torrent_state.piece_selector.piece_len(2);
+        let mut subpieces = torrent_state.allocate_piece(2, connections[key].conn_id);
+        connections[key].append_and_fill(&mut subpieces);
+        assert!(connections[key].pending_disconnect.is_none());
+
+        // Negative piece index
+        assert_piece_msg_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            -2,
+            0,
+            SUBPIECE_SIZE as usize,
+        );
+        // One past the last valid piece index
+        assert_piece_msg_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            num_pieces,
+            0,
+            SUBPIECE_SIZE as usize,
+        );
+        // Negative offset
+        assert_piece_msg_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            -SUBPIECE_SIZE,
+            SUBPIECE_SIZE as usize,
+        );
+        // Offset not aligned with the subpiece size
+        assert_piece_msg_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            SUBPIECE_SIZE + 1,
+            SUBPIECE_SIZE as usize,
+        );
+        // Larger than the maximum subpiece size
+        assert_piece_msg_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            0,
+            SUBPIECE_SIZE as usize + 1,
+        );
+        // Offset + length reaches outside of the piece
+        assert_piece_msg_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            piece_len as i32,
+            SUBPIECE_SIZE as usize,
+        );
+
+        // None of the invalid messages affected the piece being downloaded
+        let torrent_state = state_ref.state().unwrap();
+        assert!(
+            !torrent_state.pieces[2]
+                .as_ref()
+                .unwrap()
+                .completed_subpieces
+                .any()
+        );
+        assert!(pending_disk_operations.is_empty());
+    });
+}
+
+#[test]
+fn unrequested_piece_disconnects_fast_ext_peer() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        // The peer actually downloading the piece
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
+        // The peer sending us data we never asked for
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
+        for key in [key_a, key_b] {
+            connections[key].handle_message(
+                PeerMessage::HaveAll,
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+        }
         let torrent_state = state_ref.state().unwrap();
         let mut subpieces = torrent_state.allocate_piece(2, connections[key_a].conn_id);
         connections[key_a].append_and_fill(&mut subpieces);
+        assert!(connections[key_b].inflight.is_empty());
+
+        connections[key_b].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        assert!(matches!(
+            connections[key_b].pending_disconnect,
+            Some(DisconnectReason::ProtocolError(_))
+        ));
+        // The data is discarded and the peer that actually requested the subpiece
+        // is left untouched
+        let torrent_state = state_ref.state().unwrap();
+        assert!(
+            !torrent_state.pieces[2]
+                .as_ref()
+                .unwrap()
+                .completed_subpieces[0]
+        );
         assert!(connections[key_a].pending_disconnect.is_none());
+        assert_eq!(connections[key_a].inflight.len(), 2);
+        assert!(pending_disk_operations.is_empty());
+    });
+}
+
+#[test]
+fn duplicate_piece_recv_disconnects_fast_ext_peer() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        let torrent_state = state_ref.state().unwrap();
+        let mut subpieces = torrent_state.allocate_piece(2, connections[key].conn_id);
+        connections[key].append_and_fill(&mut subpieces);
+        assert_eq!(connections[key].inflight.len(), 2);
+
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        assert!(connections[key].pending_disconnect.is_none());
+        assert_eq!(connections[key].inflight.len(), 1);
+        let download_throughput = connections[key].network_stats.download_throughput;
+        let last_received_subpiece = connections[key].last_received_subpiece.unwrap();
+
+        std::thread::sleep(Duration::from_millis(100));
+        // The subpiece is no longer inflight so receiving it a second time is a
+        // protocol error for peers supporting the fast extension
+        connections[key].handle_message(
+            PeerMessage::Piece {
+                index: 2,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        assert!(matches!(
+            connections[key].pending_disconnect,
+            Some(DisconnectReason::ProtocolError(_))
+        ));
+        // The duplicate is discarded without affecting the connection stats
+        assert_eq!(
+            connections[key].network_stats.download_throughput,
+            download_throughput
+        );
+        assert_eq!(
+            connections[key].last_received_subpiece.unwrap(),
+            last_received_subpiece
+        );
+        // Only the first copy of the subpiece was stored and the piece is still
+        // waiting for the remaining subpiece
+        let torrent_state = state_ref.state().unwrap();
+        let piece = torrent_state.pieces[2].as_ref().unwrap();
+        assert!(piece.completed_subpieces[0]);
+        assert_eq!(piece.completed_subpieces.count_ones(), 1);
+        assert!(!piece.is_complete());
+        assert!(pending_disk_operations.is_empty());
+    });
+}
+
+#[test]
+fn truncated_subpiece_response_disconnects() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        // One connection per truncated response since they are disconnected
+        for data_len in [SUBPIECE_SIZE as usize - 1, 0] {
+            let key = connections.insert_established_with_key(|k| generate_peer(true, k));
+            connections[key].handle_message(
+                PeerMessage::HaveAll,
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+            let torrent_state = state_ref.state().unwrap();
+            let mut subpieces = torrent_state.allocate_piece(2, connections[key].conn_id);
+            connections[key].append_and_fill(&mut subpieces);
+            assert_eq!(connections[key].inflight.len(), 2);
+
+            // The subpiece was requested but the peer responds with less data than
+            // the full subpiece
+            connections[key].handle_message(
+                PeerMessage::Piece {
+                    index: 2,
+                    begin: 0,
+                    data: vec![3; data_len].into(),
+                },
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+            assert!(
+                matches!(
+                    connections[key].pending_disconnect,
+                    Some(DisconnectReason::ProtocolError(_))
+                ),
+                "A {data_len} byte subpiece response should be rejected"
+            );
+            // The partial data is not stored and the piece is kept allocated
+            let torrent_state = state_ref.state().unwrap();
+            let piece = torrent_state.pieces[2].as_ref().unwrap();
+            assert!(!piece.completed_subpieces[0]);
+            assert!(!piece.is_complete());
+            assert!(pending_disk_operations.is_empty());
+        }
+    });
+}
+
+#[test]
+fn duplicate_piece_recv_from_separate_peers_is_accepted() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let (mut event_tx, _event_rx) = event_q.split();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
+        for key in [key_a, key_b] {
+            connections[key].handle_message(
+                PeerMessage::HaveAll,
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+        }
+        // Both peers request the same piece, as happens in endgame mode
+        for key in [key_a, key_b] {
+            let torrent_state = state_ref.state().unwrap();
+            let mut subpieces = torrent_state.allocate_piece(2, connections[key].conn_id);
+            connections[key].append_and_fill(&mut subpieces);
+            assert_eq!(connections[key].inflight.len(), 2);
+        }
+
+        for key in [key_a, key_b] {
+            connections[key].handle_message(
+                PeerMessage::Piece {
+                    index: 2,
+                    begin: 0,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+            // Both peers requested the subpiece so neither is disconnected
+            assert!(connections[key].pending_disconnect.is_none());
+            assert_eq!(connections[key].inflight.len(), 1);
+        }
+        let torrent_state = state_ref.state().unwrap();
+        assert!(
+            torrent_state.pieces[2]
+                .as_ref()
+                .unwrap()
+                .completed_subpieces[0]
+        );
+        assert!(pending_disk_operations.is_empty());
+
         connections[key_a].handle_message(
             PeerMessage::Piece {
-                index: -2,
-                begin: 0,
+                index: 2,
+                begin: SUBPIECE_SIZE,
                 data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             &mut pending_disk_operations,
             scope,
         );
-        assert!(connections[key_a].pending_disconnect.is_some());
-        let key_a2 = connections.insert_established_with_key(|k| generate_peer(true, k));
-        connections[key_a2].handle_message(
-            PeerMessage::HaveAll,
-            &mut state_ref,
+        assert!(connections[key_a].pending_disconnect.is_none());
+        // To ensure we do not miss the completion event
+        std::thread::sleep(Duration::from_millis(100));
+        let torrent_state = state_ref.state().unwrap();
+        simulate_disk_write_completion(
+            torrent_state,
             &mut pending_disk_operations,
-            scope,
+            &mut connections,
+            &mut event_tx,
+            &[2],
         );
         let torrent_state = state_ref.state().unwrap();
-        let mut subpieces = torrent_state.allocate_piece(2, connections[key_a2].conn_id);
-        connections[key_a2].append_and_fill(&mut subpieces);
-        assert!(connections[key_a2].pending_disconnect.is_none());
-        connections[key_a2].handle_message(
-            PeerMessage::Piece {
-                index: 2,
-                begin: SUBPIECE_SIZE + 1,
-                data: vec![3; SUBPIECE_SIZE as usize].into(),
-            },
-            &mut state_ref,
-            &mut pending_disk_operations,
-            scope,
-        );
-        assert!(connections[key_a2].pending_disconnect.is_some());
+        assert!(torrent_state.piece_selector.has_downloaded(2));
 
-        let key_a3 = connections.insert_established_with_key(|k| generate_peer(true, k));
-        connections[key_a3].handle_message(
-            PeerMessage::HaveAll,
-            &mut state_ref,
-            &mut pending_disk_operations,
-            scope,
-        );
-        let torrent_state = state_ref.state().unwrap();
-        let mut subpieces = torrent_state.allocate_piece(2, connections[key_a3].conn_id);
-        connections[key_a3].append_and_fill(&mut subpieces);
-        assert!(connections[key_a3].pending_disconnect.is_none());
-        connections[key_a3].handle_message(
+        // The remaining subpiece is still inflight for the other peer, receiving it
+        // after the piece completed is not an error
+        connections[key_b].handle_message(
             PeerMessage::Piece {
                 index: 2,
-                begin: 0,
-                data: vec![3; (SUBPIECE_SIZE + 1) as usize].into(),
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
             },
             &mut state_ref,
             &mut pending_disk_operations,
             scope,
         );
-        assert!(connections[key_a3].pending_disconnect.is_some());
+        assert!(connections[key_b].pending_disconnect.is_none());
     });
 }
 
@@ -2141,46 +2537,93 @@ fn invalid_reject_request() {
         );
         connections[key_a].is_interesting = true;
         let torrent_state = state_ref.state().unwrap();
+        let num_pieces = torrent_state.num_pieces() as i32;
+        let piece_len = torrent_state.piece_selector.piece_len(2);
         let mut subpieces = torrent_state.allocate_piece(2, connections[key_a].conn_id);
         connections[key_a].append_and_fill(&mut subpieces);
         assert!(connections[key_a].pending_disconnect.is_none());
-        connections[key_a].handle_message(
-            PeerMessage::RejectRequest {
-                index: -2,
-                begin: 0,
-                length: SUBPIECE_SIZE,
-            },
+
+        // Negative piece index
+        assert_reject_request_rejected(
+            &mut connections[key_a],
             &mut state_ref,
             &mut pending_disk_operations,
             scope,
+            -2,
+            0,
+            SUBPIECE_SIZE,
         );
-        assert!(connections[key_a].pending_disconnect.is_some());
-        connections[key_a].pending_disconnect = None;
-        connections[key_a].handle_message(
-            PeerMessage::RejectRequest {
-                index: 2,
-                begin: SUBPIECE_SIZE + 1,
-                length: SUBPIECE_SIZE,
-            },
+        // One past the last valid piece index
+        assert_reject_request_rejected(
+            &mut connections[key_a],
             &mut state_ref,
             &mut pending_disk_operations,
             scope,
+            num_pieces,
+            0,
+            SUBPIECE_SIZE,
         );
-        assert!(connections[key_a].pending_disconnect.is_some());
-        connections[key_a].pending_disconnect = None;
+        // Negative offset
+        assert_reject_request_rejected(
+            &mut connections[key_a],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            -SUBPIECE_SIZE,
+            SUBPIECE_SIZE,
+        );
+        // Offset not aligned with the subpiece size
+        assert_reject_request_rejected(
+            &mut connections[key_a],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            SUBPIECE_SIZE + 1,
+            SUBPIECE_SIZE,
+        );
+        // Negative lengths, the last one would wrap around when added to the offset
+        assert_reject_request_rejected(
+            &mut connections[key_a],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            0,
+            -1,
+        );
+        assert_reject_request_rejected(
+            &mut connections[key_a],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            SUBPIECE_SIZE,
+            -SUBPIECE_SIZE,
+        );
+        // Larger than the maximum subpiece size
+        assert_reject_request_rejected(
+            &mut connections[key_a],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            0,
+            SUBPIECE_SIZE + 1,
+        );
+        // Offset + length reaches outside of the piece
+        assert_reject_request_rejected(
+            &mut connections[key_a],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            2,
+            piece_len as i32,
+            SUBPIECE_SIZE,
+        );
+        // None of the invalid rejects affected the inflight requests
         assert_eq!(connections[key_a].inflight.len(), 2);
-        connections[key_a].handle_message(
-            PeerMessage::RejectRequest {
-                index: 2,
-                begin: 0,
-                length: SUBPIECE_SIZE + 1,
-            },
-            &mut state_ref,
-            &mut pending_disk_operations,
-            scope,
-        );
-        assert_eq!(connections[key_a].inflight.len(), 2);
-        assert!(connections[key_a].pending_disconnect.is_some());
     });
 }
 
@@ -5309,6 +5752,114 @@ fn request_rejected_when_begin_plus_length_exceeds_piece_len() {
                     length: 123,
                 }),
             "Should queue RejectRequest for request at piece boundary"
+        );
+    });
+}
+
+#[test]
+fn request_validation_rejects_out_of_range_values() {
+    let mut download_state = setup_seeding_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        state_ref.state().unwrap().piece_buffer_pool.stop_tracking();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
+
+        connections[key].handle_message(
+            PeerMessage::HaveNone,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        connections[key].handle_message(
+            PeerMessage::Interested,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        let torrent_state = state_ref.state().unwrap();
+        let num_pieces = torrent_state.num_pieces() as i32;
+        let last_piece = num_pieces - 1;
+        // The last piece is shorter than a full subpiece in this setup
+        let last_piece_len = torrent_state.piece_selector.piece_len(last_piece) as i32;
+        assert!(last_piece_len < SUBPIECE_SIZE);
+
+        // Negative piece index
+        assert_request_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            -1,
+            0,
+            SUBPIECE_SIZE,
+        );
+        // One past the last valid piece index
+        assert_request_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            num_pieces,
+            0,
+            SUBPIECE_SIZE,
+        );
+        // Negative offset
+        assert_request_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            0,
+            -SUBPIECE_SIZE,
+            SUBPIECE_SIZE,
+        );
+        // Negative lengths, the last one would wrap around when added to the offset
+        assert_request_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            0,
+            0,
+            -1,
+        );
+        assert_request_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            0,
+            SUBPIECE_SIZE,
+            -SUBPIECE_SIZE,
+        );
+        // Reaches outside of the shorter last piece
+        assert_request_rejected(
+            &mut connections[key],
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+            last_piece,
+            0,
+            last_piece_len + 1,
+        );
+
+        // A request for the entire last piece is still served
+        connections[key].handle_message(
+            PeerMessage::Request {
+                index: last_piece,
+                begin: 0,
+                length: last_piece_len,
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        assert!(
+            !pending_disk_operations.is_empty(),
+            "Valid request for the last piece should queue disk operations"
         );
     });
 }
