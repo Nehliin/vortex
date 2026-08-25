@@ -22,6 +22,7 @@ skip = [
     { name = "r-efi", version = "*" },
     { name = "hashbrown", version = "*" },
     { name = "lru", version = "*" },
+    { name = "syn", version = "*" },
     # thanks to lava-torrent
     { name = "sha1", version = "0.10.6" },
 ]
