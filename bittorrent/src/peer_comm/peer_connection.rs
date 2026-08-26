@@ -311,21 +311,21 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
     }
 
     #[inline]
-    pub fn is_trusted(&self) -> bool {
+    pub fn peer_untrusted(&self) -> bool {
         self.trust < -7
     }
 
     #[inline]
     pub fn increment_trust(&mut self) {
         self.trust += 1;
-        self.trust = self.trust.clamp(-8, 8);
+        self.trust = self.trust.min(8);
     }
 
     // Lost trust is harder to regain
     #[inline]
     pub fn decrement_trust(&mut self) {
         self.trust -= 2;
-        self.trust = self.trust.clamp(-8, 8);
+        self.trust = self.trust.max(-8);
     }
 
     /// Release everything the connection holds on to in the shared torrent state.

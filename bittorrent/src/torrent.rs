@@ -443,7 +443,7 @@ impl InitializedState {
                 for conn_id in completed_piece.downloaders {
                     if let Some(connection) = connections.established_mut(conn_id) {
                         connection.decrement_trust();
-                        if instaban || !connection.is_trusted() {
+                        if instaban || connection.peer_untrusted() {
                             connection.pending_disconnect = Some(DisconnectReason::BadPeer);
                         }
                     }
