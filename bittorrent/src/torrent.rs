@@ -412,13 +412,19 @@ impl InitializedState {
     }
 
     // TODO: Put this in the event loop directly instead when that is easier to test
-    pub(crate) fn queue_disk_write_for_downloaded_pieces(
+    pub(crate) fn handle_completed_pieces(
         &mut self,
         pending_disk_operations: &mut Vec<DiskOp>,
+        connections: &mut ConnectionManager,
     ) {
         while let Ok(completed_piece) = self.downloaded_piece_rc.try_recv() {
             if completed_piece.hash_matched {
                 let piece_len = self.piece_selector.piece_len(completed_piece.index as i32);
+                for conn_id in completed_piece.downloaders {
+                    if let Some(connection) = connections.established_mut(conn_id) {
+                        connection.increment_trust();
+                    }
+                }
                 self.file_store.queue_piece_disk_operation(
                     completed_piece.index as i32,
                     completed_piece.buffer,
@@ -432,9 +438,16 @@ impl InitializedState {
                 self.piece_selector
                     .mark_not_downloaded(completed_piece.index);
                 self.piece_buffer_pool.return_buffer(completed_piece.buffer);
-                // deallocate piece peer peer
-                // TODO: disconnect
                 log::error!("Piece hash didn't match expected hash!");
+                let instaban = completed_piece.downloaders.len() == 1;
+                for conn_id in completed_piece.downloaders {
+                    if let Some(connection) = connections.established_mut(conn_id) {
+                        connection.decrement_trust();
+                        if instaban || !connection.is_trusted() {
+                            connection.pending_disconnect = Some(DisconnectReason::BadPeer);
+                        }
+                    }
+                }
                 self.piece_selector
                     .mark_not_allocated(completed_piece.index as i32, completed_piece.conn_id);
             }
@@ -473,7 +486,8 @@ impl InitializedState {
             piece.ref_count == 0
         }) {
             log::debug!("Marked as not allocated: conn_id: {conn_id:?}, index: {index}");
-            self.piece_buffer_pool.return_buffer(piece.into_buffer());
+            self.piece_buffer_pool
+                .return_buffer(piece.into_downloaders_and_buffer().1);
             self.piece_selector.mark_not_allocated(index, conn_id);
         }
     }

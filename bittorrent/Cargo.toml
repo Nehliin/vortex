@@ -16,6 +16,7 @@ slotmap = "1"
 bytes = { workspace = true }
 bitvec = { version = "1.0", default-features = false, features = ["alloc"]}
 arbitrary = { version = "1.4.2", features = ["derive"], optional = true }
+smallvec = "1.15"
 log = { workspace = true }
 socket2 = "0.6"
 rand = { workspace = true }

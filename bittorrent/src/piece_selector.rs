@@ -9,6 +9,7 @@ use lava_torrent::torrent::v1::Torrent;
 use rand::SeedableRng;
 use rand::{RngExt, rngs::SmallRng};
 use slotmap::SecondaryMap;
+use smallvec::SmallVec;
 
 use crate::{buf_pool::Buffer, connection_manager::ConnectionId, torrent::TorrentProgress};
 
@@ -314,6 +315,7 @@ pub struct DownloadedPiece {
     pub conn_id: ConnectionId,
     pub hash_matched: bool,
     pub buffer: Buffer,
+    pub downloaders: SmallVec<[ConnectionId; 5]>,
 }
 
 #[derive(Debug)]
@@ -326,6 +328,7 @@ pub struct Piece {
     // Contains the piece data, will be sized as like the average piece size
     pub piece_data: Buffer,
     pub ref_count: u8,
+    pub downloaders: SmallVec<[ConnectionId; 5]>,
 }
 
 impl Piece {
@@ -345,6 +348,7 @@ impl Piece {
             last_subpiece_length,
             piece_data: piece_view,
             ref_count: 0,
+            downloaders: Default::default(),
         }
     }
 
@@ -370,16 +374,23 @@ impl Piece {
             let last_subpiece = deque.back_mut().unwrap();
             last_subpiece.size = self.last_subpiece_length;
         }
+        // TODO should this be done if deque is empty??
         self.ref_count += 1;
         deque
     }
 
-    pub fn into_buffer(self) -> Buffer {
-        self.piece_data
+    pub fn into_downloaders_and_buffer(self) -> (SmallVec<[ConnectionId; 5]>, Buffer) {
+        (self.downloaders, self.piece_data)
     }
 
     /// Returns if the subpiece is valid or not
-    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) -> bool {
+    pub fn on_subpiece(
+        &mut self,
+        conn_id: ConnectionId,
+        index: i32,
+        begin: i32,
+        data: &[u8],
+    ) -> bool {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
@@ -398,6 +409,9 @@ impl Piece {
             }
         }
         let begin = begin as usize;
+        if !self.downloaders.contains(&conn_id) {
+            self.downloaders.push(conn_id);
+        }
         self.piece_data.raw_mut_slice()[begin..(begin + data.len())].copy_from_slice(data);
         self.completed_subpieces.set(subpiece_index as usize, true);
         true

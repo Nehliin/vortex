@@ -129,6 +129,8 @@ pub enum DisconnectReason {
     /// The example of this is that both peers are upload only
     #[error("Connection is no longer meaningful for any peer")]
     RedundantConnection,
+    #[error("This peer has not provided the expected data")]
+    BadPeer,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -246,6 +248,9 @@ pub struct PeerConnection {
     // Messag A + Partial B + C (which gets intepreted as part of B due to length prefixed
     // messages)
     pub network_write_inflight: bool,
+    // How much do we trust this peer? Based off the data received, if it matches the
+    // expected hashes or not
+    trust: i32,
 }
 
 impl<'scope, 'f_store: 'scope> PeerConnection {
@@ -296,7 +301,31 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
             pre_meta_have_msgs: Default::default(),
             network_write_inflight: false,
             metadata_progress: None,
+            trust: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub fn trust(&self) -> i32 {
+        self.trust
+    }
+
+    #[inline]
+    pub fn is_trusted(&self) -> bool {
+        self.trust < -7
+    }
+
+    #[inline]
+    pub fn increment_trust(&mut self) {
+        self.trust += 1;
+        self.trust = self.trust.clamp(-8, 8);
+    }
+
+    // Lost trust is harder to regain
+    #[inline]
+    pub fn decrement_trust(&mut self) {
+        self.trust -= 2;
+        self.trust = self.trust.clamp(-8, 8);
     }
 
     /// Release everything the connection holds on to in the shared torrent state.
@@ -1129,9 +1158,9 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                     return;
                 }
 
-                if let Some(buffer) = torrent_state.pieces[index as usize]
+                if let Some((downloaders, buffer)) = torrent_state.pieces[index as usize]
                     .take_if(|piece| {
-                        if !piece.on_subpiece(index, begin, &data[..]) {
+                        if !piece.on_subpiece(self.conn_id, index, begin, &data[..]) {
                             self.pending_disconnect =
                                 Some(DisconnectReason::ProtocolError("Invalid subpiece received"));
                             false
@@ -1139,7 +1168,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                             piece.is_complete()
                         }
                     })
-                    .map(|completed_piece| completed_piece.into_buffer())
+                    .map(|completed_piece| completed_piece.into_downloaders_and_buffer())
                 {
                     // We assume the hash will match, if not we will just request it again
                     if torrent_state.piece_selector.has_downloaded(index as usize)
@@ -1168,6 +1197,7 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                 conn_id,
                                 hash_matched,
                                 buffer,
+                                downloaders,
                             })
                             .unwrap();
                     });
