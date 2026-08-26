@@ -6065,7 +6065,8 @@ fn hash_failure_with_multiple_downloaders_penalizes_without_disconnecting() {
 
         for key in [key_a, key_b] {
             assert_eq!(
-                connections[key].trust(), -2,
+                connections[key].trust(),
+                -2,
                 "Every contributor to a corrupt piece should be penalized"
             );
             assert!(
@@ -6239,7 +6240,8 @@ fn hash_pass_only_credits_peers_that_contributed_bytes() {
         assert_eq!(connections[key_a].trust(), 1);
         assert_eq!(connections[key_b].trust(), 1);
         assert_eq!(
-            connections[key_c].trust(), 0,
+            connections[key_c].trust(),
+            0,
             "A peer whose data was discarded should not be credited for the piece"
         );
         assert!(
