@@ -552,8 +552,10 @@ impl<'scope, 'state: 'scope> EventLoop {
                 }
 
                 if let Some(torrent_state) = state_ref.state() {
-                    torrent_state
-                        .queue_disk_write_for_downloaded_pieces(&mut io.queued_disk_operations);
+                    torrent_state.handle_completed_pieces(
+                        &mut io.queued_disk_operations,
+                        &mut connection_manager,
+                    );
                 }
                 io.submit_queued_disk_operations();
 
