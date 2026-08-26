@@ -129,7 +129,7 @@ pub enum DisconnectReason {
     /// The example of this is that both peers are upload only
     #[error("Connection is no longer meaningful for any peer")]
     RedundantConnection,
-    #[error("This peer has not provided the expected data")]
+    #[error("This peer has not provided the expected data, or the trust in the peer is too low")]
     BadPeer,
 }
 
