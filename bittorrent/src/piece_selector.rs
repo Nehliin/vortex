@@ -9,6 +9,7 @@ use lava_torrent::torrent::v1::Torrent;
 use rand::SeedableRng;
 use rand::{RngExt, rngs::SmallRng};
 use slotmap::SecondaryMap;
+use smallvec::SmallVec;
 
 use crate::{buf_pool::Buffer, connection_manager::ConnectionId, torrent::TorrentProgress};
 
@@ -314,6 +315,7 @@ pub struct DownloadedPiece {
     pub conn_id: ConnectionId,
     pub hash_matched: bool,
     pub buffer: Buffer,
+    pub downloaders: SmallVec<[ConnectionId; 5]>,
 }
 
 #[derive(Debug)]
@@ -326,6 +328,7 @@ pub struct Piece {
     // Contains the piece data, will be sized as like the average piece size
     pub piece_data: Buffer,
     pub ref_count: u8,
+    pub downloaders: SmallVec<[ConnectionId; 5]>,
 }
 
 impl Piece {
@@ -345,6 +348,7 @@ impl Piece {
             last_subpiece_length,
             piece_data: piece_view,
             ref_count: 0,
+            downloaders: Default::default(),
         }
     }
 
@@ -370,16 +374,23 @@ impl Piece {
             let last_subpiece = deque.back_mut().unwrap();
             last_subpiece.size = self.last_subpiece_length;
         }
+        // TODO should this be done if deque is empty??
         self.ref_count += 1;
         deque
     }
 
-    pub fn into_buffer(self) -> Buffer {
-        self.piece_data
+    pub fn into_downloaders_and_buffer(self) -> (SmallVec<[ConnectionId; 5]>, Buffer) {
+        (self.downloaders, self.piece_data)
     }
 
     /// Returns if the subpiece is valid or not
-    pub fn on_subpiece(&mut self, index: i32, begin: i32, data: &[u8]) -> bool {
+    pub fn on_subpiece(
+        &mut self,
+        conn_id: ConnectionId,
+        index: i32,
+        begin: i32,
+        data: &[u8],
+    ) -> bool {
         // This subpice is part of the currently downloading piece
         debug_assert_eq!(self.index, index);
         let subpiece_index = begin / SUBPIECE_SIZE;
@@ -398,6 +409,9 @@ impl Piece {
             }
         }
         let begin = begin as usize;
+        if !self.downloaders.contains(&conn_id) {
+            self.downloaders.push(conn_id);
+        }
         self.piece_data.raw_mut_slice()[begin..(begin + data.len())].copy_from_slice(data);
         self.completed_subpieces.set(subpiece_index as usize, true);
         true
@@ -418,6 +432,11 @@ impl Piece {
 mod tests {
     use super::*;
     use crate::buf_pool::BufferPool;
+    use slotmap::KeyData;
+
+    fn conn_id(id: u64) -> ConnectionId {
+        ConnectionId::from(KeyData::from_ffi(id))
+    }
 
     fn setup_piece(index: i32, piece_len: u32) -> (BufferPool, Piece) {
         let mut pool = BufferPool::new("test_pieces", 1, piece_len as usize);
@@ -425,27 +444,36 @@ mod tests {
         (pool, Piece::new(index, piece_len, buffer))
     }
 
+    fn recycle(pool: &mut BufferPool, piece: Piece) {
+        pool.return_buffer(piece.into_downloaders_and_buffer().1);
+    }
+
     #[test]
     fn on_subpiece_rejects_truncated_data() {
         let (mut pool, mut piece) = setup_piece(0, (SUBPIECE_SIZE * 2) as u32);
         // Subpieces that aren't the last one must be exactly SUBPIECE_SIZE long
-        assert!(!piece.on_subpiece(0, 0, &vec![1; SUBPIECE_SIZE as usize - 1]));
+        assert!(!piece.on_subpiece(conn_id(1), 0, 0, &vec![1; SUBPIECE_SIZE as usize - 1]));
         assert!(!piece.completed_subpieces[0]);
         // Empty responses are truncated as well
-        assert!(!piece.on_subpiece(0, 0, &[]));
+        assert!(!piece.on_subpiece(conn_id(1), 0, 0, &[]));
         assert!(!piece.completed_subpieces[0]);
-        assert!(piece.on_subpiece(0, 0, &vec![1; SUBPIECE_SIZE as usize]));
+        // A peer whose data was rejected never contributed any bytes, so it must
+        // not end up in the blame set
+        assert!(piece.downloaders.is_empty());
+        assert!(piece.on_subpiece(conn_id(1), 0, 0, &vec![1; SUBPIECE_SIZE as usize]));
         assert!(piece.completed_subpieces[0]);
+        assert_eq!(&piece.downloaders[..], &[conn_id(1)]);
         assert!(!piece.is_complete());
-        pool.return_buffer(piece.into_buffer());
+        recycle(&mut pool, piece);
     }
 
     #[test]
     fn on_subpiece_rejects_oversized_data() {
         let (mut pool, mut piece) = setup_piece(0, (SUBPIECE_SIZE * 2) as u32);
-        assert!(!piece.on_subpiece(0, 0, &vec![1; SUBPIECE_SIZE as usize + 1]));
+        assert!(!piece.on_subpiece(conn_id(1), 0, 0, &vec![1; SUBPIECE_SIZE as usize + 1]));
         assert!(!piece.completed_subpieces[0]);
-        pool.return_buffer(piece.into_buffer());
+        assert!(piece.downloaders.is_empty());
+        recycle(&mut pool, piece);
     }
 
     #[test]
@@ -455,29 +483,72 @@ mod tests {
         assert_eq!(piece.last_subpiece_index(), 1);
         assert_eq!(piece.last_subpiece_length, 100);
         // A full sized subpiece would overflow the piece
-        assert!(!piece.on_subpiece(3, SUBPIECE_SIZE, &vec![1; SUBPIECE_SIZE as usize]));
+        assert!(!piece.on_subpiece(
+            conn_id(1),
+            3,
+            SUBPIECE_SIZE,
+            &vec![1; SUBPIECE_SIZE as usize]
+        ));
         assert!(!piece.completed_subpieces[1]);
         // and a truncated one is rejected just like for any other subpiece
-        assert!(!piece.on_subpiece(3, SUBPIECE_SIZE, &[1; 99]));
+        assert!(!piece.on_subpiece(conn_id(1), 3, SUBPIECE_SIZE, &[1; 99]));
         assert!(!piece.completed_subpieces[1]);
-        assert!(piece.on_subpiece(3, 0, &vec![1; SUBPIECE_SIZE as usize]));
+        assert!(piece.downloaders.is_empty());
+        assert!(piece.on_subpiece(conn_id(1), 3, 0, &vec![1; SUBPIECE_SIZE as usize]));
         assert!(!piece.is_complete());
-        assert!(piece.on_subpiece(3, SUBPIECE_SIZE, &[1; 100]));
+        assert!(piece.on_subpiece(conn_id(1), 3, SUBPIECE_SIZE, &[1; 100]));
         assert!(piece.is_complete());
-        pool.return_buffer(piece.into_buffer());
+        recycle(&mut pool, piece);
     }
 
     #[test]
     fn on_subpiece_accepts_duplicates() {
         let (mut pool, mut piece) = setup_piece(0, (SUBPIECE_SIZE * 2) as u32);
-        assert!(piece.on_subpiece(0, 0, &vec![1; SUBPIECE_SIZE as usize]));
-        assert!(piece.on_subpiece(0, 0, &vec![2; SUBPIECE_SIZE as usize]));
+        assert!(piece.on_subpiece(conn_id(1), 0, 0, &vec![1; SUBPIECE_SIZE as usize]));
+        assert!(piece.on_subpiece(conn_id(1), 0, 0, &vec![2; SUBPIECE_SIZE as usize]));
         assert!(piece.completed_subpieces[0]);
         // The first received copy is kept
         assert_eq!(
             &piece.piece_data.raw_slice()[..SUBPIECE_SIZE as usize],
             &vec![1; SUBPIECE_SIZE as usize][..]
         );
-        pool.return_buffer(piece.into_buffer());
+        recycle(&mut pool, piece);
+    }
+
+    #[test]
+    fn downloaders_only_contains_peers_that_contributed_bytes() {
+        let (mut pool, mut piece) = setup_piece(0, (SUBPIECE_SIZE * 2) as u32);
+        // Peer 1 delivers the first subpiece
+        assert!(piece.on_subpiece(conn_id(1), 0, 0, &vec![1; SUBPIECE_SIZE as usize]));
+        assert_eq!(&piece.downloaders[..], &[conn_id(1)]);
+        // Peer 2 loses the race for the same subpiece. Its copy is dropped, so it
+        // must not be credited or blamed for data that never landed in the buffer
+        assert!(piece.on_subpiece(conn_id(2), 0, 0, &vec![2; SUBPIECE_SIZE as usize]));
+        assert_eq!(&piece.downloaders[..], &[conn_id(1)]);
+        // Peer 2 does deliver the second subpiece though
+        assert!(piece.on_subpiece(
+            conn_id(2),
+            0,
+            SUBPIECE_SIZE,
+            &vec![2; SUBPIECE_SIZE as usize]
+        ));
+        assert!(piece.is_complete());
+        assert_eq!(&piece.downloaders[..], &[conn_id(1), conn_id(2)]);
+        recycle(&mut pool, piece);
+    }
+
+    #[test]
+    fn downloaders_records_each_peer_once() {
+        let (mut pool, mut piece) = setup_piece(0, (SUBPIECE_SIZE * 2) as u32);
+        assert!(piece.on_subpiece(conn_id(1), 0, 0, &vec![1; SUBPIECE_SIZE as usize]));
+        assert!(piece.on_subpiece(
+            conn_id(1),
+            0,
+            SUBPIECE_SIZE,
+            &vec![1; SUBPIECE_SIZE as usize]
+        ));
+        assert!(piece.is_complete());
+        assert_eq!(&piece.downloaders[..], &[conn_id(1)]);
+        recycle(&mut pool, piece);
     }
 }

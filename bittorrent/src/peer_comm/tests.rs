@@ -184,8 +184,8 @@ fn simulate_disk_write_completion(
     event_tx: &mut Producer<'_, TorrentEvent>,
     expected_pieces: &[i32],
 ) {
-    // Queue disk writes for downloaded pieces
-    torrent_state.queue_disk_write_for_downloaded_pieces(pending_disk_operations);
+    // Queue disk writes for downloaded pieces and update peer trust
+    torrent_state.handle_completed_pieces(pending_disk_operations, connections);
 
     // Verify the correct pieces were queued
     let mut queued_pieces: Vec<i32> = pending_disk_operations
@@ -5902,6 +5902,352 @@ fn request_validation_rejects_out_of_range_values() {
         assert!(
             !pending_disk_operations.is_empty(),
             "Valid request for the last piece should queue disk operations"
+        );
+    });
+}
+
+/// The piece hash is computed on a rayon worker, so the verdict is reported back
+/// over a channel rather than being available when the last subpiece lands. Poll
+/// until it has been applied to the connections.
+#[track_caller]
+fn await_hash_result<'f_store>(
+    state_ref: &mut torrent::StateRef<'f_store>,
+    pending_disk_operations: &mut Vec<DiskOp>,
+    connections: &mut ConnectionManager,
+    index: i32,
+    expect_match: bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let torrent_state = state_ref.state().unwrap();
+        torrent_state.handle_completed_pieces(pending_disk_operations, connections);
+        let applied = if expect_match {
+            // A piece that passed is queued for writing
+            pending_disk_operations
+                .iter()
+                .any(|op| op.piece_idx == index)
+        } else {
+            // A piece that failed is put back up for download
+            !state_ref
+                .state()
+                .unwrap()
+                .piece_selector
+                .has_downloaded(index as usize)
+        };
+        if applied {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Hash result for piece {index} never arrived"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A piece assembled from a single peer leaves no doubt about who corrupted it,
+/// so that peer is disconnected on the first failure rather than being given the
+/// benefit of the trust ladder.
+#[test]
+fn hash_failure_from_single_downloader_disconnects_immediately() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key = connections.insert_established_with_key(|k| generate_peer(true, k));
+        connections[key].handle_message(
+            PeerMessage::HaveAll,
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+
+        let index = 0;
+        let torrent_state = state_ref.state().unwrap();
+        let mut subpieces = torrent_state.allocate_piece(index, key);
+        connections[key].append_and_fill(&mut subpieces);
+
+        assert_eq!(connections[key].trust(), 0);
+        // The test torrent is all `3`s, so `9`s are a protocol legal response
+        // that fails the piece hash check
+        for begin in [0, SUBPIECE_SIZE] {
+            connections[key].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin,
+                    data: vec![9; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+        }
+        await_hash_result(
+            &mut state_ref,
+            &mut pending_disk_operations,
+            &mut connections,
+            index,
+            false,
+        );
+
+        assert_eq!(connections[key].trust(), -2);
+        assert!(
+            matches!(
+                connections[key].pending_disconnect,
+                Some(DisconnectReason::BadPeer)
+            ),
+            "The only downloader of a corrupt piece should be disconnected right away, got {:?}",
+            connections[key].pending_disconnect
+        );
+    });
+}
+
+/// When several peers contributed to a corrupt piece we cannot tell which one is
+/// at fault, so every contributor is penalized but none is disconnected yet.
+#[test]
+fn hash_failure_with_multiple_downloaders_penalizes_without_disconnecting() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
+        for key in [key_a, key_b] {
+            connections[key].handle_message(
+                PeerMessage::HaveAll,
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+        }
+
+        let index = 0;
+        // Both peers race the same piece, as they would in endgame mode
+        for key in [key_a, key_b] {
+            let torrent_state = state_ref.state().unwrap();
+            let mut subpieces = torrent_state.allocate_piece(index, key);
+            connections[key].append_and_fill(&mut subpieces);
+        }
+
+        // Only peer A sent corrupt data (the torrent is all `3`s), but that is
+        // not knowable from here
+        connections[key_a].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: 0,
+                data: vec![9; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        connections[key_b].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        await_hash_result(
+            &mut state_ref,
+            &mut pending_disk_operations,
+            &mut connections,
+            index,
+            false,
+        );
+
+        for key in [key_a, key_b] {
+            assert_eq!(
+                connections[key].trust(),
+                -2,
+                "Every contributor to a corrupt piece should be penalized"
+            );
+            assert!(
+                connections[key].pending_disconnect.is_none(),
+                "A shared piece is not enough evidence to disconnect anyone, got {:?}",
+                connections[key].pending_disconnect
+            );
+        }
+    });
+}
+
+/// Peers that keep contributing to corrupt pieces are eventually disconnected
+/// even when the blame is always shared. Trust drops by two per failure and the
+/// fourth one takes it below the threshold.
+#[test]
+fn repeated_shared_hash_failures_disconnect_on_the_fourth() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
+        for key in [key_a, key_b] {
+            connections[key].handle_message(
+                PeerMessage::HaveAll,
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+        }
+
+        for index in 0..4 {
+            for key in [key_a, key_b] {
+                let torrent_state = state_ref.state().unwrap();
+                let mut subpieces = torrent_state.allocate_piece(index, key);
+                connections[key].append_and_fill(&mut subpieces);
+            }
+            // Peer A corrupts every piece, but peer B always shares the blame
+            connections[key_a].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: 0,
+                    data: vec![9; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+            connections[key_b].handle_message(
+                PeerMessage::Piece {
+                    index,
+                    begin: SUBPIECE_SIZE,
+                    data: vec![3; SUBPIECE_SIZE as usize].into(),
+                },
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+            await_hash_result(
+                &mut state_ref,
+                &mut pending_disk_operations,
+                &mut connections,
+                index,
+                false,
+            );
+
+            let expected_trust = -2 * (index + 1);
+            for key in [key_a, key_b] {
+                assert_eq!(
+                    connections[key].trust(),
+                    expected_trust,
+                    "Unexpected trust after {} failures",
+                    index + 1
+                );
+                assert_eq!(
+                    connections[key].pending_disconnect.is_some(),
+                    index == 3,
+                    "Unexpected disconnect state after {} failures",
+                    index + 1
+                );
+            }
+        }
+    });
+}
+
+/// Trust is earned by the peers whose bytes actually made it into the piece. A
+/// peer that lost the race for a subpiece contributed nothing, so it is neither
+/// credited for the piece nor treated as having sent something unrequested.
+#[test]
+fn hash_pass_only_credits_peers_that_contributed_bytes() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut event_q: Queue<TorrentEvent, 512> = Queue::new();
+        let (mut event_tx, _event_rc) = event_q.split();
+        let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let key_c = connections.insert_established_with_key(|k| generate_peer(true, k));
+        for key in [key_a, key_b, key_c] {
+            connections[key].handle_message(
+                PeerMessage::HaveAll,
+                &mut state_ref,
+                &mut pending_disk_operations,
+                scope,
+            );
+        }
+
+        let index = 0;
+        // All three peers race the same piece
+        for key in [key_a, key_b, key_c] {
+            let torrent_state = state_ref.state().unwrap();
+            let mut subpieces = torrent_state.allocate_piece(index, key);
+            connections[key].append_and_fill(&mut subpieces);
+        }
+
+        // Peer a wins the race for the first subpiece
+        connections[key_a].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        // Peer c answers the same request, but its copy is dropped
+        connections[key_c].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: 0,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        // Peer b completes the piece
+        connections[key_b].handle_message(
+            PeerMessage::Piece {
+                index,
+                begin: SUBPIECE_SIZE,
+                data: vec![3; SUBPIECE_SIZE as usize].into(),
+            },
+            &mut state_ref,
+            &mut pending_disk_operations,
+            scope,
+        );
+        await_hash_result(
+            &mut state_ref,
+            &mut pending_disk_operations,
+            &mut connections,
+            index,
+            true,
+        );
+        // Finish the write so the piece buffer makes it back to the pool
+        let torrent_state = state_ref.state().unwrap();
+        simulate_disk_write_completion(
+            torrent_state,
+            &mut pending_disk_operations,
+            &mut connections,
+            &mut event_tx,
+            &[index],
+        );
+
+        assert_eq!(connections[key_a].trust(), 1);
+        assert_eq!(connections[key_b].trust(), 1);
+        assert_eq!(
+            connections[key_c].trust(),
+            0,
+            "A peer whose data was discarded should not be credited for the piece"
+        );
+        assert!(
+            connections[key_c].pending_disconnect.is_none(),
+            "Losing a race is not a protocol violation, got {:?}",
+            connections[key_c].pending_disconnect
         );
     });
 }
