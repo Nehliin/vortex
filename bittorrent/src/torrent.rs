@@ -2,7 +2,7 @@ use std::{
     cell::OnceCell,
     collections::VecDeque,
     io::{self},
-    net::{SocketAddrV4, TcpListener},
+    net::{SocketAddr, SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
     time::{Duration, Instant},
@@ -308,6 +308,9 @@ pub enum TorrentEvent {
         /// [`TorrentProgress::total_completed`].
         progress: Option<TorrentProgress>,
     },
+    BadPeer {
+        ip: SocketAddr
+    } 
 }
 
 pub struct InitializedState {

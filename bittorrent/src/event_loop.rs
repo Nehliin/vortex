@@ -503,7 +503,11 @@ impl<'scope, 'state: 'scope> EventLoop {
 
                     last_tick = Instant::now();
                     // Dealt with here to make tick easier to test
-                    connection_manager.execute_pending_disconnects(&mut io, &mut state_ref);
+                    connection_manager.execute_pending_disconnects(
+                        &mut io,
+                        &mut state_ref,
+                        &mut event_tx,
+                    );
                     io.sq.sync();
                 }
 

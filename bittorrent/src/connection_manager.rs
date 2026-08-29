@@ -4,6 +4,7 @@ use std::ops::{Index, IndexMut};
 use std::os::fd::{AsRawFd, RawFd};
 
 use bytes::BufMut;
+use heapless::spsc::Producer;
 use rayon::Scope;
 use slotmap::SlotMap;
 use slotmap::new_key_type;
@@ -13,7 +14,6 @@ use socket2::SockAddr;
 use socket2::Socket;
 use socket2::Type;
 
-use crate::PeerId;
 use crate::buf_ring::Bid;
 use crate::event_loop::EventData;
 use crate::event_loop::EventType;
@@ -22,9 +22,10 @@ use crate::event_loop::conn_parse_and_handle_msgs;
 use crate::io::Io;
 use crate::io::SubmissionQueue;
 use crate::peer_comm::extended_protocol::extension_handshake_msg;
-use crate::peer_comm::peer_connection::PeerConnection;
+use crate::peer_comm::peer_connection::{DisconnectReason, PeerConnection};
 use crate::peer_comm::peer_protocol::{self, HANDSHAKE_SIZE, parse_handshake, write_handshake};
 use crate::torrent::StateRef;
+use crate::{PeerId, TorrentEvent};
 
 new_key_type! {
     pub struct ConnectionId;
@@ -435,6 +436,7 @@ impl ConnectionManager {
         &mut self,
         io: &mut Io<Q>,
         state_ref: &mut StateRef<'state>,
+        event_tx: &mut Producer<TorrentEvent>,
     ) {
         for (conn_id, entry) in self.connections.iter_mut() {
             let ConnectionState::Established(peer) = entry else {
@@ -444,9 +446,23 @@ impl ConnectionManager {
                 continue;
             };
             log::warn!("Disconnect: {} reason {reason}", peer.peer_id);
+            let (bad_peer, _metrics_str) = match reason {
+                DisconnectReason::Idle => (false, "idle"),
+                DisconnectReason::ProtocolError(_) => (true, "protocol_error"),
+                DisconnectReason::InvalidMessage => (true, "invalid_message"),
+                DisconnectReason::RedundantConnection => (false, "redundant_connection"),
+                DisconnectReason::BadPeer => (true, "bad_peer"),
+            };
+            if bad_peer
+                && event_tx
+                    .enqueue(TorrentEvent::BadPeer { ip: peer.peer_addr })
+                    .is_err()
+            {
+                log::warn!("Failed to enqueue BadPeer event")
+            }
             #[cfg(feature = "metrics")]
             {
-                let counter = metrics::counter!("disconnects");
+                let counter = metrics::counter!("disconnects", "reason" => _metrics_str);
                 counter.increment(1);
             }
             Self::disconnect_entry(entry, conn_id, io, state_ref);
