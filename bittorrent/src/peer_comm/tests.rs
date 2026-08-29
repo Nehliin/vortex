@@ -4334,9 +4334,10 @@ fn established_connection_slot_is_kept_until_close_completes() {
 #[test]
 fn only_peers_marked_for_disconnect_are_disconnected() {
     let mut download_state = setup_test();
-
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
+        let (mut event_tx, _event_rx) = event_q.split();
         let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let marked = connections.insert_established_with_key(|k| generate_peer(true, k));
         let kept = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -4346,7 +4347,7 @@ fn only_peers_marked_for_disconnect_are_disconnected() {
             &torrent::Config::default(),
         );
 
-        connections.execute_pending_disconnects(&mut io, &mut state_ref);
+        connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
 
         assert_eq!(scheduled_closes(&io), vec![Some(marked)]);
         assert!(connections.established_mut(marked).is_none());

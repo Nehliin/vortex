@@ -117,9 +117,8 @@ fn pause_resume() {
                                 vec![format!("127.0.0.1:{}", port).parse().unwrap()],
                             ));
                         }
-                        TorrentEvent::TorrentMetrics { .. } => {}
                         TorrentEvent::Paused => panic!("Seeder should never pause"),
-                        TorrentEvent::TorrentComplete | TorrentEvent::MetadataComplete(_) => {}
+                        _ => {}
                     }
                 }
 
@@ -234,6 +233,7 @@ fn pause_resume() {
                             TorrentEvent::MetadataComplete(_) => {
                                 log::info!("Downloader: Metadata complete");
                             }
+                            _ => {}
                         }
                     }
                 }
