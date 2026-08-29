@@ -175,9 +175,13 @@ pub enum Command {
     /// Use the `TorrentEvent::Paused` event to determine when the torrent successfully entered
     /// the paused state.
     Resume,
-    /// Ban any peer(s) for the remainder of this run: its current connection, if any,
-    /// is disconnected and it is neither connected to nor accepted again.
+    /// Ban any peer(s) using the given ip. The current connection(s), if any,
+    /// are disconnected and no new peers from this ip will be connected to or accepted
+    /// again. NOTE: This includes ips from `Command::ConnectToPeers` messages.
+    /// Use `UnbanPeer` to reverse this decision.
     BanPeer { peer_ip: IpAddr },
+    /// Unban any peer(s) using the given ip.
+    UnbanPeer { peer_ip: IpAddr },
 }
 
 /// Metrics for a given peer

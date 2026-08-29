@@ -124,6 +124,10 @@ impl ConnectionManager {
         }
     }
 
+    pub fn unban_peer(&mut self, peer_ip: IpAddr) {
+        self.ban_list.remove(&peer_ip);
+    }
+
     /// Attempt to open an outgoing connection to `peer`. No-op if the peer is
     /// already tracked or the connection cap has been reached.
     pub fn maybe_connect_to_peer<Q: SubmissionQueue>(&mut self, peer: SockAddr, io: &mut Io<Q>) {
