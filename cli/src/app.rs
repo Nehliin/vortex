@@ -279,6 +279,9 @@ impl<'queue, F: FnOnce(State) -> color_eyre::Result<()>> VortexApp<'queue, F> {
                     self.total_upload_throughput
                         .write((curr_time, tick_upload_throughput as f64));
                 }
+                TorrentEvent::BadPeer { peer_addr } => {
+                    log::warn!("Peer forcibly disconnected due to bad behavior: {peer_addr} ")
+                }
             }
         }
 
