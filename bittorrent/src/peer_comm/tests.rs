@@ -4372,13 +4372,19 @@ fn bad_peer_addrs(event_rx: &mut Consumer<'_, TorrentEvent>) -> Vec<SocketAddr> 
 }
 
 #[track_caller]
+fn insert_established_at(connections: &mut ConnectionManager, addr: SocketAddr) -> ConnectionId {
+    let conn_id = connections.insert_established_with_key(|k| generate_peer(true, k));
+    connections[conn_id].peer_addr = addr;
+    conn_id
+}
+
+#[track_caller]
 fn mark_for_disconnect(
     connections: &mut ConnectionManager,
     addr: &str,
     reason: DisconnectReason,
 ) -> ConnectionId {
-    let conn_id = connections.insert_established_with_key(|k| generate_peer(true, k));
-    connections[conn_id].peer_addr = addr.parse().unwrap();
+    let conn_id = insert_established_at(connections, addr.parse().unwrap());
     connections[conn_id].pending_disconnect = Some(reason);
     conn_id
 }
@@ -4702,6 +4708,114 @@ fn rejected_incoming_connection_is_closed_without_being_tracked() {
     // The connection never entered the manager so its close carries no id
     assert!(connections.is_empty());
     assert_eq!(scheduled_closes(&io), vec![None]);
+}
+
+// Banning a peer tears down the connection it currently has and keeps it out
+// for good, even after the slot of the closed connection has been freed
+#[test]
+fn banned_peer_is_disconnected_and_kept_out() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let banned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        let conn_id = insert_established_at(&mut connections, SocketAddr::V4(banned));
+
+        connections.ban_peer(SocketAddr::V4(banned), &mut io, &mut state_ref);
+
+        // The established connection is torn down like any other disconnect
+        assert_eq!(scheduled_closes(&io), vec![Some(conn_id)]);
+        assert!(connections.established_mut(conn_id).is_none());
+        assert_eq!(connections.num_established(), 0);
+
+        // Freeing the slot doesn't make the peer connectable again
+        connections.remove_closed(conn_id);
+        assert!(connections.is_empty());
+        connections.maybe_connect_to_peer(banned.into(), &mut io);
+        assert!(
+            scheduled_connects(&io).is_empty(),
+            "a banned peer should never be connected to again"
+        );
+        assert!(connections.is_empty());
+    });
+}
+
+// The ban applies to connections the peer initiates as well, not only to the
+// ones we initiate
+#[test]
+fn incoming_connection_from_a_banned_peer_is_rejected() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let info_hash = *state_ref.info_hash();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        connections.ban_peer(client.local_addr().unwrap(), &mut io, &mut state_ref);
+
+        let (accepted, _) = listener.accept().unwrap();
+        connections
+            .on_accepted(accepted.into(), info_hash, &mut io)
+            .unwrap();
+
+        // Rejected before being tracked, so the close carries no connection id
+        assert!(connections.is_empty());
+        assert_eq!(scheduled_closes(&io), vec![None]);
+    });
+}
+
+// Only the banned peer is affected, connections to everyone else are untouched
+#[test]
+fn banning_a_peer_leaves_other_connections_alone() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        // Both peers are connected to before either of them is banned
+        let banned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        let other: SocketAddrV4 = "127.0.0.1:6882".parse().unwrap();
+        connections.maybe_connect_to_peer(banned.into(), &mut io);
+        let [banned_conn] = scheduled_connects(&io)[..] else {
+            panic!("the peer about to be banned should have a connect scheduled");
+        };
+        connections.maybe_connect_to_peer(other.into(), &mut io);
+        let other_connects: Vec<_> = scheduled_connects(&io)
+            .into_iter()
+            .filter(|conn_id| *conn_id != banned_conn)
+            .collect();
+        let [other_conn] = other_connects[..] else {
+            panic!("the other peer should have a connect scheduled");
+        };
+        assert_eq!(connections.total_connections(), 2);
+
+        connections.ban_peer(SocketAddr::V4(banned), &mut io, &mut state_ref);
+
+        // Only the banned peer is torn down
+        assert_eq!(scheduled_closes(&io), vec![Some(banned_conn)]);
+        assert!(connections.fd(banned_conn).is_none());
+        // while the other one keeps its socket and is left to finish connecting
+        assert!(connections.fd(other_conn).is_some());
+        connections.remove_closed(banned_conn);
+        assert_eq!(connections.total_connections(), 1);
+    });
 }
 
 // A handshake as it would arrive from a peer, advertising the fast extension
