@@ -702,9 +702,9 @@ impl<'scope, 'state: 'scope> EventLoop {
                         );
                     }
                 }
-                Command::BanPeer { peer_addr } => {
-                    log::debug!("Banning a peer with the addr: {peer_addr}");
-                    connection_manager.ban_peer(peer_addr, io, state_ref);
+                Command::BanPeer { peer_ip } => {
+                    log::debug!("Banning peer(s): {peer_ip}");
+                    connection_manager.ban_peer(peer_ip, io, state_ref);
                 }
                 Command::Stop => {
                     if !matches!(self.state, EventLoopState::ShuttingDown { .. }) {

@@ -1,5 +1,5 @@
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::{Index, IndexMut};
 use std::os::fd::{AsRawFd, RawFd};
 
@@ -69,7 +69,7 @@ impl ConnectionState {
 
 pub struct ConnectionManager {
     connections: SlotMap<ConnectionId, ConnectionState>,
-    ban_list: HashSet<SocketAddr>,
+    ban_list: HashSet<IpAddr>,
     max_connections: usize,
     our_id: PeerId,
 }
@@ -87,7 +87,7 @@ impl ConnectionManager {
     // The address scan is linear but since it's bound by max_connections, which
     // is expected to be in the hundreds, it should be fast
     fn can_accept_new(&self, peer: SocketAddr) -> bool {
-        if self.ban_list.contains(&peer) {
+        if self.ban_list.contains(&peer.ip()) {
             log::trace!("Ignoring peer that has already been banned ({peer})",);
             return false;
         }
@@ -101,9 +101,12 @@ impl ConnectionManager {
         !self.connections.values().any(|state| state.addr() == peer)
     }
 
+    /// Ban all peers that have the given IP, disconnects any exiting peers.
+    /// ip is used instead of SocketAddr since incoming source ports are controlled
+    /// by the peer
     pub fn ban_peer<'state, Q: SubmissionQueue>(
         &mut self,
-        peer: SocketAddr,
+        peer_ip: IpAddr,
         io: &mut Io<Q>,
         state: &mut StateRef<'state>,
     ) {

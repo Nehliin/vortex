@@ -2,7 +2,7 @@ mod common;
 
 use std::{
     collections::HashMap,
-    net::{SocketAddr, SocketAddrV4, TcpListener},
+    net::{IpAddr, SocketAddrV4, TcpListener},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU16, Ordering},
@@ -232,7 +232,7 @@ fn banned_peer_aborts_download() {
                                         );
                                         downloader_command_tx
                                             .send(Command::BanPeer {
-                                                peer_addr: SocketAddr::V4(seeder_addr),
+                                                peer_ip: IpAddr::V4(*seeder_addr.ip()),
                                             })
                                             .unwrap();
                                         phase = Phase::Banned {
