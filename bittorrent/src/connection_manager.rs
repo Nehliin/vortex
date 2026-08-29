@@ -101,7 +101,7 @@ impl ConnectionManager {
         !self.connections.values().any(|state| state.addr() == peer)
     }
 
-    /// Ban all peers that have the given IP, disconnects any exiting peers.
+    /// Ban all peers that have the given IP, disconnects any existing peers.
     /// ip is used instead of SocketAddr since incoming source ports are controlled
     /// by the peer
     pub fn ban_peer<'state, Q: SubmissionQueue>(
@@ -190,7 +190,7 @@ impl ConnectionManager {
         let addr = addr.as_socket().expect("must be AF_INET");
         if !self.can_accept_new(addr) {
             log::debug!(
-                "Rejecting incoming connection from already tracked or excess peer: {addr:?}"
+                "Rejecting incoming connection from already tracked, banned or excess peer: {addr:?}"
             );
             io.close_socket(socket, None);
             return Ok(());
