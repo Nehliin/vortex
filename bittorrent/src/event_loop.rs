@@ -718,6 +718,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                         self.state = EventLoopState::ShuttingDown { listener_fd };
                         connection_manager.disconnect_all(io, state_ref);
                     }
+                    // Break out of the command loop for the potential of us being paused.
+                    // It's the same reason `Resume` does. We can do this unconditionally
+                    // since command left in the channel is for a torrent that is
+                    // going away is pretty meaningless anyways
+                    break;
                 }
             }
         }
