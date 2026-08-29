@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::ops::{Index, IndexMut};
 use std::os::fd::{AsRawFd, RawFd};
 
+use ahash::HashSet;
 use bytes::BufMut;
 use heapless::spsc::Producer;
 use rayon::Scope;
@@ -68,6 +69,7 @@ impl ConnectionState {
 
 pub struct ConnectionManager {
     connections: SlotMap<ConnectionId, ConnectionState>,
+    ban_list: HashSet<SocketAddr>,
     max_connections: usize,
     our_id: PeerId,
 }
@@ -77,6 +79,7 @@ impl ConnectionManager {
         Self {
             connections: SlotMap::with_capacity_and_key(max_connections),
             max_connections,
+            ban_list: Default::default(),
             our_id,
         }
     }
@@ -84,7 +87,7 @@ impl ConnectionManager {
     // The address scan is linear but since it's bound by max_connections, which
     // is expected to be in the hundreds, it should be fast
     fn can_accept_new(&self, peer: SocketAddr) -> bool {
-        if self.connections.len() >= self.max_connections {
+        if self.connections.len() >= self.max_connections || self.ban_list.contains(&peer) {
             log::trace!(
                 "Ignoring peer, max connections ({}) reached",
                 self.max_connections
@@ -92,6 +95,20 @@ impl ConnectionManager {
             return false;
         }
         !self.connections.values().any(|state| state.addr() == peer)
+    }
+
+    pub fn ban_peer<'state, Q: SubmissionQueue>(
+        &mut self,
+        peer: SocketAddr,
+        io: &mut Io<Q>,
+        state: &mut StateRef<'state>,
+    ) {
+        self.ban_list.insert(peer);
+        for (conn_id, conn) in self.connections.iter_mut() {
+            if conn.addr() == peer {
+                Self::disconnect_entry(conn, conn_id, io, state);
+            }
+        }
     }
 
     /// Attempt to open an outgoing connection to `peer`. No-op if the peer is

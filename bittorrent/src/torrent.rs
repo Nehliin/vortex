@@ -175,6 +175,8 @@ pub enum Command {
     /// Use the `TorrentEvent::Paused` event to determine when the torrent successfully entered
     /// the paused state.
     Resume,
+    /// Ban a specific peer
+    BanPeer { peer_addr: SocketAddr },
 }
 
 /// Metrics for a given peer
