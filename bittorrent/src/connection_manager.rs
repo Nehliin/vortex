@@ -87,7 +87,11 @@ impl ConnectionManager {
     // The address scan is linear but since it's bound by max_connections, which
     // is expected to be in the hundreds, it should be fast
     fn can_accept_new(&self, peer: SocketAddr) -> bool {
-        if self.connections.len() >= self.max_connections || self.ban_list.contains(&peer) {
+        if self.ban_list.contains(&peer) {
+            log::trace!("Ignoring peer that has already been banned ({peer})",);
+            return false;
+        }
+        if self.connections.len() >= self.max_connections {
             log::trace!(
                 "Ignoring peer, max connections ({}) reached",
                 self.max_connections
