@@ -6,7 +6,7 @@ use std::{
 
 use bt_bencode::Deserializer;
 use bytes::Buf;
-use heapless::spsc::{Producer, Queue};
+use heapless::spsc::{Consumer, Producer, Queue};
 use serde::Deserialize;
 
 use crate::{
@@ -4334,9 +4334,10 @@ fn established_connection_slot_is_kept_until_close_completes() {
 #[test]
 fn only_peers_marked_for_disconnect_are_disconnected() {
     let mut download_state = setup_test();
-
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
+        let (mut event_tx, _event_rx) = event_q.split();
         let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let marked = connections.insert_established_with_key(|k| generate_peer(true, k));
         let kept = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -4346,13 +4347,254 @@ fn only_peers_marked_for_disconnect_are_disconnected() {
             &torrent::Config::default(),
         );
 
-        connections.execute_pending_disconnects(&mut io, &mut state_ref);
+        connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
 
         assert_eq!(scheduled_closes(&io), vec![Some(marked)]);
         assert!(connections.established_mut(marked).is_none());
         assert!(connections.established_mut(kept).is_some());
         assert_eq!(connections.num_established(), 1);
     });
+}
+
+// The addresses reported by every `BadPeer` event sitting in the queue. Any
+// other event is unexpected in these tests and fails loudly rather than being
+// silently skipped over
+#[track_caller]
+fn bad_peer_addrs(event_rx: &mut Consumer<'_, TorrentEvent>) -> Vec<SocketAddr> {
+    let mut addrs = Vec::new();
+    while let Some(event) = event_rx.dequeue() {
+        match event {
+            TorrentEvent::BadPeer { peer_addr: ip } => addrs.push(ip),
+            other => panic!("unexpected event emitted: {other:?}"),
+        }
+    }
+    addrs
+}
+
+#[track_caller]
+fn mark_for_disconnect(
+    connections: &mut ConnectionManager,
+    addr: &str,
+    reason: DisconnectReason,
+) -> ConnectionId {
+    let conn_id = connections.insert_established_with_key(|k| generate_peer(true, k));
+    connections[conn_id].peer_addr = addr.parse().unwrap();
+    connections[conn_id].pending_disconnect = Some(reason);
+    conn_id
+}
+
+// Peers disconnected for something that is their own fault are reported to the
+// client so that it can stop trusting them
+#[test]
+fn disconnects_that_blame_the_peer_emit_bad_peer_event() {
+    for (reason, addr) in [
+        (
+            DisconnectReason::ProtocolError("invalid piece message"),
+            "127.0.0.1:6881",
+        ),
+        (DisconnectReason::InvalidMessage, "127.0.0.1:6882"),
+        (DisconnectReason::BadPeer, "127.0.0.1:6883"),
+    ] {
+        let mut download_state = setup_test();
+        let mut event_q = Queue::<TorrentEvent, 512>::new();
+        rayon::in_place_scope(|_scope| {
+            let mut state_ref = download_state.as_ref();
+            let (mut event_tx, mut event_rx) = event_q.split();
+            let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+            let described = reason.to_string();
+            let conn_id = mark_for_disconnect(&mut connections, addr, reason);
+            let mut io = Io::new(
+                BackloggedSubmissionQueue::new(MockSubmissionQueue),
+                &torrent::Config::default(),
+            );
+
+            connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
+
+            assert_eq!(
+                bad_peer_addrs(&mut event_rx),
+                vec![addr.parse().unwrap()],
+                "\"{described}\" should be reported as a bad peer"
+            );
+            assert!(connections.established_mut(conn_id).is_none());
+        });
+    }
+}
+
+// Disconnecting for a reason that isn't the peer's fault must not get it
+// blamed, it may well be a perfectly good peer to reconnect to later on
+#[test]
+fn disconnects_that_dont_blame_the_peer_emit_no_event() {
+    for reason in [
+        DisconnectReason::Idle,
+        DisconnectReason::RedundantConnection,
+    ] {
+        let mut download_state = setup_test();
+        let mut event_q = Queue::<TorrentEvent, 512>::new();
+        rayon::in_place_scope(|_scope| {
+            let mut state_ref = download_state.as_ref();
+            let (mut event_tx, mut event_rx) = event_q.split();
+            let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+            let described = reason.to_string();
+            let conn_id = mark_for_disconnect(&mut connections, "127.0.0.1:6881", reason);
+            let mut io = Io::new(
+                BackloggedSubmissionQueue::new(MockSubmissionQueue),
+                &torrent::Config::default(),
+            );
+
+            connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
+
+            assert!(
+                bad_peer_addrs(&mut event_rx).is_empty(),
+                "\"{described}\" should not be reported as a bad peer"
+            );
+            // The peer is still disconnected, it just isn't blamed for it
+            assert!(connections.established_mut(conn_id).is_none());
+            assert_eq!(scheduled_closes(&io), vec![Some(conn_id)]);
+        });
+    }
+}
+
+// A single pass may tear down several peers for different reasons. Only the
+// blameworthy ones are reported and each event has to carry the address of the
+// peer it actually refers to
+#[test]
+fn only_blameworthy_peers_of_a_mixed_batch_are_reported() {
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (mut event_tx, mut event_rx) = event_q.split();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let lied = mark_for_disconnect(
+            &mut connections,
+            "127.0.0.1:1111",
+            DisconnectReason::ProtocolError("invalid bitfield"),
+        );
+        let idle = mark_for_disconnect(&mut connections, "127.0.0.1:2222", DisconnectReason::Idle);
+        let untrusted = mark_for_disconnect(
+            &mut connections,
+            "127.0.0.1:3333",
+            DisconnectReason::BadPeer,
+        );
+        let kept = connections.insert_established_with_key(|k| generate_peer(true, k));
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
+
+        // Connections are not iterated in insertion order
+        let mut reported = bad_peer_addrs(&mut event_rx);
+        reported.sort();
+        assert_eq!(
+            reported,
+            vec![
+                "127.0.0.1:1111".parse().unwrap(),
+                "127.0.0.1:3333".parse().unwrap()
+            ],
+            "the idle peer should not be blamed, and each event carries its own peer address"
+        );
+
+        for disconnected in [lied, idle, untrusted] {
+            assert!(connections.established_mut(disconnected).is_none());
+        }
+        assert!(connections.established_mut(kept).is_some());
+        assert_eq!(connections.num_established(), 1);
+    });
+}
+
+// A client that isn't draining its events fast enough must never keep a peer
+// connected, the event is dropped instead
+#[test]
+fn bad_peer_is_disconnected_even_when_the_event_queue_is_full() {
+    let mut download_state = setup_test();
+    // The usable capacity of a heapless queue is N - 1, so this holds one event
+    let mut event_q = Queue::<TorrentEvent, 2>::new();
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (mut event_tx, mut event_rx) = event_q.split();
+        event_tx.enqueue(TorrentEvent::Paused).unwrap();
+        assert!(!event_tx.ready(), "the queue should be full");
+
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let conn_id = mark_for_disconnect(
+            &mut connections,
+            "127.0.0.1:6881",
+            DisconnectReason::BadPeer,
+        );
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
+
+        assert!(connections.established_mut(conn_id).is_none());
+        assert_eq!(scheduled_closes(&io), vec![Some(conn_id)]);
+        // The dropped event didn't displace the one that was already queued
+        assert!(matches!(event_rx.dequeue(), Some(TorrentEvent::Paused)));
+        assert!(event_rx.dequeue().is_none());
+    });
+}
+
+// Every disconnect is counted under its own reason, so that a single
+// disconnect is one increment on one series rather than being spread out over
+// all of them
+#[cfg(feature = "metrics")]
+#[test]
+fn disconnects_are_counted_per_reason() {
+    use metrics::{Key, Label};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use metrics_util::{CompositeKey, MetricKind};
+
+    let mut download_state = setup_test();
+    let mut event_q = Queue::<TorrentEvent, 512>::new();
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let (mut event_tx, _event_rx) = event_q.split();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        for reason in [
+            DisconnectReason::InvalidMessage,
+            DisconnectReason::InvalidMessage,
+            DisconnectReason::RedundantConnection,
+        ] {
+            mark_for_disconnect(&mut connections, "127.0.0.1:6881", reason);
+        }
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        metrics::with_local_recorder(&recorder, || {
+            connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
+        });
+    });
+
+    #[allow(clippy::mutable_key_type)]
+    let metrics = snapshotter.snapshot().into_hashmap();
+    let count_for = |reason: &'static str| {
+        let key = CompositeKey::new(
+            MetricKind::Counter,
+            Key::from_parts("disconnects", vec![Label::new("reason", reason)]),
+        );
+        let Some((_, _, DebugValue::Counter(count))) = metrics.get(&key) else {
+            panic!("no counter was recorded for reason {reason}");
+        };
+        *count
+    };
+
+    assert_eq!(count_for("invalid_message"), 2);
+    assert_eq!(count_for("redundant_connection"), 1);
+    // Reasons that never happened must not show up as series of their own
+    assert_eq!(
+        metrics.len(),
+        2,
+        "only the reasons that actually occurred should be recorded"
+    );
 }
 
 #[test]

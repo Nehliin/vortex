@@ -2,7 +2,7 @@ use std::{
     cell::OnceCell,
     collections::VecDeque,
     io::{self},
-    net::{SocketAddrV4, TcpListener},
+    net::{SocketAddr, SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
     time::{Duration, Instant},
@@ -308,6 +308,10 @@ pub enum TorrentEvent {
         /// [`TorrentProgress::total_completed`].
         progress: Option<TorrentProgress>,
     },
+    /// A peer has been disconnect due to protocol errors, invalid messages
+    /// or that the peer trust has dropped too low due to being part of pieces
+    /// that received invalid piece data.
+    BadPeer { peer_addr: SocketAddr },
 }
 
 pub struct InitializedState {

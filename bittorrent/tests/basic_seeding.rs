@@ -135,7 +135,7 @@ fn basic_seeding() {
                                 .unwrap();
                         }
                         TorrentEvent::Paused => panic!("Should never pause"),
-                        TorrentEvent::TorrentComplete | TorrentEvent::MetadataComplete(_) => {}
+                        _ => {}
                     }
                 }
 
@@ -196,7 +196,7 @@ fn basic_seeding() {
                                 log::info!("Downloader: Metadata complete");
                             }
                             TorrentEvent::Paused => panic!("Should never pause"),
-                            TorrentEvent::Running { .. } => {}
+                            _ => {}
                         }
                     }
                 }

@@ -106,7 +106,7 @@ pub fn init_test_environment() {
     env_logger::builder()
         .filter_level(log::LevelFilter::Trace)
         .init();
-    let builder = PrometheusBuilder::new();
+    let builder = PrometheusBuilder::new().with_recommended_naming(true);
     if let Err(err) = builder.install() {
         log::error!("failed installing PrometheusBuilder: {err}");
     }
