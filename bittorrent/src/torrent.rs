@@ -311,7 +311,7 @@ pub enum TorrentEvent {
     /// A peer has been disconnect due to protocol errors, invalid messages
     /// or that the peer trust has dropped too low due to being part of pieces
     /// that received invalid piece data.
-    BadPeer { ip: SocketAddr },
+    BadPeer { peer_addr: SocketAddr },
 }
 
 pub struct InitializedState {

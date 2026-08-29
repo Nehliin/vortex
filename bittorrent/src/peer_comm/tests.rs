@@ -4364,7 +4364,7 @@ fn bad_peer_addrs(event_rx: &mut Consumer<'_, TorrentEvent>) -> Vec<SocketAddr> 
     let mut addrs = Vec::new();
     while let Some(event) = event_rx.dequeue() {
         match event {
-            TorrentEvent::BadPeer { ip } => addrs.push(ip),
+            TorrentEvent::BadPeer { peer_addr: ip } => addrs.push(ip),
             other => panic!("unexpected event emitted: {other:?}"),
         }
     }

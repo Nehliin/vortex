@@ -455,7 +455,9 @@ impl ConnectionManager {
             };
             if bad_peer
                 && event_tx
-                    .enqueue(TorrentEvent::BadPeer { ip: peer.peer_addr })
+                    .enqueue(TorrentEvent::BadPeer {
+                        peer_addr: peer.peer_addr,
+                    })
                     .is_err()
             {
                 log::warn!("Failed to enqueue BadPeer event")
