@@ -4890,6 +4890,168 @@ fn banning_a_peer_records_a_banned_disconnect() {
     assert_eq!(*disconnects, 1);
 }
 
+// Unbanning lifts the ban so the peer can be connected to again, but it does
+// not undo the disconnect the ban caused: the connection only comes back once
+// the caller asks for it again
+#[test]
+fn unbanned_peer_can_be_connected_to_again() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let peer: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        let conn_id = insert_established_at(&mut connections, SocketAddr::V4(peer));
+        connections.ban_peer(IpAddr::V4(*peer.ip()), &mut io, &mut state_ref);
+        connections.remove_closed(conn_id);
+        connections.maybe_connect_to_peer(peer.into(), &mut io);
+        assert!(
+            scheduled_connects(&io).is_empty(),
+            "the peer should still be banned"
+        );
+
+        connections.unban_peer(IpAddr::V4(*peer.ip()));
+
+        // Lifting the ban doesn't reconnect on its own, the caller is the one
+        // that decides when the peer is worth another connection
+        assert!(connections.is_empty());
+        assert!(scheduled_connects(&io).is_empty());
+
+        connections.maybe_connect_to_peer(peer.into(), &mut io);
+        assert_eq!(
+            scheduled_connects(&io).len(),
+            1,
+            "an unbanned peer should be connectable again"
+        );
+        // Reported on another port it is still the same, no longer banned, peer
+        let same_peer_other_port: SocketAddrV4 = "127.0.0.1:51413".parse().unwrap();
+        connections.maybe_connect_to_peer(same_peer_other_port.into(), &mut io);
+        assert_eq!(scheduled_connects(&io).len(), 2);
+    });
+}
+
+// The lifted ban also applies to the connections the peer initiates, which
+// arrive from an ephemeral port rather than the address that was unbanned. The
+// very same connection attempt is rejected before the unban and kept after it
+#[test]
+fn incoming_connection_from_an_unbanned_peer_is_accepted() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let info_hash = *state_ref.info_hash();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        // Accepts a connection from the peer, which comes from an ephemeral port
+        // rather than the address the ban is keyed on
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listening_addr: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        let connect_to_us = || {
+            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            assert_ne!(
+                client.local_addr().unwrap().port(),
+                listening_addr.port(),
+                "the connection should come from an ephemeral port"
+            );
+            let (accepted, _) = listener.accept().unwrap();
+            // The client end is kept alive for the duration of the test, a peer
+            // that hung up would be rejected for reasons that have nothing to
+            // do with the ban
+            (accepted, client)
+        };
+
+        connections.ban_peer(IpAddr::V4(*listening_addr.ip()), &mut io, &mut state_ref);
+
+        let (accepted, _banned_client) = connect_to_us();
+        connections
+            .on_accepted(accepted.into(), info_hash, &mut io)
+            .unwrap();
+
+        // Rejected before being tracked, so the close carries no connection id
+        assert!(
+            connections.is_empty(),
+            "the banned peer should not have been let in"
+        );
+        assert_eq!(scheduled_closes(&io), vec![None]);
+
+        connections.unban_peer(IpAddr::V4(*listening_addr.ip()));
+
+        let (accepted, _unbanned_client) = connect_to_us();
+        connections
+            .on_accepted(accepted.into(), info_hash, &mut io)
+            .unwrap();
+
+        assert_eq!(connections.total_connections(), 1);
+        assert_eq!(
+            scheduled_closes(&io),
+            vec![None],
+            "the connection should have been kept now that the ban is lifted, \
+             leaving only the close of the one rejected while banned"
+        );
+        // Kept and handshaked with like any other accepted connection
+        let [write_event_id] = io
+            .events
+            .iter()
+            .filter_map(|(event_id, event)| match event.typ {
+                EventType::Write { .. } => Some(event_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("the accepted peer should have a handshake write scheduled");
+        };
+        // The write completion, which returns the buffer to the pool, is never
+        // handled against a mocked submission queue so do it here
+        let handshake_write = io.events.remove(write_event_id).unwrap();
+        for buffer in handshake_write.buffers.into_iter().flatten() {
+            io.write_pool.return_buffer(buffer);
+        }
+    });
+}
+
+// Only the given peer is unbanned, everyone else keeps the ban they were given
+#[test]
+fn unbanning_a_peer_leaves_other_bans_in_place() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let unbanned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        let still_banned: SocketAddrV4 = "127.0.0.2:6881".parse().unwrap();
+        connections.ban_peer(IpAddr::V4(*unbanned.ip()), &mut io, &mut state_ref);
+        connections.ban_peer(IpAddr::V4(*still_banned.ip()), &mut io, &mut state_ref);
+
+        connections.unban_peer(IpAddr::V4(*unbanned.ip()));
+        // Unbanning a peer that was never banned changes nothing either
+        let never_banned: SocketAddrV4 = "127.0.0.3:6881".parse().unwrap();
+        connections.unban_peer(IpAddr::V4(*never_banned.ip()));
+
+        connections.maybe_connect_to_peer(still_banned.into(), &mut io);
+        assert!(
+            scheduled_connects(&io).is_empty(),
+            "the peer that wasn't unbanned should still be banned"
+        );
+        connections.maybe_connect_to_peer(unbanned.into(), &mut io);
+        connections.maybe_connect_to_peer(never_banned.into(), &mut io);
+        assert_eq!(scheduled_connects(&io).len(), 2);
+    });
+}
+
 // A handshake as it would arrive from a peer, advertising the fast extension
 // (BEP 6) or not. The extension protocol is deliberately left unadvertised so
 // that the only message queued up in response is the initial bitfield one.
