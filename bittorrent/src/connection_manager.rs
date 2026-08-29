@@ -110,11 +110,17 @@ impl ConnectionManager {
         io: &mut Io<Q>,
         state: &mut StateRef<'state>,
     ) {
-        self.ban_list.insert(peer);
-        for (conn_id, conn) in self.connections.iter_mut() {
-            if conn.addr() == peer {
-                Self::disconnect_entry(conn, conn_id, io, state);
+        self.ban_list.insert(peer_ip);
+        for (conn_id, entry) in self.connections.iter_mut() {
+            if entry.addr().ip() != peer_ip {
+                continue;
             }
+            #[cfg(feature = "metrics")]
+            if let ConnectionState::Established { .. } = &*entry {
+                let counter = metrics::counter!("disconnects", "reason" => "banned");
+                counter.increment(1);
+            }
+            Self::disconnect_entry(entry, conn_id, io, state);
         }
     }
 
