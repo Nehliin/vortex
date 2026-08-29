@@ -702,6 +702,10 @@ impl<'scope, 'state: 'scope> EventLoop {
                         );
                     }
                 }
+                Command::BanPeer { peer_ip } => {
+                    log::debug!("Banning peer(s): {peer_ip}");
+                    connection_manager.ban_peer(peer_ip, io, state_ref);
+                }
                 Command::Stop => {
                     if !matches!(self.state, EventLoopState::ShuttingDown { .. }) {
                         log::info!("Shutdown requested, closing all connections");

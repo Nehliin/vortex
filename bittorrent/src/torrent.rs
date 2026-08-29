@@ -2,7 +2,7 @@ use std::{
     cell::OnceCell,
     collections::VecDeque,
     io::{self},
-    net::{SocketAddr, SocketAddrV4, TcpListener},
+    net::{IpAddr, SocketAddr, SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
     time::{Duration, Instant},
@@ -175,6 +175,9 @@ pub enum Command {
     /// Use the `TorrentEvent::Paused` event to determine when the torrent successfully entered
     /// the paused state.
     Resume,
+    /// Ban any peer(s) for the remainder of this run: its current connection, if any,
+    /// is disconnected and it is neither connected to nor accepted again.
+    BanPeer { peer_ip: IpAddr },
 }
 
 /// Metrics for a given peer

@@ -1,8 +1,9 @@
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::{Index, IndexMut};
 use std::os::fd::{AsRawFd, RawFd};
 
+use ahash::HashSet;
 use bytes::BufMut;
 use heapless::spsc::Producer;
 use rayon::Scope;
@@ -68,6 +69,7 @@ impl ConnectionState {
 
 pub struct ConnectionManager {
     connections: SlotMap<ConnectionId, ConnectionState>,
+    ban_list: HashSet<IpAddr>,
     max_connections: usize,
     our_id: PeerId,
 }
@@ -77,6 +79,7 @@ impl ConnectionManager {
         Self {
             connections: SlotMap::with_capacity_and_key(max_connections),
             max_connections,
+            ban_list: Default::default(),
             our_id,
         }
     }
@@ -84,6 +87,10 @@ impl ConnectionManager {
     // The address scan is linear but since it's bound by max_connections, which
     // is expected to be in the hundreds, it should be fast
     fn can_accept_new(&self, peer: SocketAddr) -> bool {
+        if self.ban_list.contains(&peer.ip()) {
+            log::trace!("Ignoring peer that has already been banned ({peer})",);
+            return false;
+        }
         if self.connections.len() >= self.max_connections {
             log::trace!(
                 "Ignoring peer, max connections ({}) reached",
@@ -92,6 +99,29 @@ impl ConnectionManager {
             return false;
         }
         !self.connections.values().any(|state| state.addr() == peer)
+    }
+
+    /// Ban all peers that have the given IP, disconnects any existing peers.
+    /// ip is used instead of SocketAddr since incoming source ports are controlled
+    /// by the peer
+    pub fn ban_peer<'state, Q: SubmissionQueue>(
+        &mut self,
+        peer_ip: IpAddr,
+        io: &mut Io<Q>,
+        state: &mut StateRef<'state>,
+    ) {
+        self.ban_list.insert(peer_ip);
+        for (conn_id, entry) in self.connections.iter_mut() {
+            if entry.addr().ip() != peer_ip {
+                continue;
+            }
+            #[cfg(feature = "metrics")]
+            if let ConnectionState::Established { .. } = &*entry {
+                let counter = metrics::counter!("disconnects", "reason" => "banned");
+                counter.increment(1);
+            }
+            Self::disconnect_entry(entry, conn_id, io, state);
+        }
     }
 
     /// Attempt to open an outgoing connection to `peer`. No-op if the peer is
@@ -160,7 +190,7 @@ impl ConnectionManager {
         let addr = addr.as_socket().expect("must be AF_INET");
         if !self.can_accept_new(addr) {
             log::debug!(
-                "Rejecting incoming connection from already tracked or excess peer: {addr:?}"
+                "Rejecting incoming connection from already tracked, banned or excess peer: {addr:?}"
             );
             io.close_socket(socket, None);
             return Ok(());

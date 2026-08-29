@@ -1,5 +1,5 @@
 use std::{
-    net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream},
+    net::{IpAddr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -4372,13 +4372,19 @@ fn bad_peer_addrs(event_rx: &mut Consumer<'_, TorrentEvent>) -> Vec<SocketAddr> 
 }
 
 #[track_caller]
+fn insert_established_at(connections: &mut ConnectionManager, addr: SocketAddr) -> ConnectionId {
+    let conn_id = connections.insert_established_with_key(|k| generate_peer(true, k));
+    connections[conn_id].peer_addr = addr;
+    conn_id
+}
+
+#[track_caller]
 fn mark_for_disconnect(
     connections: &mut ConnectionManager,
     addr: &str,
     reason: DisconnectReason,
 ) -> ConnectionId {
-    let conn_id = connections.insert_established_with_key(|k| generate_peer(true, k));
-    connections[conn_id].peer_addr = addr.parse().unwrap();
+    let conn_id = insert_established_at(connections, addr.parse().unwrap());
     connections[conn_id].pending_disconnect = Some(reason);
     conn_id
 }
@@ -4702,6 +4708,186 @@ fn rejected_incoming_connection_is_closed_without_being_tracked() {
     // The connection never entered the manager so its close carries no id
     assert!(connections.is_empty());
     assert_eq!(scheduled_closes(&io), vec![None]);
+}
+
+// Banning a peer tears down the connection it currently has and keeps it out
+// for good, even after the slot of the closed connection has been freed
+#[test]
+fn banned_peer_is_disconnected_and_kept_out() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let banned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        let conn_id = insert_established_at(&mut connections, SocketAddr::V4(banned));
+
+        connections.ban_peer(IpAddr::V4(*banned.ip()), &mut io, &mut state_ref);
+
+        // The established connection is torn down like any other disconnect
+        assert_eq!(scheduled_closes(&io), vec![Some(conn_id)]);
+        assert!(connections.established_mut(conn_id).is_none());
+        assert_eq!(connections.num_established(), 0);
+
+        // Freeing the slot doesn't make the peer connectable again
+        connections.remove_closed(conn_id);
+        assert!(connections.is_empty());
+        connections.maybe_connect_to_peer(banned.into(), &mut io);
+        // Neither does showing up on another port, the ban is on the peer and
+        // not on the address it happened to be reported on
+        let same_peer_other_port: SocketAddrV4 = "127.0.0.1:51413".parse().unwrap();
+        connections.maybe_connect_to_peer(same_peer_other_port.into(), &mut io);
+        assert!(
+            scheduled_connects(&io).is_empty(),
+            "a banned peer should never be connected to again"
+        );
+        assert!(connections.is_empty());
+    });
+}
+
+// The ban applies to connections the peer initiates as well, which is the case
+// that matters most since those are the ones that can't be filtered out before
+// a socket exists
+#[test]
+fn incoming_connection_from_a_banned_peer_is_rejected() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let info_hash = *state_ref.info_hash();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        // The peer is banned by the address it listens on, while the connection
+        // it opens to us comes from an ephemeral port that is different every time
+        let listening_addr: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        connections.ban_peer(IpAddr::V4(*listening_addr.ip()), &mut io, &mut state_ref);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        assert_ne!(
+            client.local_addr().unwrap().port(),
+            listening_addr.port(),
+            "the connection should come from an ephemeral port"
+        );
+        let (accepted, _) = listener.accept().unwrap();
+        connections
+            .on_accepted(accepted.into(), info_hash, &mut io)
+            .unwrap();
+
+        // Rejected before being tracked, so the close carries no connection id
+        assert!(connections.is_empty());
+        assert_eq!(scheduled_closes(&io), vec![None]);
+    });
+}
+
+// Only the banned peer is affected, connections to everyone else are untouched
+#[test]
+fn banning_a_peer_leaves_other_connections_alone() {
+    let mut download_state = setup_test();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        // Both peers are connected to before either of them is banned
+        let banned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        let other: SocketAddrV4 = "127.0.0.2:6881".parse().unwrap();
+        connections.maybe_connect_to_peer(banned.into(), &mut io);
+        let [banned_conn] = scheduled_connects(&io)[..] else {
+            panic!("the peer about to be banned should have a connect scheduled");
+        };
+        connections.maybe_connect_to_peer(other.into(), &mut io);
+        let other_connects: Vec<_> = scheduled_connects(&io)
+            .into_iter()
+            .filter(|conn_id| *conn_id != banned_conn)
+            .collect();
+        let [other_conn] = other_connects[..] else {
+            panic!("the other peer should have a connect scheduled");
+        };
+        assert_eq!(connections.total_connections(), 2);
+
+        connections.ban_peer(IpAddr::V4(*banned.ip()), &mut io, &mut state_ref);
+
+        // Only the banned peer is torn down
+        assert_eq!(scheduled_closes(&io), vec![Some(banned_conn)]);
+        assert!(connections.fd(banned_conn).is_none());
+        // while the other one keeps its socket and is left to finish connecting
+        assert!(connections.fd(other_conn).is_some());
+        connections.remove_closed(banned_conn);
+        assert_eq!(connections.total_connections(), 1);
+        // and everyone that isn't banned can still be connected to. The banned
+        // peer's connect event is still counted here, it lives until its cancel
+        // completes, which never happens against a mocked submission queue
+        let not_banned: SocketAddrV4 = "127.0.0.3:6881".parse().unwrap();
+        let connects_before = scheduled_connects(&io).len();
+        connections.maybe_connect_to_peer(not_banned.into(), &mut io);
+        assert_eq!(
+            scheduled_connects(&io).len(),
+            connects_before + 1,
+            "a peer that isn't banned should still be connected to"
+        );
+    });
+}
+
+// Bans show up in the disconnect metrics like every other teardown, and a
+// connection that is already on its way out isn't counted a second time
+#[cfg(feature = "metrics")]
+#[test]
+fn banning_a_peer_records_a_banned_disconnect() {
+    use metrics::{Key, Label};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use metrics_util::{CompositeKey, MetricKind};
+
+    let mut download_state = setup_test();
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    rayon::in_place_scope(|_scope| {
+        let mut state_ref = download_state.as_ref();
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
+        let mut io = Io::new(
+            BackloggedSubmissionQueue::new(MockSubmissionQueue),
+            &torrent::Config::default(),
+        );
+
+        let banned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
+        let conn_id = insert_established_at(&mut connections, SocketAddr::V4(banned));
+
+        metrics::with_local_recorder(&recorder, || {
+            connections.ban_peer(IpAddr::V4(*banned.ip()), &mut io, &mut state_ref);
+            // The second ban finds the connection closing, its teardown has
+            // already been counted
+            connections.ban_peer(IpAddr::V4(*banned.ip()), &mut io, &mut state_ref);
+        });
+
+        assert!(connections.established_mut(conn_id).is_none());
+        assert_eq!(scheduled_closes(&io), vec![Some(conn_id)]);
+    });
+
+    let snapshot = snapshotter.snapshot();
+    #[allow(clippy::mutable_key_type)]
+    let metrics = snapshot.into_hashmap();
+    let banned_disconnects = CompositeKey::new(
+        MetricKind::Counter,
+        Key::from_parts("disconnects", vec![Label::new("reason", "banned")]),
+    );
+    let Some((_, _, DebugValue::Counter(disconnects))) = metrics.get(&banned_disconnects) else {
+        panic!("the ban should have been counted as a disconnect: {metrics:?}");
+    };
+    assert_eq!(*disconnects, 1);
 }
 
 // A handshake as it would arrive from a peer, advertising the fast extension
