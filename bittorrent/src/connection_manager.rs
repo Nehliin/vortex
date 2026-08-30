@@ -346,9 +346,13 @@ impl ConnectionManager {
         let ConnectionState::Handshaking { socket, .. } =
             std::mem::replace(entry, ConnectionState::Dummy)
         else {
-            unreachable!("handshake data received for non-handshaking connection");
+            unreachable!("[{socket_addr}] handshake data received for non-handshaking connection");
         };
         let fd = socket.as_raw_fd();
+        // We already buffer in the application layer so this can only add latency
+        if let Err(err) = socket.set_tcp_nodelay(true) {
+            log::error!("[{socket_addr}] Failed to set TCP_NODELAY: {err}")
+        }
         *entry = ConnectionState::Established(PeerConnection::new(
             socket,
             socket_addr,
