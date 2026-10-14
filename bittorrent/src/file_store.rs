@@ -1,8 +1,12 @@
 use std::{
+    ffi::{CString, OsStr},
     io,
     os::{
-        fd::{AsRawFd, OwnedFd, RawFd},
-        unix::fs::MetadataExt,
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt},
+        },
     },
     path::{Path, PathBuf},
     rc::Rc,
@@ -19,13 +23,30 @@ pub struct File {
 }
 
 impl File {
-    pub fn create(path: impl AsRef<Path>, size: usize) -> io::Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .read(true)
-            .open(path)?;
+    fn create_at(directory: &OwnedFd, name: &OsStr, size: usize) -> io::Result<Self> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // Resolve only the final component beneath an already opened directory.
+        // O_NOFOLLOW rejects symlinks, including ones replaced during opening.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_CREAT
+                    | libc::O_RDWR
+                    | libc::O_CLOEXEC
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK,
+                0o666,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
 
         let current_size = file.metadata()?.size();
         if current_size < size as u64 {
@@ -57,6 +78,50 @@ impl File {
     pub fn len(&self) -> usize {
         self.len
     }
+}
+
+// Validate all metadata paths before creating any directories or files. Inspect
+// raw components because Path::components normalizes away embedded `.` segments.
+fn validate_relative_path(path: &Path, single_component: bool) -> io::Result<()> {
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty()
+        || bytes.contains(&0)
+        || (single_component && bytes.contains(&b'/'))
+        || bytes
+            .split(|byte| *byte == b'/')
+            .any(|part| part.is_empty() || part == b"." || part == b"..")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid torrent path",
+        ));
+    }
+    Ok(())
+}
+
+fn open_directory_at(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
+    let name =
+        CString::new(name.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o777) };
+    if result < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::AlreadyExists {
+            return Err(err);
+        }
+    }
+    // Keep each parent pinned by its descriptor, so replacing a path component
+    // with a symlink cannot redirect subsequent filesystem operations.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 #[derive(Debug)]
@@ -122,28 +187,38 @@ impl FileStore {
                 }]
             });
 
-            let torrent_directory = root.join(&torrent_info.name);
-            // Create new directory to store all files
-            if let Err(err) = std::fs::create_dir_all(&torrent_directory) {
-                // Do not error if they folders already exists
-                if err.kind() != io::ErrorKind::AlreadyExists {
-                    return Err(err);
-                }
+            validate_relative_path(Path::new(&torrent_info.name), true)?;
+            for file in &files {
+                validate_relative_path(&file.path, false)?;
             }
+
+            // The caller-selected root is trusted; every metadata-controlled
+            // component below it is opened relative to a directory descriptor.
+            std::fs::create_dir_all(root)?;
+            let root: OwnedFd = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+                .open(root)?
+                .into();
+            let torrent_directory = open_directory_at(&root, OsStr::new(&torrent_info.name))?;
 
             for torrent_file in files {
                 let num_pieces = (torrent_file.length as u64 + start_offset as u64) / piece_length;
                 let offset = (torrent_file.length as u64 + start_offset as u64) % piece_length;
-                let file_path = torrent_directory.as_path().join(torrent_file.path);
-                if let Some(parent_dir) = file_path.parent()
-                    && let Err(err) = std::fs::create_dir_all(parent_dir)
-                {
-                    // Do not error if they folders already exists
-                    if err.kind() != io::ErrorKind::AlreadyExists {
-                        return Err(err);
+                let mut directory = torrent_directory.try_clone()?;
+                let mut components = torrent_file.path.iter().peekable();
+                while let Some(component) = components.next() {
+                    if components.peek().is_some() {
+                        directory = open_directory_at(&directory, component)?;
+                    } else {
+                        break;
                     }
                 }
-                let file_handle = File::create(&file_path, torrent_file.length as usize)?;
+                let file_handle = File::create_at(
+                    &directory,
+                    torrent_file.path.file_name().expect("validated file path"),
+                    torrent_file.length as usize,
+                )?;
 
                 let torrent_file = TorrentFile {
                     start_piece,
@@ -342,6 +417,117 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.path).unwrap();
         }
+    }
+
+    fn path_test_metadata() -> (TempDir, Torrent) {
+        let source = TempDir::new(&format!("vortex_path_source_{}", rand::random::<u64>()));
+        source.add_file("payload", &[1; 64]);
+        let mut metadata = TorrentBuilder::new(&source.path, 256)
+            .set_name("safe".to_owned())
+            .build()
+            .unwrap();
+        metadata.files = Some(vec![lava_torrent::torrent::v1::File {
+            length: 64,
+            path: "nested/payload".into(),
+            extra_fields: None,
+        }]);
+        (source, metadata)
+    }
+
+    #[test]
+    fn rejects_invalid_names_before_creating_files() {
+        let (_source, mut metadata) = path_test_metadata();
+        let root = TempDir::new(&format!("vortex_path_names_{}", rand::random::<u64>()));
+        for name in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "/tmp/escape",
+            "nested/name",
+            "bad\0name",
+        ] {
+            metadata.name = name.to_owned();
+            assert_eq!(
+                FileStore::new(&root.path, &metadata).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(std::fs::read_dir(&root.path).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn validates_all_file_paths_before_creating_files() {
+        let (_source, mut metadata) = path_test_metadata();
+        let root = TempDir::new(&format!("vortex_path_files_{}", rand::random::<u64>()));
+        for path in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "/tmp/escape",
+            "nested/../../escape",
+            "nested/./payload",
+            "bad\0name",
+        ] {
+            let mut invalid = metadata.files.as_ref().unwrap()[0].clone();
+            invalid.path = path.into();
+            metadata.files.as_mut().unwrap().truncate(1);
+            metadata.files.as_mut().unwrap().push(invalid);
+            assert_eq!(
+                FileStore::new(&root.path, &metadata).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(std::fs::read_dir(&root.path).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn rejects_symlinks_at_every_metadata_controlled_level() {
+        use std::os::unix::fs::symlink;
+        let (_source, metadata) = path_test_metadata();
+        for level in 0..3 {
+            let root = TempDir::new(&format!("vortex_path_links_{}", rand::random::<u64>()));
+            let outside = TempDir::new(&format!("vortex_path_outside_{}", rand::random::<u64>()));
+            outside.add_file("payload", b"must remain unchanged");
+            match level {
+                0 => symlink(&outside.path, root.path.join("safe")).unwrap(),
+                1 => {
+                    std::fs::create_dir(root.path.join("safe")).unwrap();
+                    symlink(&outside.path, root.path.join("safe/nested")).unwrap();
+                }
+                _ => {
+                    std::fs::create_dir_all(root.path.join("safe/nested")).unwrap();
+                    symlink(
+                        outside.path.join("payload"),
+                        root.path.join("safe/nested/payload"),
+                    )
+                    .unwrap();
+                }
+            }
+            assert!(FileStore::new(&root.path, &metadata).is_err());
+            assert_eq!(
+                std::fs::read(outside.path.join("payload")).unwrap(),
+                b"must remain unchanged"
+            );
+            assert_eq!(std::fs::read_dir(&outside.path).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn opens_existing_nested_files_under_caller_selected_root() {
+        use std::os::unix::fs::symlink;
+        let (_source, metadata) = path_test_metadata();
+        let root = TempDir::new(&format!("vortex_path_valid_{}", rand::random::<u64>()));
+        root.add_file("safe/nested/payload", &[7; 64]);
+        let alias = TempDir::new(&format!("vortex_path_alias_{}", rand::random::<u64>()));
+        symlink(&root.path, alias.path.join("root")).unwrap();
+        let store = FileStore::new(alias.path.join("root"), &metadata).unwrap();
+        assert_eq!(store.files.len(), 1);
+        assert_eq!(
+            std::fs::read(root.path.join("safe/nested/payload")).unwrap(),
+            [7; 64]
+        );
     }
 
     fn create_buffer_with_data(data: &[u8]) -> Buffer {
