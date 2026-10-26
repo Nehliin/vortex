@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.7.0...vortex-bittorrent-v0.8.0) - 2026-10-26
+
+### Added
+
+- Support unbanning peers ([#163](https://github.com/Nehliin/vortex/pull/163))
+- Support banning peers ([#161](https://github.com/Nehliin/vortex/pull/161))
+- Track trust amongst peers ([#159](https://github.com/Nehliin/vortex/pull/159))
+- Expose bad peers via `TorrentEvent::BadPeer` + improve disconnect metrics ([#160](https://github.com/Nehliin/vortex/pull/160))
+
+### Fixed
+
+- Fix potential hang ([#162](https://github.com/Nehliin/vortex/pull/162))
+- Piece message validation gaps ([#157](https://github.com/Nehliin/vortex/pull/157))
+- Incorrect initial message order sent out after handshake ([#156](https://github.com/Nehliin/vortex/pull/156))
+- Incorrect handling of `Have` messages for non fast extension peers ([#155](https://github.com/Nehliin/vortex/pull/155))
+- Propagate io_uring setup failure instead of panicking ([#150](https://github.com/Nehliin/vortex/pull/150))
+- (security) Fix path handling in the filestore ([#164](https://github.com/Nehliin/vortex/pull/164))
+- Make the socket addr stable for real ([#154](https://github.com/Nehliin/vortex/pull/154))
+
+### Other
+
+- Add a Connection manager ([#153](https://github.com/Nehliin/vortex/pull/153))
+- Refactor io code to new `Io` struct ([#152](https://github.com/Nehliin/vortex/pull/152))
+
 ## [0.7.0](https://github.com/Nehliin/vortex/compare/vortex-bittorrent-v0.6.1...vortex-bittorrent-v0.7.0) - 2026-07-16
 
 ### Added
