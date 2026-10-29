@@ -454,7 +454,6 @@ impl<'scope, 'state: 'scope> EventLoop {
                         break Err(Error::Io(err));
                     }
                 }
-                cq.sync();
                 if cq.overflow() > 0 {
                     log::error!("CQ overflow");
                 }
@@ -508,9 +507,10 @@ impl<'scope, 'state: 'scope> EventLoop {
                         &mut state_ref,
                         &mut event_tx,
                     );
-                    io.sq.sync();
                 }
-
+                // Update right before reading the events to ensure we
+                // get as many as possible
+                cq.sync();
                 for cqe in &mut cq {
                     let io_event = RawIoEvent::from(cqe);
                     if let Some(event) = io.events.get_mut(io_event.event_data_idx) {
@@ -554,6 +554,8 @@ impl<'scope, 'state: 'scope> EventLoop {
                         io.read_ring.return_bid(bid);
                     }
                 }
+                // Update the kernel about how many we've consumed
+                cq.sync();
 
                 if let Some(torrent_state) = state_ref.state() {
                     torrent_state.handle_completed_pieces(

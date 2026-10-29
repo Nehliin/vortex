@@ -230,8 +230,6 @@ impl<Q: SubmissionQueue> Io<Q> {
         if self.sq.remaining() >= 2 {
             self.sq.push(read_op);
             self.sq.push(timeout_op);
-            // Need to sync so timeout isn't dropped prematurely?
-            self.sq.sync();
         } else {
             self.sq.push_backlog(read_op);
             self.sq.push_backlog(timeout_op);
