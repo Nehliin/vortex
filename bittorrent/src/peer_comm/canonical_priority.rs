@@ -59,7 +59,7 @@ impl PeerPriority {
                     let b = u128::from(ip2);
 
                     let c_bytes = ((a ^ b).leading_zeros() as usize) / 8;
-                    let ff_bytes = (c_bytes + 1).max(6).min(16);
+                    let ff_bytes = (c_bytes + 1).clamp(6, 16);
 
                     const FIVES: u128 = 0x5555_5555_5555_5555_5555_5555_5555_5555;
                     let ff_part = u128::MAX << ((16 - ff_bytes) * 8);
