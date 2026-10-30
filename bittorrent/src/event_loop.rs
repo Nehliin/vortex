@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::TcpListener,
+    net::{SocketAddr, TcpListener},
     os::fd::{AsRawFd, FromRawFd, IntoRawFd},
     rc::Rc,
     sync::mpsc::Receiver,
@@ -374,11 +374,12 @@ impl<'scope, 'state: 'scope> EventLoop {
         mut command_rc: Receiver<Command>,
         listener: TcpListener,
     ) -> Result<(), Error> {
+        let client_addr = listener.local_addr()?;
         let port = listener.local_addr().unwrap().port();
         state.listener_port = Some(port);
 
         let mut connection_manager =
-            ConnectionManager::new(state.our_id(), state.config.max_connections);
+            ConnectionManager::new(state.our_id(), client_addr, state.config.max_connections);
         let mut state_ref = state.as_ref();
         let mut prev_state_initialized = state_ref.is_initialzied();
         // lambda to be able to catch errors an always unregistering the read ring
@@ -658,11 +659,11 @@ impl<'scope, 'state: 'scope> EventLoop {
                     if !matches!(self.state, EventLoopState::Running { .. }) {
                         continue;
                     }
-                    for addr in addrs.into_iter().map(|addr| addr.into()) {
-                        // De-duplication and the max-connection cap are enforced
-                        // by the connection manager across incoming and outgoing.
-                        connection_manager.maybe_connect_to_peer(addr, io);
-                    }
+                    // Convert the list of V4 addresses into generic SocketAddrs
+                    // and delegate sorting/connecting to the ConnectionManager
+                    let peers: Vec<SocketAddr> =
+                        addrs.into_iter().map(|addr| addr.into()).collect();
+                    connection_manager.connect_to_peer(peers, io);
                 }
                 Command::Pause => {
                     if let EventLoopState::Running {
