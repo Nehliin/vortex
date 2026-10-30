@@ -403,10 +403,8 @@ impl Piece {
             if data.len() as i32 != self.last_subpiece_length {
                 return false;
             }
-        } else {
-            if data.len() as i32 != SUBPIECE_SIZE {
-                return false;
-            }
+        } else if data.len() as i32 != SUBPIECE_SIZE {
+            return false;
         }
         let begin = begin as usize;
         if !self.downloaders.contains(&conn_id) {

@@ -28,6 +28,7 @@ rayon = "1"
 metrics = { version = "0.24", optional = true }
 bt_bencode = "0.8.2"
 serde = { version = "1", features = ["derive"]}
+crc32c = "0.6.8"
 
 [features]
 fuzzing = ["dep:arbitrary"]
