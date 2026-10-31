@@ -3332,7 +3332,11 @@ fn extension_handshake_generates_correct_message() {
     download_state.listener_port = Some(1234);
 
     let mut state_ref = download_state.as_ref();
-    let handshake = extension_handshake_msg(&mut state_ref, &torrent::Config::default());
+    let handshake = extension_handshake_msg(
+        &mut state_ref,
+        &torrent::Config::default(),
+        IpAddr::from([203, 0, 113, 200]),
+    );
 
     if let PeerMessage::Extended { id, data } = handshake {
         assert_eq!(id, 0); // Handshake uses ID 0
@@ -3346,6 +3350,15 @@ fn extension_handshake_generates_correct_message() {
         // Parse the bencoded data to verify structure
         let parsed: bt_bencode::Value = bt_bencode::from_slice(&data).unwrap();
         let dict = parsed.as_dict().unwrap();
+
+        assert_eq!(
+            dict.get("yourip".as_bytes())
+                .unwrap()
+                .as_byte_str()
+                .unwrap()
+                .as_ref(),
+            &[203, 0, 113, 200]
+        );
 
         // Should contain 'm' field with ut_metadata
         assert!(dict.contains_key("m".as_bytes()));
@@ -3368,6 +3381,34 @@ fn extension_handshake_generates_correct_message() {
     } else {
         panic!("Expected Extended message");
     }
+}
+
+#[test]
+fn extension_handshake_encodes_ipv6_yourip_without_metadata() {
+    use crate::peer_comm::extended_protocol::extension_handshake_msg;
+
+    let (mut download_state, _) = setup_uninitialized_test();
+    let mut state_ref = download_state.as_ref();
+    let peer_ip = "2001:db8:1234:5678:90ab:cdef:80ff:1".parse().unwrap();
+    let handshake = extension_handshake_msg(&mut state_ref, &torrent::Config::default(), peer_ip);
+
+    let PeerMessage::Extended { id: 0, data } = handshake else {
+        panic!("Expected extension handshake");
+    };
+    let parsed: bt_bencode::Value = bt_bencode::from_slice(&data).unwrap();
+    let dict = parsed.as_dict().unwrap();
+    assert_eq!(
+        dict.get("yourip".as_bytes())
+            .unwrap()
+            .as_byte_str()
+            .unwrap()
+            .as_ref(),
+        &[
+            0x20, 0x01, 0x0d, 0xb8, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x80, 0xff,
+            0x00, 0x01
+        ]
+    );
+    assert!(!dict.contains_key("metadata_size".as_bytes()));
 }
 
 #[test]
