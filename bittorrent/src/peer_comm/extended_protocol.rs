@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, net::IpAddr};
 
 use bitvec::{boxed::BitBox, vec::BitVec};
 use bt_bencode::{ByteString, Deserializer, Value};
@@ -57,7 +57,11 @@ pub const EXTENSIONS: [(&str, u8); 2] = [(UT_METADATA, 1), (UPLOAD_ONLY, 2)];
 
 /// The handshake message this peer should send to anyone supporting the
 /// extension
-pub fn extension_handshake_msg(state_ref: &mut StateRef, config: &Config) -> PeerMessage {
+pub fn extension_handshake_msg(
+    state_ref: &mut StateRef,
+    config: &Config,
+    peer_ip: IpAddr,
+) -> PeerMessage {
     let mut handshake = BTreeMap::new();
     let extensions: BTreeMap<_, _> = BTreeMap::from(EXTENSIONS);
     handshake.insert("m", bt_bencode::value::to_value(&extensions).unwrap());
@@ -85,6 +89,11 @@ pub fn extension_handshake_msg(state_ref: &mut StateRef, config: &Config) -> Pee
         "reqq",
         bt_bencode::value::to_value(&config.max_reported_outstanding_requests).unwrap(),
     );
+    let serialized_ip = match peer_ip {
+        IpAddr::V4(ipv4_addr) => ByteString::from(ipv4_addr.octets().as_slice()),
+        IpAddr::V6(ipv6_addr) => ByteString::from(ipv6_addr.octets().as_slice()),
+    };
+    handshake.insert("yourip", Value::ByteStr(serialized_ip));
 
     PeerMessage::Extended {
         id: 0,
