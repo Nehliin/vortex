@@ -374,7 +374,11 @@ impl ConnectionManager {
         if connection.extended_extension {
             connection
                 .outgoing_msgs_buffer
-                .push(extension_handshake_msg(state, state.config));
+                .push(extension_handshake_msg(
+                    state,
+                    state.config,
+                    socket_addr.ip(),
+                ));
         }
 
         // The bitfield is only ever sent as the first message (BEP 3) and for
