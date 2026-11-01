@@ -6,6 +6,7 @@ mod file_store;
 mod io;
 mod peer_comm;
 mod piece_selector;
+mod determine_ip;
 mod torrent;
 
 use peer_comm::*;
