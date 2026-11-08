@@ -1,6 +1,7 @@
 mod buf_pool;
 mod buf_ring;
 mod connection_manager;
+mod determine_ip;
 mod event_loop;
 mod file_store;
 mod io;

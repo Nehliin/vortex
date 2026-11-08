@@ -454,6 +454,7 @@ impl ConnectionManager {
                 Some(addr)
             }
             ConnectionState::Established(mut peer) => {
+                state_ref.determined_ip.remove_vote(peer.conn_id);
                 peer.on_disconnect(state_ref);
                 let addr = peer.peer_addr;
                 *entry = ConnectionState::Closing { addr };

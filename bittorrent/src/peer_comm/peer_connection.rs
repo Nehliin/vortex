@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::{Duration, Instant},
 };
 
@@ -1281,7 +1281,25 @@ impl<'scope, 'f_store: 'scope> PeerConnection {
                                 }
                             }
                         }
-
+                        if let Some(our_ip) = dict
+                            .get("yourip".as_bytes())
+                            .and_then(|val| val.as_byte_str())
+                        {
+                            let maybe_ip = match our_ip.as_slice().len() {
+                                4 if self.peer_addr.is_ipv4() => Some(
+                                    Ipv4Addr::from_octets(our_ip.as_slice().try_into().unwrap())
+                                        .into(),
+                                ),
+                                16 if self.peer_addr.is_ipv6() => Some(
+                                    Ipv6Addr::from_octets(our_ip.as_slice().try_into().unwrap())
+                                        .into(),
+                                ),
+                                _ => None,
+                            };
+                            if let Some(ip) = maybe_ip {
+                                state_ref.determined_ip.add_vote(self.conn_id, ip);
+                            }
+                        }
                         if let Some(max_queue_size) =
                             dict.get("reqq".as_bytes()).and_then(|val| val.as_u64())
                         {

@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::file_store::FileStore;
 use crate::{
     buf_pool::{Buffer, BufferPool},
     connection_manager::{ConnectionId, ConnectionManager},
@@ -16,6 +15,7 @@ use crate::{
     file_store::DiskOpType,
     peer_comm::{extended_protocol::MetadataProgress, peer_protocol::PeerId},
 };
+use crate::{determine_ip::DeterminedIp, file_store::FileStore};
 use crate::{
     file_store::DiskOp,
     piece_selector::{DownloadedPiece, Piece, PieceSelector, SUBPIECE_SIZE, Subpiece},
@@ -665,6 +665,7 @@ impl Drop for InitializedState {
 pub struct State {
     pub(crate) info_hash: [u8; 20],
     pub(crate) listener_port: Option<u16>,
+    determined_ip: DeterminedIp,
     // TODO: Consider checking this is accessible at construction
     root: PathBuf,
     our_id: PeerId,
@@ -699,6 +700,7 @@ impl State {
             torrent_state: None,
             file: OnceCell::new(),
             config,
+            determined_ip: Default::default(),
         }
     }
 
@@ -781,6 +783,7 @@ impl State {
             listener_port: None,
             torrent_state: Some(initialized_state),
             file: OnceCell::from(Box::new(metadata)),
+            determined_ip: Default::default(),
             config,
         })
     }
@@ -801,6 +804,7 @@ impl State {
             listener_port: None,
             torrent_state: Some(state),
             file: OnceCell::from(Box::new(metadata)),
+            determined_ip: Default::default(),
             config,
         }
     }
@@ -813,6 +817,7 @@ impl State {
             torrent: &mut self.torrent_state,
             full: &self.file,
             config: &self.config,
+            determined_ip: &mut self.determined_ip,
         }
     }
 }
@@ -821,6 +826,7 @@ pub struct StateRef<'state> {
     info_hash: [u8; 20],
     root: &'state Path,
     pub listener_port: &'state Option<u16>,
+    pub determined_ip: &'state mut DeterminedIp,
     torrent: &'state mut Option<InitializedState>,
     full: &'state OnceCell<Box<TorrentMetadata>>,
     pub config: &'state Config,

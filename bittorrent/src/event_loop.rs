@@ -1051,6 +1051,8 @@ pub(crate) fn tick<'scope, 'state: 'scope>(
             torrent_state.recalculate_optimistic_unchokes(connections);
         }
     }
+    // reevaluate our external ip
+    torrent_state.determined_ip.maybe_reevaluate();
 
     for (_, connection) in connections
         .iter_established_mut()
