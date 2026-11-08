@@ -118,13 +118,13 @@ mod tests {
     }
 
     #[test]
-    fn fifteen_reports_select_majority_without_waiting_for_timer() {
+    fn fifty_reports_select_majority_without_waiting_for_timer() {
         let mut peers = SlotMap::<ConnectionId, ()>::with_key();
         let mut determined = DeterminedIp::default();
         let initial = "203.0.113.200".parse().unwrap();
         let majority = "203.0.113.10".parse().unwrap();
         determined.add_vote(peers.insert(()), initial);
-        for _ in 0..13 {
+        for _ in 0..48 {
             determined.add_vote(peers.insert(()), majority);
         }
         assert_eq!(determined.determined_ip(), Some(initial));
@@ -144,7 +144,7 @@ mod tests {
         for _ in 0..50 {
             determined.add_vote(repeated_peer, minority);
         }
-        for _ in 0..14 {
+        for _ in 0..49 {
             determined.add_vote(peers.insert(()), majority);
         }
 
