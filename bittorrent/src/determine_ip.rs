@@ -76,7 +76,7 @@ impl DeterminedIp {
     }
 
     pub fn determined_ip(&self) -> Option<IpAddr> {
-        self.ip.clone()
+        self.ip
     }
 }
 
