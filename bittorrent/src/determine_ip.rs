@@ -26,7 +26,7 @@ impl DeterminedIp {
             return;
         }
         self.votes.insert(conn_id, addr);
-        if self.votes.len() == 15 && !self.stable {
+        if self.votes.len() == 50 && !self.stable {
             self.stable = true;
             self.reevaluate();
             return;
@@ -36,7 +36,13 @@ impl DeterminedIp {
         }
     }
 
+    #[inline]
+    pub fn remove_vote(&mut self, conn_id: ConnectionId) {
+        self.votes.remove(conn_id);
+    }
+
     fn update(&mut self, addr: IpAddr) {
+        log::debug!("Updating external ip: {addr}");
         self.ip = Some(addr);
         self.last_changed = Some(Instant::now());
     }
@@ -63,7 +69,8 @@ impl DeterminedIp {
             .into_iter()
             .max_by(|(_, count_a), (_, count_b)| count_a.cmp(count_b))
         {
-            log::debug!("Updating external ip: {ip} (votes: {votes})");
+            log::debug!("top voted ip: {ip} (votes: {votes})");
+            self.stable = true;
             self.update(ip);
         }
     }
@@ -77,7 +84,6 @@ impl DeterminedIp {
 mod tests {
     use super::*;
     use slotmap::SlotMap;
-
 
     #[test]
     fn first_valid_report_is_used_provisionally() {
