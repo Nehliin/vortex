@@ -374,12 +374,11 @@ impl<'scope, 'state: 'scope> EventLoop {
         mut command_rc: Receiver<Command>,
         listener: TcpListener,
     ) -> Result<(), Error> {
-        let client_addr = listener.local_addr()?;
         let port = listener.local_addr().unwrap().port();
         state.listener_port = Some(port);
 
         let mut connection_manager =
-            ConnectionManager::new(state.our_id(), client_addr, state.config.max_connections);
+            ConnectionManager::new(state.our_id(), state.config.max_connections);
         let mut state_ref = state.as_ref();
         let mut prev_state_initialized = state_ref.is_initialzied();
         // lambda to be able to catch errors an always unregistering the read ring
@@ -663,7 +662,14 @@ impl<'scope, 'state: 'scope> EventLoop {
                     // and delegate sorting/connecting to the ConnectionManager
                     let peers: Vec<SocketAddr> =
                         addrs.into_iter().map(|addr| addr.into()).collect();
-                    connection_manager.connect_to_peer(peers, io);
+
+                    let our_ip = state_ref.determined_ip.determined_ip();
+                    let our_port = *state_ref.listener_port;
+
+                    let our_addr = our_ip
+                        .zip(our_port)
+                        .map(|(ip, port)| SocketAddr::new(ip, port));
+                    connection_manager.connect_to_peers(our_addr, peers, io);
                 }
                 Command::Pause => {
                     if let EventLoopState::Running {

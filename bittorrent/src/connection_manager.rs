@@ -73,17 +73,15 @@ pub struct ConnectionManager {
     ban_list: HashSet<IpAddr>,
     max_connections: usize,
     our_id: PeerId,
-    our_addr: SocketAddr,
 }
 
 impl ConnectionManager {
-    pub fn new(our_id: PeerId, our_addr: SocketAddr, max_connections: usize) -> Self {
+    pub fn new(our_id: PeerId, max_connections: usize) -> Self {
         Self {
             connections: SlotMap::with_capacity_and_key(max_connections),
             max_connections,
             ban_list: Default::default(),
             our_id,
-            our_addr,
         }
     }
 
@@ -91,21 +89,27 @@ impl ConnectionManager {
     /// and attempts to connect to them.
     ///
     /// It stops attempting new connections once `max_connections` is reached.
-    pub fn connect_to_peer<Q: SubmissionQueue>(
+    pub fn connect_to_peers<Q: SubmissionQueue>(
         &mut self,
+        our_addr: Option<SocketAddr>,
         mut peers: Vec<SocketAddr>,
         io: &mut Io<Q>,
     ) {
         peers.retain(|addres| !self.ban_list.contains(&addres.ip()));
 
-        let mut ranked: Vec<(PeerPriority, SocketAddr)> = peers
-            .into_iter()
-            .map(|addr| ((&self.our_addr, &addr).into(), addr))
-            .collect();
+        if let Some(our_addr) = our_addr {
+            let mut ranked: Vec<(PeerPriority, SocketAddr)> = peers
+                .into_iter()
+                .map(|addr| ((&our_addr, &addr).into(), addr))
+                .collect();
 
-        ranked.sort();
+            ranked.sort();
+            ranked.dedup();
 
-        for (_, addr) in ranked.into_iter().take(self.max_connections) {
+            peers = ranked.into_iter().map(|(_, addr)| addr).collect();
+        }
+
+        for addr in peers.into_iter().take(self.max_connections) {
             self.maybe_connect_to_peer(addr.into(), io);
         }
     }

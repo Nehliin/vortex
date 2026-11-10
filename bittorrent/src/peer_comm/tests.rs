@@ -227,8 +227,7 @@ fn fast_ext_have_all() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         assert!(!connections[key_a].is_interesting);
         connections[key_a].handle_message(
@@ -299,8 +298,7 @@ fn fast_ext_have_none() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].is_interesting = true;
         connections[key_a].handle_message(
@@ -347,8 +345,7 @@ fn have() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::Have { index: 7 },
@@ -489,8 +486,7 @@ fn have_invalid_indicies() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::Have { index: -1 },
@@ -525,8 +521,7 @@ fn have_without_interest() {
         // Needed to avoid hitting asserts
         torrent_state.piece_selector.mark_downloaded(7);
         torrent_state.piece_selector.mark_complete(7);
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::Have { index: 7 },
@@ -564,8 +559,7 @@ fn slow_start() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         tick(
             &Duration::from_secs(1),
@@ -757,8 +751,7 @@ fn desired_queue_size() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key].handle_message(
@@ -832,8 +825,7 @@ fn peer_choke_recv_supports_fast() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // First, the peer needs to have pieces to be interesting
@@ -957,8 +949,7 @@ fn peer_choke_recv_does_not_support_fast() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(false, k));
 
         // First, the peer needs to have pieces to be interesting
@@ -1081,8 +1072,7 @@ fn unchoke_recv() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(false, k));
 
         assert!(connections[key].peer_choking);
@@ -1132,8 +1122,7 @@ fn bitfield_recv() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         {
             let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -1261,8 +1250,7 @@ fn interest_is_updated_when_recv_piece() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         assert!(!connections[key].is_interesting);
@@ -1380,8 +1368,7 @@ fn send_have_to_peers_when_piece_completes() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         let _key_c = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -1502,8 +1489,7 @@ fn assume_intrest_when_request_recv() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::HaveAll,
@@ -1536,8 +1522,7 @@ fn piece_recv() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key].handle_message(
@@ -1632,8 +1617,7 @@ fn handles_duplicate_piece_recv_non_fast_ext() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(false, k));
         let num_pieces = state_ref.state().unwrap().num_pieces();
         let field = bitvec::bitvec!(u8, bitvec::order::Msb0; 1; num_pieces);
@@ -1735,8 +1719,7 @@ fn invalid_piece() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -1832,8 +1815,7 @@ fn unrequested_piece_disconnects_fast_ext_peer() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         // The peer actually downloading the piece
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         // The peer sending us data we never asked for
@@ -1887,8 +1869,7 @@ fn duplicate_piece_recv_disconnects_fast_ext_peer() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -1960,8 +1941,7 @@ fn truncated_subpiece_response_disconnects() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         // One connection per truncated response since they are disconnected
         for data_len in [SUBPIECE_SIZE as usize - 1, 0] {
             let key = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -2014,8 +1994,7 @@ fn duplicate_piece_recv_from_separate_peers_is_accepted() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         for key in [key_a, key_b] {
@@ -2113,8 +2092,7 @@ fn snubbed_peer() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -2228,8 +2206,7 @@ fn choked_peer_with_empty_inflight_is_not_snubbed() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(false, k));
 
         let num_pieces = state_ref.state().unwrap().num_pieces();
@@ -2312,8 +2289,7 @@ fn fast_ext_peer_rejecting_while_choked_is_not_snubbed() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -2405,8 +2381,7 @@ fn stalled_connection_is_snubbed() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -2466,8 +2441,7 @@ fn reject_request_requests_new() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].handle_message(
             PeerMessage::HaveAll,
@@ -2530,8 +2504,7 @@ fn invalid_reject_request() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_b = connections.insert_established_with_key(|k| generate_peer(false, k));
         connections[key_b].handle_message(
             PeerMessage::RejectRequest {
@@ -2663,8 +2636,7 @@ fn endgame_mode() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key_a].handle_message(
@@ -2787,8 +2759,7 @@ fn extension_protocol_handshake() {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
         // Create peer with extension protocol support
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
         assert!(connections[key_a].extensions.is_empty());
@@ -2828,8 +2799,7 @@ fn extension_handshake_with_reqq() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -2865,8 +2835,7 @@ fn extension_handshake_malformed() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -2892,8 +2861,7 @@ fn extension_handshake_missing_m_field() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -2924,8 +2892,7 @@ fn metadata_extension_request_message() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -2993,8 +2960,7 @@ fn metadata_extension_request_response_capped_to_piece_size() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -3064,8 +3030,7 @@ fn metadata_extension_request_last_piece_smaller_than_subpiece() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -3140,8 +3105,7 @@ fn metadata_extension_data_message() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -3189,8 +3153,7 @@ fn metadata_extension_reject_message() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -3234,8 +3197,7 @@ fn metadata_extension_invalid_message_type() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -3281,8 +3243,7 @@ fn extension_message_unknown_id() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -3310,8 +3271,7 @@ fn metadata_extension_piece_bounds_validation() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -3462,8 +3422,7 @@ fn metadata_download_single_piece() {
         assert!(!state_ref.is_initialzied());
         assert!(state_ref.state().is_none());
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -3553,8 +3512,7 @@ fn metadata_download_multiple_pieces() {
         // Verify state is not initialized
         assert!(!state_ref.is_initialzied());
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key_a].extended_extension = true;
 
@@ -3681,8 +3639,7 @@ fn updates_upload_throughput() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Unchoke the peer so upload stats are tracked properly
@@ -3735,8 +3692,7 @@ fn request_message_queues_disk_reads() {
         let mut state_ref = download_state.as_ref();
         state_ref.state().unwrap().piece_buffer_pool.stop_tracking();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Setup: peer have no pieces and is interested in our data
@@ -3845,8 +3801,7 @@ fn unchoke_selection_based_on_download_throughput() {
         // Set max_unchoked to 10 so we have room for regular and optimistic unchokes
         torrent_state.config.max_unchoked = 10;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 12 interested peers with varying download throughputs
         // All peers start choked
@@ -3913,8 +3868,7 @@ fn unchoke_chokes_non_interested_peers() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 3 peers - 2 start unchoked, 1 starts choked
         let interested_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -3972,8 +3926,7 @@ fn unchoke_chokes_pending_disconnect_peers() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         let pending_disconnect_peer =
             connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -4021,8 +3974,7 @@ fn unchoke_promotes_optimistic_unchoke_to_regular() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create a peer that was optimistically unchoked and has good throughput
         let opt_unchoked_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -4074,8 +4026,7 @@ fn optimistic_unchoke_selection() {
 
         torrent_state.config.max_unchoked = 10;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create choked interested peers with different last_optimistically_unchoked times
         let old_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -4143,8 +4094,7 @@ fn optimistic_unchoke_rotates_out_previous() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create a peer that's currently optimistically unchoked
         let current_opt = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -4203,8 +4153,7 @@ fn optimistic_unchoke_ignores_non_interested_peers() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create a not-interested peer
         let not_interested = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -4245,8 +4194,7 @@ fn optimistic_unchoke_ignores_pending_disconnect_peers() {
 
         torrent_state.config.max_unchoked = 5;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create a peer pending disconnect
         let pending = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -4286,8 +4234,7 @@ fn unchoke_reserves_slots_for_optimistic() {
 
         torrent_state.config.max_unchoked = 10;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 15 interested peers with varying throughput - all start choked
         for i in 0..15 {
@@ -4328,8 +4275,7 @@ fn optimistically_unchoked_disconnect_resets_timer() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         {
             let torrent_state = state_ref.state().unwrap();
@@ -4389,8 +4335,7 @@ fn established_connection_slot_is_kept_until_close_completes() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
@@ -4434,8 +4379,7 @@ fn only_peers_marked_for_disconnect_are_disconnected() {
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
         let (mut event_tx, _event_rx) = event_q.split();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let marked = connections.insert_established_with_key(|k| generate_peer(true, k));
         let kept = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[marked].pending_disconnect = Some(DisconnectReason::Idle);
@@ -4503,8 +4447,7 @@ fn disconnects_that_blame_the_peer_emit_bad_peer_event() {
         rayon::in_place_scope(|_scope| {
             let mut state_ref = download_state.as_ref();
             let (mut event_tx, mut event_rx) = event_q.split();
-            let mut connections =
-                ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+            let mut connections = ConnectionManager::new(PeerId::generate(), 128);
             let described = reason.to_string();
             let conn_id = mark_for_disconnect(&mut connections, addr, reason);
             let mut io = Io::new(
@@ -4537,8 +4480,7 @@ fn disconnects_that_dont_blame_the_peer_emit_no_event() {
         rayon::in_place_scope(|_scope| {
             let mut state_ref = download_state.as_ref();
             let (mut event_tx, mut event_rx) = event_q.split();
-            let mut connections =
-                ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+            let mut connections = ConnectionManager::new(PeerId::generate(), 128);
             let described = reason.to_string();
             let conn_id = mark_for_disconnect(&mut connections, "127.0.0.1:6881", reason);
             let mut io = Io::new(
@@ -4569,8 +4511,7 @@ fn only_blameworthy_peers_of_a_mixed_batch_are_reported() {
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
         let (mut event_tx, mut event_rx) = event_q.split();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let lied = mark_for_disconnect(
             &mut connections,
             "127.0.0.1:1111",
@@ -4623,8 +4564,7 @@ fn bad_peer_is_disconnected_even_when_the_event_queue_is_full() {
         event_tx.enqueue(TorrentEvent::Paused).unwrap();
         assert!(!event_tx.ready(), "the queue should be full");
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let conn_id = mark_for_disconnect(
             &mut connections,
             "127.0.0.1:6881",
@@ -4663,8 +4603,7 @@ fn disconnects_are_counted_per_reason() {
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
         let (mut event_tx, _event_rx) = event_q.split();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         for reason in [
             DisconnectReason::InvalidMessage,
             DisconnectReason::InvalidMessage,
@@ -4711,8 +4650,7 @@ fn pending_connection_slot_is_kept_until_close_completes() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
@@ -4758,8 +4696,7 @@ fn completions_for_a_disconnected_pending_connection_are_ignored() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let info_hash = *state_ref.info_hash();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
@@ -4799,8 +4736,7 @@ fn rejected_incoming_connection_is_closed_without_being_tracked() {
         &torrent::Config::default(),
     );
     // A cap of zero rejects every incoming connection
-    let mut connections =
-        ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 0);
+    let mut connections = ConnectionManager::new(PeerId::generate(), 0);
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -4823,8 +4759,7 @@ fn banned_peer_is_disconnected_and_kept_out() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
@@ -4866,8 +4801,7 @@ fn incoming_connection_from_a_banned_peer_is_rejected() {
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
         let info_hash = *state_ref.info_hash();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
@@ -4903,8 +4837,7 @@ fn banning_a_peer_leaves_other_connections_alone() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
@@ -4965,8 +4898,7 @@ fn banning_a_peer_records_a_banned_disconnect() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
@@ -5008,8 +4940,7 @@ fn unbanned_peer_can_be_connected_to_again() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
@@ -5055,8 +4986,7 @@ fn incoming_connection_from_an_unbanned_peer_is_accepted() {
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
         let info_hash = *state_ref.info_hash();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
@@ -5136,8 +5066,7 @@ fn unbanning_a_peer_leaves_other_bans_in_place() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
@@ -5202,8 +5131,7 @@ fn msgs_queued_after_handshake_with_pipelined(
         BackloggedSubmissionQueue::new(MockSubmissionQueue),
         &torrent::Config::default(),
     );
-    let mut connections =
-        ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+    let mut connections = ConnectionManager::new(PeerId::generate(), 128);
     let info_hash = download_state.info_hash();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5370,8 +5298,7 @@ fn upload_only_field_in_extended_handshake() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         let metadata_size = state_ref
             .metadata()
@@ -5442,8 +5369,7 @@ fn upload_only_extension_message_received() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Peer hasn't declared upload_only yet
@@ -5505,8 +5431,7 @@ fn upload_only_extension_message_sent_on_torrent_complete() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         let other_peer = connections.insert_established_with_key(|k| generate_peer(true, k));
         // Doesn't support the extension
@@ -5653,8 +5578,7 @@ fn redundant_connection_disconnect_both_upload_only() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // HaveAll automatically marks peer as upload_only
@@ -5736,8 +5660,7 @@ fn no_disconnect_when_peer_not_upload_only() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key].handle_message(
@@ -5812,8 +5735,7 @@ fn disconnect_upload_only_peer_when_no_longer_interesting() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
 
@@ -5978,8 +5900,7 @@ fn seeding_round_robin_rotation_after_quota() {
 
         torrent_state.config.max_unchoked = 3;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 3 interested peers
         let peer_a = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -6043,8 +5964,7 @@ fn incoming_keepalive_updates_last_seen() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Fake that this peer hasn't been seen in a while
@@ -6073,8 +5993,7 @@ fn keepalive_not_sent_before_100s_elapsed() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Freshly created connection - last_keepalive_sent is now
@@ -6118,8 +6037,7 @@ fn keepalive_sent_after_100s_elapsed() {
 
     rayon::in_place_scope(|_scope| {
         let mut state_ref = download_state.as_ref();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Simulate 101 seconds since last keepalive
@@ -6170,8 +6088,7 @@ fn seeding_quota_not_met_keeps_unchoked() {
 
         torrent_state.config.max_unchoked = 3;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 3 interested peers
         let peer_a = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -6224,8 +6141,7 @@ fn seeding_time_threshold_not_met_keeps_unchoked() {
 
         torrent_state.config.max_unchoked = 3;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Create 3 interested peers
         let peer_a = connections.insert_established_with_key(|k| generate_peer(true, k));
@@ -6272,8 +6188,7 @@ fn extension_handshake_with_upload_only_and_ut_metadata() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].extended_extension = true;
 
@@ -6347,8 +6262,7 @@ fn seeding_quota_complete_peers_deprioritized() {
         // Set max_unchoked to 2 so we have limited slots
         torrent_state.config.max_unchoked = 3;
 
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
 
         // Calculate quota
         let piece_length = torrent_state.piece_selector.avg_piece_length();
@@ -6420,8 +6334,7 @@ fn request_rejected_when_begin_plus_length_exceeds_piece_len() {
         let mut state_ref = download_state.as_ref();
         state_ref.state().unwrap().piece_buffer_pool.stop_tracking();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         // Setup: peer has no pieces and is interested
@@ -6524,8 +6437,7 @@ fn request_validation_rejects_out_of_range_values() {
         let mut state_ref = download_state.as_ref();
         state_ref.state().unwrap().piece_buffer_pool.stop_tracking();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
 
         connections[key].handle_message(
@@ -6674,8 +6586,7 @@ fn hash_failure_from_single_downloader_disconnects_immediately() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key = connections.insert_established_with_key(|k| generate_peer(true, k));
         connections[key].handle_message(
             PeerMessage::HaveAll,
@@ -6733,8 +6644,7 @@ fn hash_failure_with_multiple_downloaders_penalizes_without_disconnecting() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         for key in [key_a, key_b] {
@@ -6809,8 +6719,7 @@ fn repeated_shared_hash_failures_disconnect_on_the_fourth() {
     rayon::in_place_scope(|scope| {
         let mut state_ref = download_state.as_ref();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         for key in [key_a, key_b] {
@@ -6888,8 +6797,7 @@ fn hash_pass_only_credits_peers_that_contributed_bytes() {
         let mut event_q: Queue<TorrentEvent, 512> = Queue::new();
         let (mut event_tx, _event_rc) = event_q.split();
         let mut pending_disk_operations: Vec<DiskOp> = Vec::new();
-        let mut connections =
-            ConnectionManager::new(PeerId::generate(), "127.0.0.1:8080".parse().unwrap(), 128);
+        let mut connections = ConnectionManager::new(PeerId::generate(), 128);
         let key_a = connections.insert_established_with_key(|k| generate_peer(true, k));
         let key_b = connections.insert_established_with_key(|k| generate_peer(true, k));
         let key_c = connections.insert_established_with_key(|k| generate_peer(true, k));

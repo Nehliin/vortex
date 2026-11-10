@@ -125,6 +125,26 @@ mod tests {
         crc32c::crc32c(&bytes)
     }
 
+    // official BEP 40 Example 1
+    #[test]
+    fn test_bep_40_doc_example_different_16_prefix() {
+        let client: SocketAddr = "123.213.32.10:6881".parse().unwrap();
+        let peer: SocketAddr = "98.76.54.32:6881".parse().unwrap();
+
+        // The BEP says the hash should be ec2d7224
+        assert_eq!(Some(0xec2d7224), PeerPriority::new(&client, &peer).0);
+    }
+
+    // Official BEP 40 Example 2
+    #[test]
+    fn test_bep_40_doc_example_matching_24_prefix() {
+        let client: SocketAddr = "123.213.32.10:6881".parse().unwrap();
+        let peer: SocketAddr = "123.213.32.234:6881".parse().unwrap();
+
+        // The BEP says the hash should be 99568189
+        assert_eq!(Some(0x99568189), PeerPriority::new(&client, &peer).0);
+    }
+
     #[test]
     fn test_peer_priority_same_ip_address() {
         let peer1: SocketAddr = ([230, 12, 123, 3], 1234).into();
