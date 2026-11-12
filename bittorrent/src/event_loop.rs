@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::TcpListener,
+    net::{SocketAddr, TcpListener},
     os::fd::{AsRawFd, FromRawFd, IntoRawFd},
     rc::Rc,
     sync::mpsc::Receiver,
@@ -658,11 +658,18 @@ impl<'scope, 'state: 'scope> EventLoop {
                     if !matches!(self.state, EventLoopState::Running { .. }) {
                         continue;
                     }
-                    for addr in addrs.into_iter().map(|addr| addr.into()) {
-                        // De-duplication and the max-connection cap are enforced
-                        // by the connection manager across incoming and outgoing.
-                        connection_manager.maybe_connect_to_peer(addr, io);
-                    }
+                    // Convert the list of V4 addresses into generic SocketAddrs
+                    // and delegate sorting/connecting to the ConnectionManager
+                    let peers: Vec<SocketAddr> =
+                        addrs.into_iter().map(|addr| addr.into()).collect();
+
+                    let our_ip = state_ref.determined_ip.determined_ip();
+                    let our_port = *state_ref.listener_port;
+
+                    let our_addr = our_ip
+                        .zip(our_port)
+                        .map(|(ip, port)| SocketAddr::new(ip, port));
+                    connection_manager.connect_to_peers(our_addr, peers, io);
                 }
                 Command::Pause => {
                     if let EventLoopState::Running {

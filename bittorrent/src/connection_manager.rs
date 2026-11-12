@@ -22,6 +22,7 @@ use crate::event_loop::HANDSHAKE_TIMEOUT;
 use crate::event_loop::conn_parse_and_handle_msgs;
 use crate::io::Io;
 use crate::io::SubmissionQueue;
+use crate::peer_comm::canonical_priority::PeerPriority;
 use crate::peer_comm::extended_protocol::extension_handshake_msg;
 use crate::peer_comm::peer_connection::{DisconnectReason, PeerConnection};
 use crate::peer_comm::peer_protocol::{self, HANDSHAKE_SIZE, parse_handshake, write_handshake};
@@ -81,6 +82,35 @@ impl ConnectionManager {
             max_connections,
             ban_list: Default::default(),
             our_id,
+        }
+    }
+
+    /// Filters out banned peers, sorts the remaining addresses by BEP 40 priority,
+    /// and attempts to connect to them.
+    ///
+    /// It stops attempting new connections once `max_connections` is reached.
+    pub fn connect_to_peers<Q: SubmissionQueue>(
+        &mut self,
+        our_addr: Option<SocketAddr>,
+        mut peers: Vec<SocketAddr>,
+        io: &mut Io<Q>,
+    ) {
+        peers.retain(|addres| !self.ban_list.contains(&addres.ip()));
+
+        if let Some(our_addr) = our_addr {
+            let mut ranked: Vec<(PeerPriority, SocketAddr)> = peers
+                .into_iter()
+                .map(|addr| ((&our_addr, &addr).into(), addr))
+                .collect();
+
+            ranked.sort();
+            ranked.dedup();
+
+            peers = ranked.into_iter().map(|(_, addr)| addr).collect();
+        }
+
+        for addr in peers.into_iter().take(self.max_connections) {
+            self.maybe_connect_to_peer(addr.into(), io);
         }
     }
 
