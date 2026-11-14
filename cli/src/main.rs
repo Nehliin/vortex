@@ -15,8 +15,8 @@ use std::{
 
 use clap::{Args, CommandFactory, Parser};
 use color_eyre::eyre::{ContextCompat, WrapErr, eyre};
-use crossbeam_channel::{Receiver, bounded, select, tick};
-use heapless::spsc::Queue;
+use crossbeam_channel::{Receiver, RecvTimeoutError, bounded, select, tick};
+use heapless::spsc::{Consumer, Queue};
 use mainline::{Dht, Id};
 use ratatui::{
     layout::{Constraint, Layout},
@@ -85,18 +85,21 @@ fn dht_thread(
         let all_peers = dht_client.get_peers(info_hash_id);
         for peers in all_peers {
             log::info!("Got {} peers", peers.len());
-            cmd_tx
-                .send(Command::ConnectToPeers(peers))
-                .expect("Command channel to not be full");
+            if cmd_tx.send(Command::ConnectToPeers(peers)).is_err() {
+                return false;
+            }
         }
+        true
     };
 
-    query();
+    if !query() {
+        return Ok(());
+    }
     loop {
         select! {
             recv(fetch_interval) -> _ => {
-                if !paused.load(Ordering::Relaxed) {
-                    query();
+                if !paused.load(Ordering::Relaxed) && !query() {
+                    break Ok(());
                 }
             }
             recv(announce_interval) -> _ => {
@@ -157,6 +160,27 @@ fn parse_magnet_link(magnet: &str) -> color_eyre::eyre::Result<MagentInfo> {
         info_hash: final_hash?,
         name: dn,
     })
+}
+
+fn wait_for_torrent_start(
+    events: &Consumer<TorrentEvent>,
+    result: &Receiver<color_eyre::Result<()>>,
+) -> color_eyre::Result<()> {
+    loop {
+        if matches!(events.peek(), Some(TorrentEvent::Running { .. })) {
+            return Ok(());
+        }
+        match result.recv_timeout(Duration::from_millis(10)) {
+            Ok(result) => {
+                result.wrap_err("Cannot start torrent")?;
+                return Err(eyre!("Torrent stopped before startup completed"));
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(eyre!("Torrent worker disconnected during startup"));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -438,15 +462,23 @@ fn main() -> color_eyre::Result<()> {
 
     let dht_cache_path = paths.dht_cache.clone();
     std::thread::scope(|s| {
+        let (torrent_result_tx, torrent_result_rc) = bounded(1);
+        let startup_result_rc = torrent_result_rc.clone();
         let cmd_tx_clone = cmd_tx.clone();
         let pause_dht_clone = Arc::clone(&pause_dht);
         // Use a closure to allow for spawning the torrent threads later in the cli lifecycle
-        let spawn_torrent_threads = move |state: State| -> color_eyre::Result<()> {
+        let spawn_torrent_threads = move |state: State,
+                                          events: &Consumer<TorrentEvent>|
+              -> color_eyre::Result<()> {
             let info_hash_id = Id::from_bytes(state.info_hash()).wrap_err("Invalid info_hash")?;
             let mut torrent = Torrent::new(state);
             s.spawn(move || {
-                torrent.start(event_tx, cmd_rc, listener).unwrap();
+                let result = torrent
+                    .start(event_tx, cmd_rc, listener)
+                    .map_err(color_eyre::Report::new);
+                let _ = torrent_result_tx.send(result);
             });
+            wait_for_torrent_start(events, &startup_result_rc)?;
             s.spawn(move || {
                 dht_thread(
                     info_hash_id,
@@ -465,6 +497,7 @@ fn main() -> color_eyre::Result<()> {
         let setup = AppSetup {
             cmd_tx,
             event_rc,
+            torrent_result_rc,
             shutdown_signal_tx,
             metadata: initial_metadata,
             root,
@@ -597,6 +630,47 @@ impl<F> Widget for &mut VortexApp<'_, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn torrent_startup_result_reaches_the_cli() {
+        for (max_connections, should_start) in [(16, true), (usize::MAX, false)] {
+            let mut events: Queue<TorrentEvent, 512> = Queue::new();
+            let (event_tx, event_rc) = events.split();
+            let (command_tx, command_rc) = std::sync::mpsc::sync_channel(1);
+            let (result_tx, result_rc) = bounded(1);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut torrent = Torrent::new(State::unstarted(
+                PeerId::generate(),
+                [0; 20],
+                std::env::temp_dir(),
+                vortex_bittorrent::Config {
+                    max_connections,
+                    ..Default::default()
+                },
+            ));
+
+            let (result, running) = std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    let result = torrent
+                        .start(event_tx, command_rc, listener)
+                        .map_err(color_eyre::Report::new);
+                    result_tx.send(result).unwrap();
+                });
+                let result = wait_for_torrent_start(&event_rc, &result_rc);
+                let running = matches!(event_rc.peek(), Some(TorrentEvent::Running { .. }));
+                let _ = command_tx.send(Command::Stop);
+                (result, running)
+            });
+
+            if should_start {
+                result.expect("a running torrent should let the CLI continue");
+                assert!(running, "startup must finish before the CLI continues");
+            } else {
+                let error = result.expect_err("the CLI must receive the worker's startup error");
+                assert!(format!("{error:#}").contains("RLIMIT_NOFILE"));
+            }
+        }
+    }
 
     #[test]
     fn test_parse_valid_hex_magnet() {
