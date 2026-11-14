@@ -67,6 +67,9 @@ impl Drop for AnonymousMmap {
 pub type Bgid = u16;
 pub type Bid = u16;
 
+// Largest power-of-two capacity accepted by buffer-ring registration.
+pub(crate) const MAX_BUFFER_RING_ENTRIES: usize = 32_768;
+
 pub struct BufferRing {
     bgid: Bgid,
     ring_memory: AnonymousMmap,
@@ -80,14 +83,41 @@ pub struct BufferRing {
 }
 
 impl BufferRing {
-    pub fn new(bgid: Bgid, entries: usize, buf_len: usize) -> io::Result<Self> {
-        if entries & (entries - 1) != 0 || buf_len == 0 || entries == 0 {
-            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    pub(crate) fn allocation_sizes(entries: usize, buf_len: usize) -> io::Result<(usize, usize)> {
+        if !entries.is_power_of_two() || entries > MAX_BUFFER_RING_ENTRIES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "read_buffer_pool_size must be a power of two from 1 to {MAX_BUFFER_RING_ENTRIES}"
+                ),
+            ));
         }
+        if buf_len == 0 || buf_len > u32::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "network_read_buffer_size must be between 1 and {} bytes",
+                    u32::MAX
+                ),
+            ));
+        }
+        let overflow = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Buffer-ring allocation size overflow",
+            )
+        };
+        let descriptors = entries
+            .checked_mul(std::mem::size_of::<types::BufRingEntry>())
+            .ok_or_else(overflow)?;
+        let payload = entries.checked_mul(buf_len).ok_or_else(overflow)?;
+        Ok((descriptors, payload))
+    }
 
-        let ring_mem_size = entries * std::mem::size_of::<types::BufRingEntry>();
+    pub fn new(bgid: Bgid, entries: usize, buf_len: usize) -> io::Result<Self> {
+        let (ring_mem_size, payload_size) = Self::allocation_sizes(entries, buf_len)?;
         let ring_memory = AnonymousMmap::new(ring_mem_size)?;
-        let buffer_memory = AnonymousMmap::new(entries * buf_len)?;
+        let buffer_memory = AnonymousMmap::new(payload_size)?;
 
         Ok(Self {
             bgid,
@@ -125,41 +155,20 @@ impl BufferRing {
         // Safety: The ring, represented by the ring_start and the ring_entries remains valid until
         // it is unregistered. The backing store is an AnonymousMmap which remains valid until it
         // is dropped which in this case, is when Self is dropped.
-        let res = unsafe {
+        unsafe {
             submitter.register_buf_ring_with_flags(
                 self.ring_memory.addr.as_ptr() as _,
                 self.entries as u16,
                 self.bgid,
                 0,
             )
-        };
-
-        if let Err(e) = res {
-            match e.raw_os_error() {
-                Some(libc::EINVAL) => {
-                    // using buf_ring requires kernel 5.19 or greater.
-                    return Err(io::Error::other(format!(
-                        "buf_ring.register returned {e}, most likely indicating this kernel is not 5.19+"
-                    )));
-                }
-                Some(libc::EEXIST) => {
-                    // Registering a duplicate bgid is not allowed. There is an `unregister`
-                    // operations that can remove the first, but care must be taken that there
-                    // are no outstanding operations that will still return a buffer from that
-                    // one.
-                    return Err(io::Error::other(format!(
-                        "buf_ring.register returned `{}`, indicating the attempted buffer group id {} was already registered",
-                        e, self.bgid
-                    )));
-                }
-                _ => {
-                    return Err(io::Error::other(format!(
-                        "buf_ring.register returned `{}` for group id {}",
-                        e, self.bgid
-                    )));
-                }
-            }
-        };
+        }
+        .inspect_err(|error| {
+            log::debug!(
+                "Buffer-ring registration failed for group {}: {error}",
+                self.bgid
+            );
+        })?;
 
         let mask = (self.entries - 1) as u16;
         unsafe {
@@ -181,7 +190,7 @@ impl BufferRing {
         }
         self.is_registerd = true;
 
-        res
+        Ok(())
     }
 
     pub fn return_bid(&mut self, bid: Bid) {
@@ -218,6 +227,21 @@ impl Drop for BufferRing {
     fn drop(&mut self) {
         if self.is_registerd && !std::thread::panicking() {
             panic!("Must unregister before dropping");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BufferRing;
+
+    #[test]
+    fn invalid_buffer_ring_sizes_return_errors_without_allocating() {
+        for (entries, length) in [(0, 16), (3, 16), (65536, 16), (16, 0), (16, usize::MAX)] {
+            let error = BufferRing::new(1, entries, length)
+                .err()
+                .expect("invalid buffer-ring sizes must be rejected");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
     }
 }

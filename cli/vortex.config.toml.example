@@ -42,6 +42,12 @@ cq_size = 4096
 # io-uring submission queue size
 sq_size = 4096
 
+# Warn when estimated ring storage exceeds the MEMLOCK budget; true rejects startup.
+memlock_strict = false
+
+# Extra budget above estimated ring storage, in percent (100 doubles the estimate).
+memlock_headroom_percent = 100
+
 # Minimum completion events to wait for
 completion_event_want = 32
 

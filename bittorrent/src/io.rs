@@ -138,8 +138,13 @@ pub struct Io<Q> {
 }
 
 impl<Q: SubmissionQueue> Io<Q> {
-    pub fn new(sq: BackloggedSubmissionQueue<Q>, config: &Config) -> Self {
-        Self {
+    pub fn new(sq: BackloggedSubmissionQueue<Q>, config: &Config) -> io::Result<Self> {
+        let read_ring = BufferRing::new(
+            1,
+            config.read_buffer_pool_size,
+            config.network_read_buffer_size,
+        )?;
+        Ok(Self {
             sq,
             events: SlotMap::with_capacity_and_key(config.cq_size as usize),
             write_pool: BufferPool::new(
@@ -147,15 +152,10 @@ impl<Q: SubmissionQueue> Io<Q> {
                 config.write_buffer_pool_size,
                 config.network_write_buffer_size,
             ),
-            read_ring: BufferRing::new(
-                1,
-                config.read_buffer_pool_size,
-                config.network_read_buffer_size,
-            )
-            .unwrap(),
+            read_ring,
             inflight_disk_ops: 0,
             queued_disk_operations: Vec::with_capacity(32),
-        }
+        })
     }
 
     /// Schedule a connect operation with an attached timeout. The socket stays
