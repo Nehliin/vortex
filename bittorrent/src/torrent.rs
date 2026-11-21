@@ -14,6 +14,7 @@ use crate::{
     event_loop::EventLoop,
     file_store::DiskOpType,
     peer_comm::{extended_protocol::MetadataProgress, peer_protocol::PeerId},
+    resource_limits,
 };
 use crate::{determine_ip::DeterminedIp, file_store::FileStore};
 use crate::{
@@ -33,10 +34,36 @@ use crate::TorrentMetadata;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Encountered IO issue: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     #[error("Peer provider disconnected")]
     PeerProviderDisconnect,
+    #[error(
+        "Too many open files for this process: {source}\n\
+         RLIMIT_NOFILE: soft {soft_limit}; hard {hard_limit}.\n{guidance}"
+    )]
+    FileDescriptorsExhausted {
+        #[source]
+        source: io::Error,
+        soft_limit: String,
+        hard_limit: String,
+        guidance: String,
+    },
+    #[error(
+        "The system-wide open-file table is full: {0}\n\
+         Close files or ask an administrator to check the system's fs.file-max limit."
+    )]
+    SystemFileDescriptorsExhausted(#[source] io::Error),
+    #[error("Could not read {resource}: {source}")]
+    LimitInspection {
+        resource: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Invalid torrent configuration: {0}")]
+    Configuration(String),
+    #[error("{0}")]
+    ResourceBudget(String),
 }
 
 pub const CQE_WAIT_TIME_NS: u32 = 150_000_000;
@@ -139,7 +166,10 @@ impl Torrent {
     /// the event loop happens via the mpsc command queue. Torrent events will be sent to the
     /// consumer of the `event_tx` spsc channel.
     ///
-    /// Returns [`Error::Io`] if the io_uring instance could not be created.
+    /// Returns [`Error::FileDescriptorsExhausted`] if descriptor inspection hits `EMFILE`.
+    /// Returns [`Error::ResourceBudget`] if the descriptor snapshot lacks room for
+    /// the ring, configured peers, and 32 spare descriptors. Inspection and I/O
+    /// errors preserve their original cause. This check does not reserve slots.
     /// Ring memory counts against `RLIMIT_MEMLOCK`, a budget shared by all of
     /// the user's processes, so a client running one ring per torrent can
     /// exhaust it and fail here while the system still has free memory.
@@ -149,6 +179,7 @@ impl Torrent {
         command_rc: Receiver<Command>,
         listener: TcpListener,
     ) -> Result<(), Error> {
+        resource_limits::check_file_descriptor_limit(self.state.config.max_connections)?;
         let ring: IoUring = IoUring::builder()
             .setup_single_issuer()
             .setup_clamp()
