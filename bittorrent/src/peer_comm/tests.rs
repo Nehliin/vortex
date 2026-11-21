@@ -55,6 +55,18 @@ impl SubmissionQueue for MockSubmissionQueue {
     }
 }
 
+#[test]
+fn io_initialization_returns_invalid_buffer_configuration() {
+    let config = torrent::Config {
+        read_buffer_pool_size: 0,
+        ..torrent::Config::default()
+    };
+    let error = Io::new(BackloggedSubmissionQueue::new(MockSubmissionQueue), &config)
+        .err()
+        .expect("invalid buffer configuration must be returned to the caller");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 #[track_caller]
 fn sent_and_marked_interested(peer: &PeerConnection) {
     assert!(peer.is_interesting);
@@ -4293,7 +4305,8 @@ fn optimistically_unchoked_disconnect_resets_timer() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         connections.disconnect(key, &mut io, &mut state_ref);
 
@@ -4340,7 +4353,8 @@ fn established_connection_slot_is_kept_until_close_completes() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         assert!(
             connections
@@ -4386,7 +4400,8 @@ fn only_peers_marked_for_disconnect_are_disconnected() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
 
@@ -4453,7 +4468,8 @@ fn disconnects_that_blame_the_peer_emit_bad_peer_event() {
             let mut io = Io::new(
                 BackloggedSubmissionQueue::new(MockSubmissionQueue),
                 &torrent::Config::default(),
-            );
+            )
+            .unwrap();
 
             connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
 
@@ -4486,7 +4502,8 @@ fn disconnects_that_dont_blame_the_peer_emit_no_event() {
             let mut io = Io::new(
                 BackloggedSubmissionQueue::new(MockSubmissionQueue),
                 &torrent::Config::default(),
-            );
+            )
+            .unwrap();
 
             connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
 
@@ -4527,7 +4544,8 @@ fn only_blameworthy_peers_of_a_mixed_batch_are_reported() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
 
@@ -4573,7 +4591,8 @@ fn bad_peer_is_disconnected_even_when_the_event_queue_is_full() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
 
@@ -4614,7 +4633,8 @@ fn disconnects_are_counted_per_reason() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         metrics::with_local_recorder(&recorder, || {
             connections.execute_pending_disconnects(&mut io, &mut state_ref, &mut event_tx);
@@ -4654,7 +4674,8 @@ fn pending_connection_slot_is_kept_until_close_completes() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         let peer_addr: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
         connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
@@ -4700,7 +4721,8 @@ fn completions_for_a_disconnected_pending_connection_are_ignored() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         let peer_addr: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
         connections.maybe_connect_to_peer(peer_addr.into(), &mut io);
@@ -4734,7 +4756,8 @@ fn rejected_incoming_connection_is_closed_without_being_tracked() {
     let mut io = Io::new(
         BackloggedSubmissionQueue::new(MockSubmissionQueue),
         &torrent::Config::default(),
-    );
+    )
+    .unwrap();
     // A cap of zero rejects every incoming connection
     let mut connections = ConnectionManager::new(PeerId::generate(), 0);
 
@@ -4763,7 +4786,8 @@ fn banned_peer_is_disconnected_and_kept_out() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         let banned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
         let conn_id = insert_established_at(&mut connections, SocketAddr::V4(banned));
@@ -4805,7 +4829,8 @@ fn incoming_connection_from_a_banned_peer_is_rejected() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         // The peer is banned by the address it listens on, while the connection
         // it opens to us comes from an ephemeral port that is different every time
@@ -4841,7 +4866,8 @@ fn banning_a_peer_leaves_other_connections_alone() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         // Both peers are connected to before either of them is banned
         let banned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
@@ -4902,7 +4928,8 @@ fn banning_a_peer_records_a_banned_disconnect() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         let banned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
         let conn_id = insert_established_at(&mut connections, SocketAddr::V4(banned));
@@ -4944,7 +4971,8 @@ fn unbanned_peer_can_be_connected_to_again() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         let peer: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
         let conn_id = insert_established_at(&mut connections, SocketAddr::V4(peer));
@@ -4990,7 +5018,8 @@ fn incoming_connection_from_an_unbanned_peer_is_accepted() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         // Accepts a connection from the peer, which comes from an ephemeral port
         // rather than the address the ban is keyed on
@@ -5070,7 +5099,8 @@ fn unbanning_a_peer_leaves_other_bans_in_place() {
         let mut io = Io::new(
             BackloggedSubmissionQueue::new(MockSubmissionQueue),
             &torrent::Config::default(),
-        );
+        )
+        .unwrap();
 
         let unbanned: SocketAddrV4 = "127.0.0.1:6881".parse().unwrap();
         let still_banned: SocketAddrV4 = "127.0.0.2:6881".parse().unwrap();
@@ -5130,7 +5160,8 @@ fn msgs_queued_after_handshake_with_pipelined(
     let mut io = Io::new(
         BackloggedSubmissionQueue::new(MockSubmissionQueue),
         &torrent::Config::default(),
-    );
+    )
+    .unwrap();
     let mut connections = ConnectionManager::new(PeerId::generate(), 128);
     let info_hash = download_state.info_hash();
 

@@ -384,8 +384,10 @@ impl<'scope, 'state: 'scope> EventLoop {
         // lambda to be able to catch errors an always unregistering the read ring
         rayon::in_place_scope(|scope| {
             let (submitter, sq, mut cq) = ring.split();
-            let mut io = Io::new(BackloggedSubmissionQueue::new(sq), state_ref.config);
-            io.read_ring.register(&submitter)?;
+            let mut io = Io::new(BackloggedSubmissionQueue::new(sq), state_ref.config)?;
+            io.read_ring
+                .register(&submitter)
+                .map_err(Error::ring_initialization)?;
             let mut last_tick = Instant::now();
 
             self.setup_and_mark_running(

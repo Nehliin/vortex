@@ -144,3 +144,20 @@ pub fn resolve_paths(config: &VortexConfig) -> ResolvedPaths {
             .unwrap_or_else(get_default_dht_cache_path),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::VortexConfig;
+
+    #[test]
+    fn older_configs_default_to_advisory_memlock_checks() {
+        let config: VortexConfig = toml::from_str("[bittorrent]\nmax_connections = 16").unwrap();
+        assert!(!config.bittorrent.memlock_strict);
+        assert_eq!(config.bittorrent.memlock_headroom_percent, 100);
+        let config: VortexConfig =
+            toml::from_str("[bittorrent]\nmemlock_strict = true\nmemlock_headroom_percent = 25")
+                .unwrap();
+        assert!(config.bittorrent.memlock_strict);
+        assert_eq!(config.bittorrent.memlock_headroom_percent, 25);
+    }
+}
