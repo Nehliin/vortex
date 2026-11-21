@@ -14,6 +14,7 @@ use crate::{
     event_loop::EventLoop,
     file_store::DiskOpType,
     peer_comm::{extended_protocol::MetadataProgress, peer_protocol::PeerId},
+    resource_limits,
 };
 use crate::{determine_ip::DeterminedIp, file_store::FileStore};
 use crate::{
@@ -33,13 +34,58 @@ use crate::TorrentMetadata;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Encountered IO issue: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error(
+        "Could not initialize torrent I/O: {0}\n\
+         Locked-memory limits (RLIMIT_MEMLOCK) or memory pressure may be responsible.\n\
+         Check `ulimit -Sl` and `ulimit -Hl`, or try smaller queues/buffer rings and fewer torrents."
+    )]
+    RingMemory(#[source] io::Error),
     #[error("Peer provider disconnected")]
     PeerProviderDisconnect,
+    #[error(
+        "Too many open files for this process: {source}\n\
+         RLIMIT_NOFILE: soft {soft_limit}; hard {hard_limit}.\n{guidance}"
+    )]
+    FileDescriptorsExhausted {
+        #[source]
+        source: io::Error,
+        soft_limit: String,
+        hard_limit: String,
+        guidance: String,
+    },
+    #[error(
+        "The system-wide open-file table is full: {0}\n\
+         Close files or ask an administrator to check the system's fs.file-max limit."
+    )]
+    SystemFileDescriptorsExhausted(#[source] io::Error),
+    #[error("Could not read {resource}: {source}")]
+    LimitInspection {
+        resource: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Invalid torrent configuration: {0}")]
+    Configuration(String),
+    #[error("{0}")]
+    ResourceBudget(String),
+}
+
+impl Error {
+    pub(crate) fn ring_initialization(error: io::Error) -> Self {
+        match error.raw_os_error() {
+            Some(libc::ENOMEM) => Self::RingMemory(error),
+            _ => Self::Io(error),
+        }
+    }
 }
 
 pub const CQE_WAIT_TIME_NS: u32 = 150_000_000;
+
+// Linux's IORING_MAX_ENTRIES and IORING_MAX_CQ_ENTRIES with IORING_SETUP_CLAMP.
+const MAX_SQ_ENTRIES: u32 = 32_768;
+const MAX_CQ_ENTRIES: u32 = 65_536;
 
 /// Configuration settings for a given torrent
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
@@ -73,6 +119,10 @@ pub struct Config {
     pub cq_size: u32,
     /// Controls the size of the io_uring submission queue
     pub sq_size: u32,
+    /// Reject an insufficient estimated MEMLOCK budget instead of logging a warning.
+    pub memlock_strict: bool,
+    /// Extra ring-storage budget as a percentage of the estimate. Defaults to 100%.
+    pub memlock_headroom_percent: u32,
     /// The event loop will wait for at least these amont of completion events
     /// before it starts processing them. If the target isn't reached it will wait for
     /// at most [ `CQE_WAIT_TIME_NS` ] nanoseconds before processing the ones currently in the completion queue.
@@ -98,12 +148,82 @@ impl Default for Config {
             seeding_piece_quota: 20,
             cq_size: 4096,
             sq_size: 4096,
+            memlock_strict: false,
+            memlock_headroom_percent: 100,
             completion_event_want: 32,
             network_read_buffer_size: (SUBPIECE_SIZE * 2) as usize,
             read_buffer_pool_size: 512,
             network_write_buffer_size: (SUBPIECE_SIZE + 4096) as usize,
             write_buffer_pool_size: 128,
         }
+    }
+}
+
+impl Config {
+    pub(crate) fn validate_ring_config(mut self) -> Result<Self, Error> {
+        if self.sq_size == 0 || self.cq_size == 0 {
+            return Err(Error::Configuration(
+                "sq_size and cq_size must be nonzero".into(),
+            ));
+        }
+        self.sq_size = self.sq_size.min(MAX_SQ_ENTRIES).next_power_of_two();
+        self.cq_size = self.cq_size.min(MAX_CQ_ENTRIES).next_power_of_two();
+        if self.cq_size < self.sq_size {
+            return Err(Error::Configuration(
+                "cq_size must be at least sq_size after clamping and rounding".into(),
+            ));
+        }
+        crate::buf_ring::BufferRing::allocation_sizes(
+            self.read_buffer_pool_size,
+            self.network_read_buffer_size,
+        )
+        .map_err(|error| Error::Configuration(error.to_string()))?;
+        Ok(self)
+    }
+
+    /// Estimate ring storage, not the kernel's version-dependent MEMLOCK charge.
+    pub(crate) fn estimated_ring_storage_bytes(&self, page_size: u128) -> Result<u128, Error> {
+        if !page_size.is_power_of_two() {
+            return Err(Error::Configuration(
+                "page size must be a nonzero power of two".into(),
+            ));
+        }
+        let config = self.validate_ring_config()?;
+        let sq_entries = u128::from(config.sq_size);
+        let cq_entries = u128::from(config.cq_size);
+        let overflow = || Error::Configuration("Ring storage estimate overflow".into());
+        let page_round = |bytes: u128| {
+            bytes
+                .div_ceil(page_size)
+                .checked_mul(page_size)
+                .ok_or_else(overflow)
+        };
+
+        let sqes = page_round(
+            sq_entries
+                .checked_mul(std::mem::size_of::<io_uring::squeue::Entry>() as u128)
+                .ok_or_else(overflow)?,
+        )?;
+        let indices = sq_entries
+            .checked_mul(std::mem::size_of::<u32>() as u128)
+            .ok_or_else(overflow)?;
+        // Budget one page for ring headers and alignment.
+        let rings = page_round(
+            cq_entries
+                .checked_mul(std::mem::size_of::<io_uring::cqueue::Entry>() as u128)
+                .and_then(|bytes| bytes.checked_add(indices))
+                .and_then(|bytes| bytes.checked_add(page_size))
+                .ok_or_else(overflow)?,
+        )?;
+        // Only the descriptor ring is registered; ordinary payload storage is separate.
+        let buffers = page_round(
+            (config.read_buffer_pool_size as u128)
+                .checked_mul(std::mem::size_of::<io_uring::types::BufRingEntry>() as u128)
+                .ok_or_else(overflow)?,
+        )?;
+        sqes.checked_add(rings)
+            .and_then(|bytes| bytes.checked_add(buffers))
+            .ok_or_else(overflow)
     }
 }
 
@@ -139,23 +259,32 @@ impl Torrent {
     /// the event loop happens via the mpsc command queue. Torrent events will be sent to the
     /// consumer of the `event_tx` spsc channel.
     ///
-    /// Returns [`Error::Io`] if the io_uring instance could not be created.
-    /// Ring memory counts against `RLIMIT_MEMLOCK`, a budget shared by all of
-    /// the user's processes, so a client running one ring per torrent can
-    /// exhaust it and fail here while the system still has free memory.
+    /// Returns [`Error::FileDescriptorsExhausted`] if descriptor inspection hits `EMFILE`.
+    /// Returns [`Error::ResourceBudget`] if the descriptor snapshot lacks room for
+    /// the ring, configured peers, and 32 spare descriptors. Inspection and I/O
+    /// errors preserve their original cause. This check does not reserve slots.
+    /// MEMLOCK estimates are logged as warnings by default. Set `memlock_strict`
+    /// to reject an insufficient estimated budget, including configured headroom.
+    /// Returns [`Error::RingMemory`] on an io_uring setup or buffer registration
+    /// `ENOMEM`, preserving the original I/O error. Passing preflight does not reserve
+    /// shared-user capacity or guarantee allocation under kernel memory pressure.
     pub fn start(
         &mut self,
         event_tx: Producer<TorrentEvent>,
         command_rc: Receiver<Command>,
         listener: TcpListener,
     ) -> Result<(), Error> {
+        self.state.config = self.state.config.validate_ring_config()?;
+        resource_limits::check_file_descriptor_limit(self.state.config.max_connections)?;
+        resource_limits::check_memlock_limit(&self.state.config)?;
         let ring: IoUring = IoUring::builder()
             .setup_single_issuer()
             .setup_clamp()
             .setup_cqsize(self.state.config.cq_size)
             .setup_defer_taskrun()
             .setup_coop_taskrun()
-            .build(self.state.config.sq_size)?;
+            .build(self.state.config.sq_size)
+            .map_err(Error::ring_initialization)?;
         let mut event_loop = EventLoop::new();
         event_loop.run(ring, &mut self.state, event_tx, command_rc, listener)
     }
@@ -865,8 +994,116 @@ impl<'e_iter, 'state: 'e_iter> StateRef<'state> {
 
 #[cfg(test)]
 mod tests {
-    use super::TorrentProgress;
+    use super::{Config, Error, TorrentProgress};
     use bitvec::prelude::{Msb0, bitbox};
+    use std::error::Error as _;
+
+    #[test]
+    fn ring_initialization_errors_preserve_errno_and_classify_memory_failures() {
+        for (errno, memory_failure) in [(libc::ENOMEM, true), (libc::EINVAL, false)] {
+            let error = Error::ring_initialization(std::io::Error::from_raw_os_error(errno));
+            let source = error
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
+            assert_eq!(source.raw_os_error(), Some(errno));
+            assert_eq!(error.to_string().contains("RLIMIT_MEMLOCK"), memory_failure);
+        }
+    }
+
+    #[test]
+    fn ring_storage_estimate_accounts_for_queue_and_buffer_pages() {
+        for (sq_size, cq_size, buffers, page_size, expected) in [
+            (64, 64, 512, 4096, 20480),
+            (4096, 4096, 512, 4096, 356352),
+            (65, 129, 512, 4096, 28672),
+            (64, 64, 4096, 4096, 77824),
+            (4096, 4096, 512, 65536, 524288),
+            (u32::MAX, u32::MAX, 512, 4096, 3289088),
+        ] {
+            let config = Config {
+                sq_size,
+                cq_size,
+                read_buffer_pool_size: buffers,
+                ..Config::default()
+            };
+            assert_eq!(
+                config.estimated_ring_storage_bytes(page_size).unwrap(),
+                expected
+            );
+        }
+        let config = Config {
+            read_buffer_pool_size: usize::MAX,
+            ..Config::default()
+        };
+        assert!(config.estimated_ring_storage_bytes(4096).is_err());
+        let payload = Config {
+            network_read_buffer_size: 1_048_576,
+            ..Config::default()
+        };
+        assert_eq!(payload.estimated_ring_storage_bytes(4096).unwrap(), 356352);
+    }
+
+    #[test]
+    fn invalid_ring_configuration_and_estimate_overflow_are_errors() {
+        for config in [
+            Config {
+                sq_size: 0,
+                ..Config::default()
+            },
+            Config {
+                cq_size: 0,
+                ..Config::default()
+            },
+            Config {
+                sq_size: 129,
+                cq_size: 128,
+                ..Config::default()
+            },
+            Config {
+                read_buffer_pool_size: 0,
+                ..Config::default()
+            },
+            Config {
+                read_buffer_pool_size: 3,
+                ..Config::default()
+            },
+            Config {
+                read_buffer_pool_size: 65536,
+                ..Config::default()
+            },
+            Config {
+                network_read_buffer_size: 0,
+                ..Config::default()
+            },
+        ] {
+            assert!(config.estimated_ring_storage_bytes(4096).is_err());
+        }
+        for page_size in [0, 3, 1 << 126] {
+            assert!(
+                Config::default()
+                    .estimated_ring_storage_bytes(page_size)
+                    .is_err()
+            );
+        }
+        let config = Config {
+            sq_size: 100,
+            cq_size: 90,
+            ..Config::default()
+        }
+        .validate_ring_config()
+        .unwrap();
+        assert_eq!((config.sq_size, config.cq_size), (128, 128));
+        let config = Config {
+            sq_size: u32::MAX,
+            cq_size: u32::MAX,
+            ..Config::default()
+        }
+        .validate_ring_config()
+        .unwrap();
+        assert_eq!((config.sq_size, config.cq_size), (32768, 65536));
+    }
 
     #[test]
     fn progress_get_is_msb0_and_bounds_checked() {
