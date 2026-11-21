@@ -55,6 +55,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - uses: taiki-e/install-action@just
+      - name: Install syscall fault-injection test dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace
       - run: cargo fetch --target ${{ matrix.target }}
       - name: test 
         run: just test

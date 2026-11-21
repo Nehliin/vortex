@@ -11,7 +11,7 @@ use std::{
 };
 
 use color_eyre::eyre::Context;
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use heapless::{HistoryBuf, spsc::Consumer};
 use ratatui::{
     DefaultTerminal, Frame,
@@ -115,6 +115,8 @@ pub struct AppSetup<'queue> {
     pub cmd_tx: SyncSender<Command>,
     /// Event receiver from the torrent event loop
     pub event_rc: Consumer<'queue, TorrentEvent>,
+    /// Completion or failure of the torrent worker
+    pub torrent_result_rc: Receiver<color_eyre::Result<()>>,
     /// Signal sender to shutdown other threads
     pub shutdown_signal_tx: Sender<()>,
     /// Torrent metadata (available after metadata download)
@@ -129,7 +131,9 @@ pub struct AppSetup<'queue> {
     pub our_id: PeerId,
 }
 
-impl<'queue, F: FnOnce(State) -> color_eyre::Result<()>> VortexApp<'queue, F> {
+impl<'queue, F: FnOnce(State, &Consumer<'queue, TorrentEvent>) -> color_eyre::Result<()>>
+    VortexApp<'queue, F>
+{
     pub fn new(
         setup: AppSetup<'queue>,
         mut app_state: AppState,
@@ -137,7 +141,7 @@ impl<'queue, F: FnOnce(State) -> color_eyre::Result<()>> VortexApp<'queue, F> {
     ) -> color_eyre::Result<Self> {
         let spawn_torrent_threads = if let AppState::SelectedTorrent { state } = app_state {
             app_state = Self::started_state(&state, &setup.metadata);
-            spawn_torrent_threads(state)?;
+            spawn_torrent_threads(state, &setup.event_rc)?;
             None
         } else {
             Some(spawn_torrent_threads)
@@ -170,6 +174,10 @@ impl<'queue, F: FnOnce(State) -> color_eyre::Result<()>> VortexApp<'queue, F> {
     }
 
     pub fn handle_events(&mut self) -> color_eyre::Result<()> {
+        if let Ok(result) = self.setup.torrent_result_rc.try_recv() {
+            self.shutdown();
+            return result.wrap_err("Torrent worker failed");
+        }
         match &mut self.state {
             AppState::Paused {
                 last_simulated_update,
@@ -193,7 +201,7 @@ impl<'queue, F: FnOnce(State) -> color_eyre::Result<()>> VortexApp<'queue, F> {
                 else {
                     unreachable!();
                 };
-                spawn_torrent_threads(state)?;
+                spawn_torrent_threads(state, &self.setup.event_rc)?;
             }
             // No torrent is running while the menu is up, so there are no torrent
             // events to drain and the keys mean something else entirely.
