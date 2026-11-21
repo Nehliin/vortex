@@ -20,7 +20,6 @@ skip = [
     { name = "getrandom", version = "*" },
     { name = "cpufeatures", version = "*" },
     { name = "r-efi", version = "*" },
-    { name = "hashbrown", version = "*" },
     { name = "lru", version = "*" },
     { name = "syn", version = "*" },
     # thanks to lava-torrent
@@ -29,6 +28,8 @@ skip = [
 
 [advisories]
 unmaintained = "workspace"
+# Humantime is unmaintained
+ignore = ["RUSTSEC-2026-0542"]
 
 [licenses]
 version = 2
