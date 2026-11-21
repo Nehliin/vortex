@@ -85,9 +85,10 @@ fn dht_thread(
         let all_peers = dht_client.get_peers(info_hash_id);
         for peers in all_peers {
             log::info!("Got {} peers", peers.len());
-            cmd_tx
-                .send(Command::ConnectToPeers(peers))
-                .expect("Command channel to not be full");
+            if cmd_tx.send(Command::ConnectToPeers(peers)).is_err() {
+                // The torrent worker can stop while a DHT query is still running.
+                break;
+            }
         }
     };
 
@@ -597,6 +598,35 @@ impl<F> Widget for &mut VortexApp<'_, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dht_shutdown_before_initial_peers() {
+        let testnet = mainline::Testnet::builder(2).build().unwrap();
+        let info_hash = Id::random();
+        testnet.nodes[0]
+            .announce_peer(info_hash, Some(6881))
+            .unwrap();
+        let cache_path = std::env::temp_dir().join(format!("vortex-dht-shutdown-{info_hash}"));
+        std::fs::write(&cache_path, testnet.bootstrap.join("\n")).unwrap();
+
+        let (cmd_tx, cmd_rc) = std::sync::mpsc::sync_channel(256);
+        let (shutdown_tx, shutdown_rc) = bounded(1);
+        // The torrent worker has already stopped when DHT results arrive.
+        drop(cmd_rc);
+        shutdown_tx.send(()).unwrap();
+
+        let result = dht_thread(
+            info_hash,
+            6882,
+            cmd_tx,
+            shutdown_rc,
+            cache_path.clone(),
+            false,
+            Arc::new(AtomicBool::new(false)),
+        );
+        std::fs::remove_file(cache_path).unwrap();
+        result.expect("DHT should shut down cleanly after the torrent worker stops");
+    }
 
     #[test]
     fn test_parse_valid_hex_magnet() {
